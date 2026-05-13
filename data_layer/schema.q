@@ -89,7 +89,18 @@ pillarMetrics:(
 )
 
 // ---------------------------------------------------------------------------
-// 4. Derived views
+// 4. Fund metadata  — tracks when each ticker's fundamentals were last fetched
+//    Written by Python (data/fund_meta.csv) and loaded here for DB querying.
+//    Used by the scheduler to prioritise the stalest tickers each day.
+// ---------------------------------------------------------------------------
+fundMeta:(
+  [symbol:`symbol$()]
+  market:`symbol$();
+  lastUpdated:`date$()
+)
+
+// ---------------------------------------------------------------------------
+// 5. Derived views
 // ---------------------------------------------------------------------------
 
 netDebtView:{

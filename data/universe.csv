@@ -1,0 +1,55 @@
+# JARVIS Stock Universe
+#
+# IDENTIFIER GUIDE
+# ────────────────
+# symbol       Primary key used throughout the codebase (FMP + yfinance format).
+#                US   → plain exchange ticker           e.g.  AAPL, MSFT, BRK-B
+#                India → Yahoo Finance .NS suffix (NSE)  e.g.  RELIANCE.NS, TCS.NS
+#              The .NS suffix is essentially the RIC convention Yahoo adopted from Reuters.
+#
+# isin         International Securities Identification Number (12 chars).
+#                US    → starts with "US", chars 3-11 = CUSIP, char 12 = check digit
+#                India → starts with "IN"; no CUSIP equivalent; NSIN assigned by NSDL
+#
+# cusip        Committee on Uniform Securities Identification Procedures (9 chars).
+#                Used in US and Canada only.  Not applicable for Indian securities (blank).
+#                Relationship to ISIN:  US ISIN = "US" + CUSIP + check_digit
+#
+# ric          Reuters Instrument Code.
+#                US NASDAQ → ticker.O    (e.g. AAPL.O)
+#                US NYSE   → ticker.N    (e.g. JPM.N)
+#                India NSE → short_ticker.NS  (often abbreviated vs Yahoo, e.g. RELI.NS)
+#              Note: yfinance uses .NS too, but Yahoo's symbol is the FULL NSE ticker
+#              (e.g. RELIANCE.NS) while the RIC uses a shortened form (RELI.NS).
+#
+# bbg_code     Bloomberg ticker format.
+#                US    → "TICKER US Equity"     (e.g. AAPL US Equity)
+#                India → "SHORTNAME IN Equity"  (e.g. RIL IN Equity for Reliance)
+#
+# sector       GICS sector classification
+#
+# NOTE: ISIN/CUSIP values below are correct to the best of knowledge but should be
+# verified against an authoritative source (ANNA, NSDL, or your prime broker)
+# before use in production settlement or compliance workflows.
+#
+symbol,name,market,exchange,isin,cusip,ric,bbg_code,sector
+AAPL,Apple Inc,US,NASDAQ,US0378331005,037833100,AAPL.O,AAPL US Equity,Information Technology
+MSFT,Microsoft Corp,US,NASDAQ,US5949181045,594918104,MSFT.O,MSFT US Equity,Information Technology
+NVDA,NVIDIA Corp,US,NASDAQ,US67066G1040,67066G104,NVDA.O,NVDA US Equity,Information Technology
+AMZN,Amazon.com Inc,US,NASDAQ,US0231351067,023135106,AMZN.O,AMZN US Equity,Consumer Discretionary
+GOOGL,Alphabet Inc Class A,US,NASDAQ,US02079K3059,02079K305,GOOGL.O,GOOGL US Equity,Communication Services
+META,Meta Platforms Inc,US,NASDAQ,US30303M1027,30303M102,META.O,META US Equity,Communication Services
+JPM,JPMorgan Chase & Co,US,NYSE,US46625H1005,46625H100,JPM.N,JPM US Equity,Financials
+XOM,Exxon Mobil Corp,US,NYSE,US30231G1022,30231G102,XOM.N,XOM US Equity,Energy
+JNJ,Johnson & Johnson,US,NYSE,US4781601046,478160104,JNJ.N,JNJ US Equity,Health Care
+V,Visa Inc Class A,US,NYSE,US92826C8394,92826C839,V.N,V US Equity,Financials
+RELIANCE.NS,Reliance Industries Ltd,IN,NSE,INE002A01018,,RELI.NS,RIL IN Equity,Energy
+TCS.NS,Tata Consultancy Services Ltd,IN,NSE,INE467B01029,,TCS.NS,TCS IN Equity,Information Technology
+HDFCBANK.NS,HDFC Bank Ltd,IN,NSE,INE040A01034,,HDBK.NS,HDFCB IN Equity,Financials
+INFY.NS,Infosys Ltd,IN,NSE,INE009A01021,,INFY.NS,INFO IN Equity,Information Technology
+ICICIBANK.NS,ICICI Bank Ltd,IN,NSE,INE090A01021,,ICBK.NS,ICICIBC IN Equity,Financials
+ITC.NS,ITC Ltd,IN,NSE,INE154A01025,,ITC.NS,ITC IN Equity,Consumer Staples
+WIPRO.NS,Wipro Ltd,IN,NSE,INE075A01022,,WIPR.NS,WPRO IN Equity,Information Technology
+AXISBANK.NS,Axis Bank Ltd,IN,NSE,INE238A01034,,AXBK.NS,AXSB IN Equity,Financials
+MARUTI.NS,Maruti Suzuki India Ltd,IN,NSE,INE585B01010,,MRTI.NS,MSIL IN Equity,Consumer Discretionary
+BAJFINANCE.NS,Bajaj Finance Ltd,IN,NSE,INE296A01024,,BJFN.NS,BAF IN Equity,Financials

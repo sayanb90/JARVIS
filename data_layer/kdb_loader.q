@@ -226,6 +226,23 @@ loadRatios:{[]
   show "  total → ", string[count combined], " rows"
  }
 
+loadFundMeta:{[]
+  path: hsym `$":data/fund_meta.csv";
+  $[()~key path;
+    show "  [SKIP] fund_meta.csv not found — run fundamentals job first";
+    [
+      show "=== fundMeta ===";
+      // Columns: symbol, market, last_updated  (types: S S D)
+      t: ("SSD"; enlist ",") 0: path;
+      t: update lastUpdated:`date$lastUpdated from t;
+      dir: ` sv (DB; `fundamentals/fundMeta/);
+      ensureDir dir;
+      (` sv dir, `.) set .Q.en[DB] t;
+      show "  fundMeta → ", string[count t], " rows"
+    ]
+  ]
+ }
+
 loadPillarMetrics:{[]
   show "=== pillarMetrics ===";
   all: ();
@@ -376,6 +393,7 @@ loadAll:{[]
   loadCashFlow[];
   loadRatios[];
   loadPillarMetrics[];
+  loadFundMeta[];
   loadAllOhlc[];
   .Q.dpft[DB; `ohlc; `date; `symbol];
   show "=== Load complete. Run: \\l db ==="
@@ -417,12 +435,16 @@ $[`mode in key .z.x;
 ; `load in key .z.x;
   // -load <table>  →  selective full reload
   [target: .z.x`load;
-   $[target~"ohlc";    loadAllOhlc[];
-     target~"income";  loadIncomeStatement[];
-     target~"balance"; loadBalanceSheet[];
-     target~"cashflow";loadCashFlow[];
-     target~"ratios";  loadRatios[];
-     target~"pillars"; loadPillarMetrics[];
+   $[target~"ohlc";         loadAllOhlc[];
+     target~"income";       loadIncomeStatement[];
+     target~"balance";      loadBalanceSheet[];
+     target~"cashflow";     loadCashFlow[];
+     target~"ratios";       loadRatios[];
+     target~"pillars";      loadPillarMetrics[];
+     target~"fundmeta";     loadFundMeta[];
+     target~"fundamentals"; [loadIncomeStatement[];loadBalanceSheet[];
+                              loadCashFlow[];loadRatios[];
+                              loadPillarMetrics[];loadFundMeta[]];
      show "Unknown target: ", target]
   ]
 ; // default: full load everything

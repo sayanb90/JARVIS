@@ -79,9 +79,15 @@ RATE_LIMIT_DELAY = float(os.getenv("FMP_RATE_LIMIT_DELAY", "0.5"))
 MAX_RETRIES      = 3
 RETRY_BACKOFF    = 2.0
 
-LOG_DIR  = Path("logs")
-DATA_DIR = Path("data")
-FUND_DIR = DATA_DIR / "fundamentals"
+LOG_DIR        = Path("logs")
+DATA_DIR       = Path("data")
+FUND_DIR       = DATA_DIR / "fundamentals"
+UNIVERSE_CSV   = DATA_DIR / "universe.csv"
+FUND_META_CSV  = DATA_DIR / "fund_meta.csv"
+
+# How many FMP calls to budget per day on the free tier (250 limit).
+# Each ticker costs 4 calls (income + balance + cashflow + ratios).
+FMP_DAILY_BUDGET = int(os.getenv("FMP_DAILY_BUDGET", "248"))  # leave 2 spare
 
 logging.basicConfig(
     level=logging.INFO,
@@ -430,6 +436,142 @@ def _write_csv(path: Path, headers: list[str], rows: Iterator) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fund-meta: tracks when each ticker's fundamentals were last fetched.
+#
+# Stored in data/fund_meta.csv — a plain CSV readable by Python without
+# needing a running KDB+ process.  Also loaded into the fundMeta KDB+ table
+# by kdb_loader.q for in-database querying.
+#
+# Format: symbol, market, last_updated  (date as YYYY.MM.DD for kdb+ compat)
+# ---------------------------------------------------------------------------
+
+def read_fund_meta() -> dict[str, date]:
+    """
+    Return {symbol: last_updated_date} from data/fund_meta.csv.
+    Symbols absent from the file are treated as never updated (date = epoch).
+    """
+    if not FUND_META_CSV.exists():
+        return {}
+    result: dict[str, date] = {}
+    with FUND_META_CSV.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(row for row in f if not row.startswith("#"))
+        for rec in reader:
+            raw = rec.get("last_updated", "").strip()
+            try:
+                # Accept both YYYY.MM.DD (kdb+) and YYYY-MM-DD (ISO)
+                dt = date.fromisoformat(raw.replace(".", "-"))
+                result[rec["symbol"].strip()] = dt
+            except (ValueError, KeyError):
+                pass
+    return result
+
+
+def write_fund_meta(symbols: list[str], market: str) -> None:
+    """
+    Update data/fund_meta.csv — set last_updated = today for `symbols`.
+    Existing entries for other symbols are preserved.
+    """
+    existing = read_fund_meta()
+    today = date.today()
+    for sym in symbols:
+        existing[sym] = today
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Build full table: we need market for each symbol; read universe for that
+    universe_market = _load_universe_market_map()
+
+    with FUND_META_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["symbol", "market", "last_updated"])
+        for sym, dt in sorted(existing.items()):
+            mkt = universe_market.get(sym, market)  # fallback to passed market
+            writer.writerow([sym, mkt, dt.strftime("%Y.%m.%d")])
+
+    log.info("fund_meta.csv updated: %d total entries (%d refreshed today)",
+             len(existing), len(symbols))
+
+
+def _load_universe_market_map() -> dict[str, str]:
+    """Return {symbol: market} from data/universe.csv, or empty dict if missing."""
+    if not UNIVERSE_CSV.exists():
+        return {}
+    result: dict[str, str] = {}
+    with UNIVERSE_CSV.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(row for row in f if not row.startswith("#"))
+        for rec in reader:
+            sym = rec.get("symbol", "").strip()
+            mkt = rec.get("market", "").strip()
+            if sym and mkt:
+                result[sym] = mkt
+    return result
+
+
+def read_universe(market: str | None = None) -> list[dict]:
+    """
+    Read data/universe.csv, optionally filtered by market ("IN", "US").
+    Returns list of dicts with keys: symbol, name, market, exchange, isin, ...
+    Falls back to NIFTY_50 / _SP500_FALLBACK if the file doesn't exist.
+    """
+    if not UNIVERSE_CSV.exists():
+        log.warning("universe.csv not found — falling back to built-in lists")
+        rows = []
+        if market in (None, "IN"):
+            rows += [{"symbol": s, "market": "IN"} for s in NIFTY_50]
+        if market in (None, "US"):
+            rows += [{"symbol": s, "market": "US"} for s in _SP500_FALLBACK]
+        return rows
+
+    rows = []
+    with UNIVERSE_CSV.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(row for row in f if not row.startswith("#"))
+        for rec in reader:
+            if market is None or rec.get("market", "").strip() == market:
+                rows.append({k: v.strip() for k, v in rec.items()})
+    return rows
+
+
+def get_stale_tickers(
+    market: str | None = None,
+    budget: int = FMP_DAILY_BUDGET,
+    calls_per_ticker: int = 4,
+) -> list[dict]:
+    """
+    Return the stalest tickers from universe.csv that fit within today's FMP
+    call budget, ordered oldest-last-updated first.
+
+    Tickers absent from fund_meta.csv (never fetched) are treated as epoch
+    date and always appear at the top of the list.
+
+    Returns list of dicts: [{symbol, market, last_updated}, ...]
+    """
+    max_tickers = budget // calls_per_ticker
+    universe = read_universe(market)
+    fund_meta = read_fund_meta()
+
+    epoch = date(1970, 1, 1)
+    enriched = []
+    for row in universe:
+        sym = row["symbol"]
+        enriched.append({
+            "symbol":       sym,
+            "market":       row.get("market", ""),
+            "last_updated": fund_meta.get(sym, epoch),
+        })
+
+    enriched.sort(key=lambda r: r["last_updated"])
+    selected = enriched[:max_tickers]
+
+    if selected:
+        log.info("Stale-ticker selection: %d tickers chosen (budget=%d calls, %d/ticker)",
+                 len(selected), budget, calls_per_ticker)
+        log.info("  oldest: %s (last updated %s)",
+                 selected[0]["symbol"], selected[0]["last_updated"])
+        log.info("  newest in batch: %s (last updated %s)",
+                 selected[-1]["symbol"], selected[-1]["last_updated"])
+    return selected
+
+
+# ---------------------------------------------------------------------------
 # Core run function — fundamentals only, no OHLC
 # ---------------------------------------------------------------------------
 def _resolve_universe(market: str, api_key: str, dry_run: bool,
@@ -509,6 +651,8 @@ def run(
     all_pillars:   list[PillarMetrics] = []
 
     total = len(universe)
+    fetched_ok: list[str] = []  # symbols successfully fetched (for fund_meta update)
+
     for idx, ticker in enumerate(universe, 1):
         log.info("[%d/%d] %s [%s]", idx, total, ticker, market)
         try:
@@ -527,10 +671,13 @@ def run(
             ticker, market,
         )
         all_pillars.append(pillars)
+        fetched_ok.append(ticker)
 
     write_fundamentals(all_income, all_balance, all_cash_flow, all_ratios, market)
     write_pillar_metrics(all_pillars, market)
-    log.info("Done [%s]. %d tickers | %d income rows", market, total, len(all_income))
+    write_fund_meta(fetched_ok, market)  # stamp last_updated for successfully fetched tickers
+    log.info("Done [%s]. %d tickers | %d income rows | fund_meta updated",
+             market, total, len(all_income))
 
 
 # ---------------------------------------------------------------------------
