@@ -108,15 +108,15 @@ equityRatioView:{
 // 5. Pillar scoring function
 //    scoreTicker[sym; lastPrice]  →  integer 0–8
 //
-//    Pillar thresholds:
-//      1. P/E    < 22.5   (normalised 5y earnings)
-//      2. P/B    < 1.5    (price / book)
-//      3. Buybacks        (shares declining over period)
-//      4. Low Debt        (longTermDebt / totalEquity < 0.5)
-//      5. Current Ratio   (placeholder — needs current assets data)
-//      6. Revenue Growth  (latest > prior year)
-//      7. ROIC    > 12%
-//      8. P/FCF   < 22.5  (normalised 5y FCF)
+//    The 8 pillars (all data sourced from FMP via fmp_client.py):
+//      1. 5-yr avg P/E    < 22.5   mktCap / avgNetIncome5y
+//      2. ROIC            > 9%     latestRoic (returnOnCapitalEmployed from FMP ratios)
+//      3. 5-yr Revenue Growth      latest revenue > earliest in incomeStatement
+//      4. 5-yr Net Income Growth   latest netIncome > earliest in incomeStatement
+//      5. Shares Decrease          sharesOutstanding falling over period (ratios table)
+//      6. LT Debt / avg FCF < 5    latestLongTermDebt / avgFcf5y  (balanceSheet + cashFlow)
+//      7. 5-yr FCF Growth          latest freeCashFlow > earliest in cashFlow
+//      8. 5-yr avg P/FCF  < 20     mktCap / avgFcf5y
 // ---------------------------------------------------------------------------
 scoreTicker:{[sym; lastPrice]
   m: first select from pillarMetrics where symbol=sym;
@@ -125,31 +125,50 @@ scoreTicker:{[sym; lastPrice]
   shares: m`latestSharesOutstanding;
   mktCap: lastPrice * shares;
 
-  peRatio:   $[m[`avgNetIncome5y]>0; mktCap % m`avgNetIncome5y; 0w];
-  pfcfRatio: $[m[`avgFcf5y]>0;      mktCap % m`avgFcf5y;       0w];
-  pbRatio:   $[m[`latestTotalEquity]>0; mktCap % m`latestTotalEquity; 0w];
-  debtRatio: $[m[`latestTotalEquity]>0;
-               m[`latestLongTermDebt] % m`latestTotalEquity; 0w];
+  // Pillar 1: 5-yr avg P/E < 22.5
+  peRatio: $[m[`avgNetIncome5y]>0; mktCap % m`avgNetIncome5y; 0w];
 
-  shareRows: select sharesOutstanding from ratios where symbol=sym;
-  buybackPass: $[1<count shareRows;
-    last[shareRows`sharesOutstanding] < first[shareRows`sharesOutstanding];
-    0b];
+  // Pillar 8: 5-yr avg P/FCF < 20
+  pfcfRatio: $[m[`avgFcf5y]>0; mktCap % m`avgFcf5y; 0w];
 
+  // Pillar 3: 5-yr revenue growth  (newest row first → index 0 = latest)
   revRows: select revenue from incomeStatement where symbol=sym;
   revGrowthPass: $[1<count revRows;
     first[revRows`revenue] > last[revRows`revenue];
     0b];
 
+  // Pillar 4: 5-yr net income growth
+  niRows: select netIncome from incomeStatement where symbol=sym;
+  niGrowthPass: $[1<count niRows;
+    first[niRows`netIncome] > last[niRows`netIncome];
+    0b];
+
+  // Pillar 5: decrease in shares outstanding over the period
+  shareRows: select sharesOutstanding from ratios where symbol=sym;
+  buybackPass: $[1<count shareRows;
+    last[shareRows`sharesOutstanding] < first[shareRows`sharesOutstanding];
+    0b];
+
+  // Pillar 6: long-term debt / 5-yr avg FCF < 5
+  ltDebtFcfPass: $[m[`avgFcf5y]>0;
+    (m[`latestLongTermDebt] % m`avgFcf5y) < 5;
+    0b];
+
+  // Pillar 7: 5-yr FCF growth
+  fcfRows: select freeCashFlow from cashFlow where symbol=sym;
+  fcfGrowthPass: $[1<count fcfRows;
+    first[fcfRows`freeCashFlow] > last[fcfRows`freeCashFlow];
+    0b];
+
   pillars: (
-    peRatio   < 22.5;
-    pbRatio   < 1.5;
-    buybackPass;
-    debtRatio < 0.5;
-    1b;                           // Pillar 5 placeholder (current ratio)
-    revGrowthPass;
-    m[`latestRoic] > 0.12;
-    pfcfRatio < 22.5
+    peRatio      < 22.5;    // 1. 5-yr avg P/E < 22.5
+    m[`latestRoic] > 0.09;  // 2. ROIC > 9%
+    revGrowthPass;           // 3. 5-yr revenue growth
+    niGrowthPass;            // 4. 5-yr net income growth
+    buybackPass;             // 5. shares decreasing
+    ltDebtFcfPass;           // 6. LT debt / avg FCF < 5
+    fcfGrowthPass;           // 7. 5-yr FCF growth
+    pfcfRatio    < 20.0      // 8. 5-yr avg P/FCF < 20
   );
 
   sum pillars
