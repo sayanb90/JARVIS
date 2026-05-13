@@ -69,11 +69,14 @@ _SP500_FALLBACK: list[str] = [
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-BASE_URL         = "https://financialmodelingprep.com/api/v3"
-YEARS_BACK       = 5
-RATE_LIMIT_DELAY = float(os.getenv("FMP_RATE_LIMIT_DELAY", "0.5"))
-MAX_RETRIES      = 3
-RETRY_BACKOFF    = 2.0
+BASE_URL           = "https://financialmodelingprep.com/api/v3"
+YEARS_BACK         = 5
+RATE_LIMIT_DELAY   = float(os.getenv("FMP_RATE_LIMIT_DELAY", "0.5"))
+MAX_RETRIES        = 3
+RETRY_BACKOFF      = 2.0
+# Number of calendar days to look back when running in daily (incremental) mode.
+# Set to 5 to safely capture Mon after a long weekend.
+DAILY_OHLC_DAYS    = int(os.getenv("FMP_DAILY_OHLC_DAYS", "5"))
 
 LOG_DIR  = Path("logs")
 DATA_DIR = Path("data")
@@ -303,16 +306,30 @@ class FMPExtractor:
                 date               = _kdb_date(rec.get("date", "")),
                 symbol             = ticker,
                 market             = market,
-                roic               = _f(rec.get("returnOnCapitalEmployed")),
+                roic               = _f(rec.get("roic")),  # true ROIC (NOPAT/InvestedCapital)
                 shares_outstanding = _f(rec.get("weightedAverageSharesDiluted")),
             ))
         return rows
 
     def ohlc(self, ticker: str, market: str) -> list[OHLCRow]:
+        """Full historical OHLC — YEARS_BACK years. Used in full-refresh mode."""
         data = self._sess.get(
             f"historical-price-full/{ticker}",
             **{"from": self._from_dt, "to": self._to_dt},
         )
+        return self._parse_ohlc(data, ticker, market)
+
+    def ohlc_incremental(self, ticker: str, market: str,
+                         days_back: int = DAILY_OHLC_DAYS) -> list[OHLCRow]:
+        """Recent OHLC only — used in daily (incremental) mode to minimise API calls."""
+        from_dt = (date.today() - timedelta(days=days_back)).isoformat()
+        data = self._sess.get(
+            f"historical-price-full/{ticker}",
+            **{"from": from_dt, "to": self._to_dt},
+        )
+        return self._parse_ohlc(data, ticker, market)
+
+    def _parse_ohlc(self, data: Any, ticker: str, market: str) -> list[OHLCRow]:
         historical = data.get("historical", []) if isinstance(data, dict) else []
         rows = []
         for rec in historical:
@@ -329,6 +346,7 @@ class FMPExtractor:
         return rows
 
     def fetch_ticker(self, ticker: str, market: str) -> dict[str, list]:
+        """Full refresh — all 5 endpoints."""
         log.info("Fetching %s [%s] …", ticker, market)
         return {
             "income":    self.income_statement(ticker, market),
@@ -337,6 +355,12 @@ class FMPExtractor:
             "ratios":    self.ratios(ticker, market),
             "ohlc":      self.ohlc(ticker, market),
         }
+
+    def fetch_ticker_ohlc(self, ticker: str, market: str,
+                          days_back: int = DAILY_OHLC_DAYS) -> list[OHLCRow]:
+        """OHLC only — used in daily incremental mode (1 API call per ticker)."""
+        log.debug("OHLC [%s] %s …", market, ticker)
+        return self.ohlc_incremental(ticker, market, days_back)
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +479,26 @@ def write_ohlc(all_ohlc: list[OHLCRow], market: str) -> None:
              OHLC_DIR, len(by_year), market)
 
 
+def write_ohlc_daily(all_ohlc: list[OHLCRow], market: str) -> None:
+    """
+    Write incremental OHLC to a flat file for daily appends.
+
+    Unlike write_ohlc() which splits by year, this writes a single file:
+      data/ohlc/ohlc_daily_<market>.csv
+    The KDB+ appendOhlcDaily[] loader reads this and appends to the correct
+    year partitions, deduplicating on date+symbol.
+    """
+    OHLC_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = market.lower()
+    _write_csv(
+        OHLC_DIR / f"ohlc_daily_{suffix}.csv",
+        ["date", "symbol", "market", "open", "high", "low", "close", "volume"],
+        ([r.date, r.symbol, r.market, r.open, r.high, r.low, r.close, r.volume]
+         for r in all_ohlc),
+    )
+    log.info("Daily OHLC written to data/ohlc/ohlc_daily_%s.csv (%d rows)", suffix, len(all_ohlc))
+
+
 def write_pillar_metrics(metrics: list[PillarMetrics], market: str) -> None:
     FUND_DIR.mkdir(parents=True, exist_ok=True)
     suffix = market.lower()
@@ -517,20 +561,38 @@ def _write_csv(path: Path, headers: list[str], rows: Iterator) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Core run function
+# Core run functions
 # ---------------------------------------------------------------------------
+def _resolve_universe(market: str, api_key: str, dry_run: bool,
+                      tickers: list[str] | None) -> list[str]:
+    if tickers:
+        return tickers
+    if market == "IN":
+        return NIFTY_50
+    # US — fetch live or fallback
+    if dry_run:
+        log.info("DRY RUN — using %d-ticker S&P 500 fallback list", len(_SP500_FALLBACK))
+        return list(_SP500_FALLBACK)
+    return FMPExtractor(api_key).fetch_sp500_constituents()
+
+
 def run(
     tickers: list[str] | None = None,
     market: str = "IN",
     dry_run: bool = False,
 ) -> None:
     """
-    Fetch and persist data for one market universe.
+    Full refresh — fundamentals + 5-year OHLC for all tickers in a market.
+    Run weekly/quarterly; fundamentals are annual data that changes rarely.
+
+    API calls: ~5 per ticker  (income, balance, cashflow, ratios, ohlc)
+    At 550 tickers: ~2,750 calls — ~9 min on FMP Starter (300 req/min)
+    At 1,000 tickers: ~5,000 calls — ~17 min on FMP Starter
 
     Args:
-        tickers : Override ticker list. Defaults to NIFTY_50 (IN) or live S&P 500 (US).
-        market  : "IN" (Nifty 50) | "US" (S&P 500) | "ALL" (both sequentially).
-        dry_run : Print plan without making API calls.
+        tickers : Override ticker list.
+        market  : "IN" | "US" | "ALL"
+        dry_run : Print plan without API calls.
     """
     if market == "ALL":
         run(tickers=tickers, market="IN", dry_run=dry_run)
@@ -547,50 +609,31 @@ def run(
         sys.exit(1)
 
     LOG_DIR.mkdir(exist_ok=True)
-
-    # Resolve ticker list
-    if tickers:
-        universe = tickers
-    elif market == "IN":
-        universe = NIFTY_50
-    else:
-        # US: fetch live from API (or fallback for dry-run)
-        if dry_run:
-            universe = list(_SP500_FALLBACK)
-            log.info("DRY RUN — using %d-ticker S&P 500 fallback list", len(universe))
-        else:
-            extractor_tmp = FMPExtractor(api_key)
-            universe = extractor_tmp.fetch_sp500_constituents()
+    universe = _resolve_universe(market, api_key, dry_run, tickers)
 
     if dry_run:
-        log.info(
-            "DRY RUN [%s] — would fetch %d tickers × 5 endpoints = %d API calls",
-            market, len(universe), len(universe) * 5,
-        )
-        log.info(
-            "Estimated time at %.1f s/call: %.0f s (~%.0f min)",
-            RATE_LIMIT_DELAY,
-            len(universe) * 5 * RATE_LIMIT_DELAY,
-            len(universe) * 5 * RATE_LIMIT_DELAY / 60,
-        )
+        calls = len(universe) * 5
+        log.info("DRY RUN [%s] — %d tickers × 5 endpoints = %d API calls", market, len(universe), calls)
+        log.info("Estimated time at %.1f s/call: %.0f s (~%.0f min)",
+                 RATE_LIMIT_DELAY, calls * RATE_LIMIT_DELAY, calls * RATE_LIMIT_DELAY / 60)
         return
 
     extractor = FMPExtractor(api_key)
 
-    all_income:    list[IncomeRow]    = []
-    all_balance:   list[BalanceRow]   = []
-    all_cash_flow: list[CashFlowRow]  = []
-    all_ratios:    list[RatiosRow]    = []
-    all_ohlc:      list[OHLCRow]      = []
+    all_income:    list[IncomeRow]     = []
+    all_balance:   list[BalanceRow]    = []
+    all_cash_flow: list[CashFlowRow]   = []
+    all_ratios:    list[RatiosRow]     = []
+    all_ohlc:      list[OHLCRow]       = []
     all_pillars:   list[PillarMetrics] = []
 
     total = len(universe)
     for idx, ticker in enumerate(universe, 1):
-        log.info("[%d/%d] Processing %s [%s]", idx, total, ticker, market)
+        log.info("[%d/%d] %s [%s]", idx, total, ticker, market)
         try:
             data = extractor.fetch_ticker(ticker, market)
         except Exception as exc:
-            log.error("Skipping %s — unexpected error: %s", ticker, exc)
+            log.error("Skipping %s — %s", ticker, exc)
             continue
 
         all_income.extend(data["income"])
@@ -604,22 +647,82 @@ def run(
             ticker, market,
         )
         all_pillars.append(pillars)
-        log.info(
-            "  %s → 5y avg NI=%.2f M  5y avg FCF=%.2f M",
-            ticker,
-            (pillars.avg_net_income_5y or 0) / 1e6,
-            (pillars.avg_fcf_5y or 0) / 1e6,
-        )
+        log.info("  %s → 5y avg NI=%.2f M  5y avg FCF=%.2f M",
+                 ticker, (pillars.avg_net_income_5y or 0) / 1e6,
+                 (pillars.avg_fcf_5y or 0) / 1e6)
 
-    log.info("Writing CSVs [market=%s] …", market)
     write_fundamentals(all_income, all_balance, all_cash_flow, all_ratios, market)
     write_ohlc(all_ohlc, market)
     write_pillar_metrics(all_pillars, market)
+    log.info("Done [%s]. %d tickers | %d income rows | %d OHLC rows",
+             market, total, len(all_income), len(all_ohlc))
 
-    log.info(
-        "Done [%s]. %d tickers | %d income rows | %d OHLC rows",
-        market, total, len(all_income), len(all_ohlc),
-    )
+
+def run_daily(
+    tickers: list[str] | None = None,
+    market: str = "ALL",
+    days_back: int = DAILY_OHLC_DAYS,
+    dry_run: bool = False,
+) -> None:
+    """
+    Daily incremental OHLC only — 1 API call per ticker, no fundamentals.
+
+    Run every trading day via cron/scheduler.  After this completes, run
+    the KDB+ loader in daily mode to append the new rows:
+      q data_layer/kdb_loader.q -mode daily
+
+    API calls: 1 per ticker
+    At 550 tickers: ~550 calls — ~2 min on FMP Starter
+    At 1,000 tickers: ~1,000 calls — ~3 min on FMP Starter
+
+    Args:
+        tickers  : Override ticker list.
+        market   : "IN" | "US" | "ALL"
+        days_back: Calendar days to look back (default 5 — covers Mon after long weekend).
+        dry_run  : Print plan without API calls.
+    """
+    if market == "ALL":
+        run_daily(tickers=tickers, market="IN", days_back=days_back, dry_run=dry_run)
+        run_daily(tickers=tickers, market="US", days_back=days_back, dry_run=dry_run)
+        return
+
+    if market not in ("IN", "US"):
+        log.error("Invalid --market '%s'. Choose IN, US, or ALL.", market)
+        sys.exit(1)
+
+    api_key = os.getenv("FMP_API_KEY", "")
+    if not api_key and not dry_run:
+        log.error("FMP_API_KEY not set.")
+        sys.exit(1)
+
+    LOG_DIR.mkdir(exist_ok=True)
+    universe = _resolve_universe(market, api_key, dry_run, tickers)
+
+    if dry_run:
+        log.info("DRY RUN daily [%s] — %d tickers × 1 OHLC call = %d API calls "
+                 "(last %d days)",
+                 market, len(universe), len(universe), days_back)
+        log.info("Estimated time at %.1f s/call: %.0f s (~%.0f min)",
+                 RATE_LIMIT_DELAY, len(universe) * RATE_LIMIT_DELAY,
+                 len(universe) * RATE_LIMIT_DELAY / 60)
+        return
+
+    extractor = FMPExtractor(api_key)
+    all_ohlc: list[OHLCRow] = []
+    total = len(universe)
+
+    for idx, ticker in enumerate(universe, 1):
+        try:
+            rows = extractor.fetch_ticker_ohlc(ticker, market, days_back)
+            all_ohlc.extend(rows)
+            if idx % 50 == 0:
+                log.info("[%d/%d] daily OHLC — %d rows so far", idx, total, len(all_ohlc))
+        except Exception as exc:
+            log.error("Skipping %s — %s", ticker, exc)
+
+    write_ohlc_daily(all_ohlc, market)
+    log.info("Daily done [%s]. %d tickers | %d OHLC rows (last %d days)",
+             market, total, len(all_ohlc), days_back)
 
 
 # ---------------------------------------------------------------------------
@@ -633,7 +736,20 @@ if __name__ == "__main__":
     parser.add_argument("--market", default="IN",
                         choices=["IN", "US", "ALL"],
                         help="Market universe: IN (Nifty 50), US (S&P 500), ALL (both)")
+    parser.add_argument("--mode", default="full",
+                        choices=["full", "daily"],
+                        help=(
+                            "full  = fetch fundamentals + 5yr OHLC (run weekly/quarterly); "
+                            "daily = incremental OHLC only, last --days-back days (run every trading day)"
+                        ))
+    parser.add_argument("--days-back", type=int, default=DAILY_OHLC_DAYS,
+                        help=f"Days to look back in daily mode (default: {DAILY_OHLC_DAYS})")
     parser.add_argument("--tickers", nargs="*", default=None,
                         help="Override ticker list (e.g. RELIANCE.NS TCS.NS)")
     args = parser.parse_args()
-    run(tickers=args.tickers, market=args.market, dry_run=args.dry_run)
+
+    if args.mode == "daily":
+        run_daily(tickers=args.tickers, market=args.market,
+                  days_back=args.days_back, dry_run=args.dry_run)
+    else:
+        run(tickers=args.tickers, market=args.market, dry_run=args.dry_run)

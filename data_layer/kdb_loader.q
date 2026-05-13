@@ -295,6 +295,77 @@ loadAllOhlc:{[]
  }
 
 // ---------------------------------------------------------------------------
+// Daily incremental OHLC append
+//
+// Reads data/ohlc/ohlc_daily_in.csv and/or ohlc_daily_us.csv (written by
+// python -m data_layer.fmp_client --mode daily), groups rows by year, and
+// appends to the correct db/YYYY/ohlc/ partitions.
+// Duplicate date+symbol rows are silently dropped (idempotent re-runs).
+//
+// Usage:
+//   q data_layer/kdb_loader.q -mode daily
+// ---------------------------------------------------------------------------
+
+appendOhlcDaily:{[]
+  show "=== appendOhlcDaily ===";
+  sfxList: string lower each MARKETS;
+
+  // Collect all new rows from daily CSV files
+  allNew: ();
+  {[sfx]
+    path: hsym `$":data/ohlc/ohlc_daily_", sfx, ".csv";
+    $[()~key path;
+      show "  [SKIP] ohlc_daily_", sfx, ".csv not found";
+      [
+        t: loadCsv[OHLC_TYPES; path];
+        t: update date:`date$date, market:`symbol$market from t;
+        show "  [", upper sfx, "] ", string[count t], " new rows";
+        allNew,: enlist t
+      ]
+    ]
+  }[;] each sfxList;
+
+  if[0=count allNew;
+    show "  No daily OHLC files found — nothing to append";
+    :()
+  ];
+
+  combined: {x,y}/[allNew];
+
+  // Determine which year-partitions are affected
+  years: asc distinct `year$combined`date;
+
+  {[yr; newRows]
+    yearNew: select from newRows where `year$date = yr;
+    partDir: ` sv (DB; `$string[yr]; `ohlc/);
+
+    $[()~key partDir;
+      // Partition does not exist — create it fresh
+      [
+        yearNew: `date xasc yearNew;
+        ensureDir partDir;
+        (` sv partDir, `.) set .Q.en[DB] yearNew;
+        show "  Created partition ", string[yr], " → ", string[count yearNew], " rows"
+      ];
+      // Partition exists — load, merge, dedup on date+symbol, re-write
+      [
+        existing: get ` sv partDir, `.;
+        // Key on date+symbol; new rows overwrite on conflict (handles corrections)
+        merged: (`date`symbol xkey existing) upsert (`date`symbol xkey yearNew);
+        merged: `date xasc 0!merged;
+        (` sv partDir, `.) set .Q.en[DB] merged;
+        show "  Updated partition ", string[yr],
+             " → ", string[count[merged] - count[existing]], " new rows",
+             " (total: ", string[count merged], ")"
+      ]
+    ]
+  }[; combined] each years;
+
+  .Q.dpft[DB; `ohlc; `date; `symbol];
+  show "Daily OHLC append complete"
+ }
+
+// ---------------------------------------------------------------------------
 // Full load sequence
 // ---------------------------------------------------------------------------
 
@@ -337,16 +408,24 @@ memReport:{[]
 // CLI entry
 // ---------------------------------------------------------------------------
 
-if[`load in key .z.x;
-  target: .z.x`load;
-  $[target~"ohlc";    loadAllOhlc[];
-    target~"income";  loadIncomeStatement[];
-    target~"balance"; loadBalanceSheet[];
-    target~"cashflow";loadCashFlow[];
-    target~"ratios";  loadRatios[];
-    target~"pillars"; loadPillarMetrics[];
-    show "Unknown target: ", target]
-; // default: load everything
+$[`mode in key .z.x;
+  // -mode daily  →  incremental OHLC append only
+  $[(.z.x`mode)~"daily";
+    appendOhlcDaily[];
+    show "Unknown -mode: ", .z.x`mode
+  ]
+; `load in key .z.x;
+  // -load <table>  →  selective full reload
+  [target: .z.x`load;
+   $[target~"ohlc";    loadAllOhlc[];
+     target~"income";  loadIncomeStatement[];
+     target~"balance"; loadBalanceSheet[];
+     target~"cashflow";loadCashFlow[];
+     target~"ratios";  loadRatios[];
+     target~"pillars"; loadPillarMetrics[];
+     show "Unknown target: ", target]
+  ]
+; // default: full load everything
   loadAll[]
  ]
 

@@ -6,8 +6,10 @@ from .fmp_client import (
     compute_pillar_metrics,
     write_fundamentals,
     write_ohlc,
+    write_ohlc_daily,
     write_pillar_metrics,
     run,
+    run_daily,
 )
 
 __all__ = [
@@ -16,6 +18,8 @@ __all__ = [
     "compute_pillar_metrics",
     "write_fundamentals",
     "write_ohlc",
+    "write_ohlc_daily",
     "write_pillar_metrics",
     "run",
+    "run_daily",
 ]
