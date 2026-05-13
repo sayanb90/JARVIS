@@ -1,16 +1,24 @@
 """
 FMP (Financial Modeling Prep) data extraction layer for JARVIS.
 
-Pulls 5 years of fundamental + OHLC data for the Nifty 50 universe and
-writes kdb+-compatible CSVs partitioned for the 32-bit (4 GB) engine.
+Pulls 5 years of fundamental + OHLC data for Nifty 50 (Indian, market="IN")
+and S&P 500 (US, market="US") universes, writing kdb+-compatible CSVs.
+Each row carries a `market` tag so both universes share the same KDB+ tables.
+
+Identifiers:
+  Indian stocks : Yahoo-Finance/RIC style  (e.g. RELIANCE.NS, INFY.NS)
+  US stocks     : Plain exchange ticker    (e.g. AAPL, MSFT)
+Both are stored in the `symbol` column; `market` distinguishes origin.
 
 Rate limits respected:
-  Free tier  : ~250 requests / day, burst 5 req/s → RATE_LIMIT_DELAY = 0.5 s
-  Starter tier: 300 req/min                       → RATE_LIMIT_DELAY = 0.2 s
+  Free tier   : ~250 requests / day  → FMP_RATE_LIMIT_DELAY = 0.5 s
+  Starter tier: 300 req / min        → FMP_RATE_LIMIT_DELAY = 0.2 s
 
 Usage:
-    python -m data_layer.fmp_client            # full run
-    python -m data_layer.fmp_client --dry-run  # print plan, no API calls
+    python -m data_layer.fmp_client                 # Indian stocks (default)
+    python -m data_layer.fmp_client --market US     # S&P 500
+    python -m data_layer.fmp_client --market ALL    # both universes
+    python -m data_layer.fmp_client --dry-run       # print plan, no API calls
 """
 
 from __future__ import annotations
@@ -49,14 +57,23 @@ NIFTY_50: list[str] = [
     "WIPRO.NS",     "ZOMATO.NS",
 ]
 
+# S&P 500 constituents are fetched live from the FMP API via
+# FMPExtractor.fetch_sp500_constituents().  The list below is a minimal
+# fallback used only when --dry-run is requested without an API key.
+_SP500_FALLBACK: list[str] = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK-B", "TSLA",
+    "UNH",  "LLY",  "JPM",  "XOM",  "V",     "AVGO", "PG",    "MA",
+    "HD",   "COST", "MRK",  "CVX",
+]
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 BASE_URL         = "https://financialmodelingprep.com/api/v3"
 YEARS_BACK       = 5
-RATE_LIMIT_DELAY = float(os.getenv("FMP_RATE_LIMIT_DELAY", "0.5"))  # seconds between calls
+RATE_LIMIT_DELAY = float(os.getenv("FMP_RATE_LIMIT_DELAY", "0.5"))
 MAX_RETRIES      = 3
-RETRY_BACKOFF    = 2.0   # exponential base
+RETRY_BACKOFF    = 2.0
 
 LOG_DIR  = Path("logs")
 DATA_DIR = Path("data")
@@ -75,12 +92,14 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Domain dataclasses (one row per ticker per fiscal year)
+# Domain dataclasses
+# Each row carries `market` ("IN" or "US") so both universes share one table.
 # ---------------------------------------------------------------------------
 @dataclass
 class IncomeRow:
     date: str
     symbol: str
+    market: str
     revenue: Optional[float]
     net_income: Optional[float]
     ebit: Optional[float]
@@ -90,6 +109,7 @@ class IncomeRow:
 class BalanceRow:
     date: str
     symbol: str
+    market: str
     total_assets: Optional[float]
     total_liabilities: Optional[float]
     long_term_debt: Optional[float]
@@ -100,6 +120,7 @@ class BalanceRow:
 class CashFlowRow:
     date: str
     symbol: str
+    market: str
     free_cash_flow: Optional[float]
 
 
@@ -107,6 +128,7 @@ class CashFlowRow:
 class RatiosRow:
     date: str
     symbol: str
+    market: str
     roic: Optional[float]
     shares_outstanding: Optional[float]
 
@@ -115,6 +137,7 @@ class RatiosRow:
 class OHLCRow:
     date: str
     symbol: str
+    market: str
     open: Optional[float]
     high: Optional[float]
     low: Optional[float]
@@ -126,6 +149,7 @@ class OHLCRow:
 class PillarMetrics:
     """Pre-calculated aggregates that feed the 8 Pillar scoring model."""
     symbol: str
+    market: str
     avg_net_income_5y: Optional[float]
     avg_fcf_5y: Optional[float]
     latest_revenue: Optional[float]
@@ -152,12 +176,11 @@ class FMPSession:
         self._sess.headers.update({"Accept": "application/json"})
 
     def get(self, endpoint: str, **params: Any) -> Any:
-        """GET an FMP endpoint, returning parsed JSON.  Retries on 429/5xx."""
+        """GET an FMP endpoint, returning parsed JSON. Retries on 429/5xx."""
         params["apikey"] = self._key
         url = f"{BASE_URL}/{endpoint}"
 
         for attempt in range(1, MAX_RETRIES + 1):
-            # respect inter-call gap
             gap = self._delay - (time.monotonic() - self._last)
             if gap > 0:
                 time.sleep(gap)
@@ -198,14 +221,28 @@ class FMPExtractor:
     """Pulls fundamental + OHLC data for a list of tickers."""
 
     def __init__(self, api_key: str) -> None:
-        self._sess     = FMPSession(api_key)
-        self._from_dt  = (date.today() - timedelta(days=365 * YEARS_BACK)).isoformat()
-        self._to_dt    = date.today().isoformat()
+        self._sess    = FMPSession(api_key)
+        self._from_dt = (date.today() - timedelta(days=365 * YEARS_BACK)).isoformat()
+        self._to_dt   = date.today().isoformat()
 
     # ------------------------------------------------------------------
-    # Fundamental endpoints
+    # S&P 500 constituent list  (fetched from FMP; refreshes on each run)
     # ------------------------------------------------------------------
-    def income_statement(self, ticker: str) -> list[IncomeRow]:
+    def fetch_sp500_constituents(self) -> list[str]:
+        """Return current S&P 500 ticker list from FMP's /sp500_constituent."""
+        log.info("Fetching S&P 500 constituent list from FMP …")
+        data = self._sess.get("sp500_constituent")
+        if not isinstance(data, list) or not data:
+            log.warning("Failed to fetch S&P 500 constituents — using fallback list")
+            return list(_SP500_FALLBACK)
+        tickers = [rec["symbol"] for rec in data if rec.get("symbol")]
+        log.info("S&P 500: %d constituents loaded", len(tickers))
+        return tickers
+
+    # ------------------------------------------------------------------
+    # Fundamental endpoints  (each method accepts a market tag)
+    # ------------------------------------------------------------------
+    def income_statement(self, ticker: str, market: str) -> list[IncomeRow]:
         data = self._sess.get(
             f"income-statement/{ticker}",
             period="annual", limit=YEARS_BACK,
@@ -215,13 +252,14 @@ class FMPExtractor:
             rows.append(IncomeRow(
                 date       = _kdb_date(rec.get("date", "")),
                 symbol     = ticker,
+                market     = market,
                 revenue    = _f(rec.get("revenue")),
                 net_income = _f(rec.get("netIncome")),
-                ebit       = _f(rec.get("ebitda")),  # FMP: operatingIncome ≈ EBIT
+                ebit       = _f(rec.get("ebitda")),
             ))
         return rows
 
-    def balance_sheet(self, ticker: str) -> list[BalanceRow]:
+    def balance_sheet(self, ticker: str, market: str) -> list[BalanceRow]:
         data = self._sess.get(
             f"balance-sheet-statement/{ticker}",
             period="annual", limit=YEARS_BACK,
@@ -231,6 +269,7 @@ class FMPExtractor:
             rows.append(BalanceRow(
                 date              = _kdb_date(rec.get("date", "")),
                 symbol            = ticker,
+                market            = market,
                 total_assets      = _f(rec.get("totalAssets")),
                 total_liabilities = _f(rec.get("totalLiabilities")),
                 long_term_debt    = _f(rec.get("longTermDebt")),
@@ -238,7 +277,7 @@ class FMPExtractor:
             ))
         return rows
 
-    def cash_flow(self, ticker: str) -> list[CashFlowRow]:
+    def cash_flow(self, ticker: str, market: str) -> list[CashFlowRow]:
         data = self._sess.get(
             f"cash-flow-statement/{ticker}",
             period="annual", limit=YEARS_BACK,
@@ -248,11 +287,12 @@ class FMPExtractor:
             rows.append(CashFlowRow(
                 date           = _kdb_date(rec.get("date", "")),
                 symbol         = ticker,
+                market         = market,
                 free_cash_flow = _f(rec.get("freeCashFlow")),
             ))
         return rows
 
-    def ratios(self, ticker: str) -> list[RatiosRow]:
+    def ratios(self, ticker: str, market: str) -> list[RatiosRow]:
         data = self._sess.get(
             f"ratios/{ticker}",
             period="annual", limit=YEARS_BACK,
@@ -262,15 +302,13 @@ class FMPExtractor:
             rows.append(RatiosRow(
                 date               = _kdb_date(rec.get("date", "")),
                 symbol             = ticker,
+                market             = market,
                 roic               = _f(rec.get("returnOnCapitalEmployed")),
                 shares_outstanding = _f(rec.get("weightedAverageSharesDiluted")),
             ))
         return rows
 
-    # ------------------------------------------------------------------
-    # OHLC
-    # ------------------------------------------------------------------
-    def ohlc(self, ticker: str) -> list[OHLCRow]:
+    def ohlc(self, ticker: str, market: str) -> list[OHLCRow]:
         data = self._sess.get(
             f"historical-price-full/{ticker}",
             **{"from": self._from_dt, "to": self._to_dt},
@@ -281,6 +319,7 @@ class FMPExtractor:
             rows.append(OHLCRow(
                 date   = _kdb_date(rec.get("date", "")),
                 symbol = ticker,
+                market = market,
                 open   = _f(rec.get("open")),
                 high   = _f(rec.get("high")),
                 low    = _f(rec.get("low")),
@@ -289,17 +328,14 @@ class FMPExtractor:
             ))
         return rows
 
-    # ------------------------------------------------------------------
-    # Full ticker fetch
-    # ------------------------------------------------------------------
-    def fetch_ticker(self, ticker: str) -> dict[str, list]:
-        log.info("Fetching %s …", ticker)
+    def fetch_ticker(self, ticker: str, market: str) -> dict[str, list]:
+        log.info("Fetching %s [%s] …", ticker, market)
         return {
-            "income":    self.income_statement(ticker),
-            "balance":   self.balance_sheet(ticker),
-            "cash_flow": self.cash_flow(ticker),
-            "ratios":    self.ratios(ticker),
-            "ohlc":      self.ohlc(ticker),
+            "income":    self.income_statement(ticker, market),
+            "balance":   self.balance_sheet(ticker, market),
+            "cash_flow": self.cash_flow(ticker, market),
+            "ratios":    self.ratios(ticker, market),
+            "ohlc":      self.ohlc(ticker, market),
         }
 
 
@@ -312,12 +348,13 @@ def compute_pillar_metrics(
     cash_flow_rows: list[CashFlowRow],
     ratios_rows:    list[RatiosRow],
     symbol: str,
+    market: str,
 ) -> PillarMetrics:
     """
-    Pre-aggregate per-ticker values consumed by the 8 Pillar model:
+    Pre-aggregate per-ticker values consumed by the 8 Pillar model.
 
     Pillar 1  → P/E < 22.5        uses avg_net_income_5y
-    Pillar 3  → Buyback proxy     uses latest_shares_outstanding (trend vs prior years)
+    Pillar 3  → Buyback proxy     uses latest_shares_outstanding trend
     Pillar 8  → P/FCF < 22.5      uses avg_fcf_5y
     """
     net_incomes = [r.net_income for r in income_rows if r.net_income is not None]
@@ -328,87 +365,104 @@ def compute_pillar_metrics(
     latest_ratios  = ratios_rows[0]  if ratios_rows  else None
 
     return PillarMetrics(
-        symbol                  = symbol,
-        avg_net_income_5y       = _avg(net_incomes),
-        avg_fcf_5y              = _avg(fcfs),
-        latest_revenue          = latest_income.revenue          if latest_income  else None,
-        latest_ebit             = latest_income.ebit             if latest_income  else None,
-        latest_total_assets     = latest_balance.total_assets     if latest_balance else None,
-        latest_total_liabilities= latest_balance.total_liabilities if latest_balance else None,
-        latest_long_term_debt   = latest_balance.long_term_debt   if latest_balance else None,
-        latest_total_equity     = latest_balance.total_equity     if latest_balance else None,
-        latest_roic             = latest_ratios.roic              if latest_ratios  else None,
-        latest_shares_outstanding = latest_ratios.shares_outstanding if latest_ratios else None,
+        symbol                   = symbol,
+        market                   = market,
+        avg_net_income_5y        = _avg(net_incomes),
+        avg_fcf_5y               = _avg(fcfs),
+        latest_revenue           = latest_income.revenue           if latest_income  else None,
+        latest_ebit              = latest_income.ebit              if latest_income  else None,
+        latest_total_assets      = latest_balance.total_assets      if latest_balance else None,
+        latest_total_liabilities = latest_balance.total_liabilities if latest_balance else None,
+        latest_long_term_debt    = latest_balance.long_term_debt    if latest_balance else None,
+        latest_total_equity      = latest_balance.total_equity      if latest_balance else None,
+        latest_roic              = latest_ratios.roic               if latest_ratios  else None,
+        latest_shares_outstanding= latest_ratios.shares_outstanding if latest_ratios  else None,
     )
 
 
 # ---------------------------------------------------------------------------
 # CSV writers — kdb+-compatible format
-#   • Dates  : YYYY.MM.DD  (kdb+ date literal)
-#   • Floats : plain decimal, empty string for null
-#   • Symbols: bare string (kdb+ reads unquoted symbol columns)
+#
+# Column order (fundamentals): date, symbol, market, <floats>
+# Column order (ohlc):         date, symbol, market, open, high, low, close, volume
+# Column order (pillar):       symbol, market, <floats>
+#
+# Files are written per-market so each universe can be refreshed independently:
+#   data/fundamentals/income_statement_in.csv   (Indian stocks)
+#   data/fundamentals/income_statement_us.csv   (S&P 500)
+#   data/ohlc/ohlc_YYYY_in.csv
+#   data/ohlc/ohlc_YYYY_us.csv
+# The KDB+ loader merges both files into unified splayed tables.
 # ---------------------------------------------------------------------------
 def write_fundamentals(
     all_income:    list[IncomeRow],
     all_balance:   list[BalanceRow],
     all_cash_flow: list[CashFlowRow],
     all_ratios:    list[RatiosRow],
+    market: str,
 ) -> None:
     FUND_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = market.lower()
 
     _write_csv(
-        FUND_DIR / "income_statement.csv",
-        ["date", "symbol", "revenue", "net_income", "ebit"],
-        ([r.date, r.symbol, r.revenue, r.net_income, r.ebit] for r in all_income),
+        FUND_DIR / f"income_statement_{suffix}.csv",
+        ["date", "symbol", "market", "revenue", "net_income", "ebit"],
+        ([r.date, r.symbol, r.market, r.revenue, r.net_income, r.ebit]
+         for r in all_income),
     )
     _write_csv(
-        FUND_DIR / "balance_sheet.csv",
-        ["date", "symbol", "total_assets", "total_liabilities",
+        FUND_DIR / f"balance_sheet_{suffix}.csv",
+        ["date", "symbol", "market", "total_assets", "total_liabilities",
          "long_term_debt", "total_equity"],
-        ([r.date, r.symbol, r.total_assets, r.total_liabilities,
+        ([r.date, r.symbol, r.market, r.total_assets, r.total_liabilities,
           r.long_term_debt, r.total_equity] for r in all_balance),
     )
     _write_csv(
-        FUND_DIR / "cash_flow.csv",
-        ["date", "symbol", "free_cash_flow"],
-        ([r.date, r.symbol, r.free_cash_flow] for r in all_cash_flow),
+        FUND_DIR / f"cash_flow_{suffix}.csv",
+        ["date", "symbol", "market", "free_cash_flow"],
+        ([r.date, r.symbol, r.market, r.free_cash_flow] for r in all_cash_flow),
     )
     _write_csv(
-        FUND_DIR / "ratios.csv",
-        ["date", "symbol", "roic", "shares_outstanding"],
-        ([r.date, r.symbol, r.roic, r.shares_outstanding] for r in all_ratios),
+        FUND_DIR / f"ratios_{suffix}.csv",
+        ["date", "symbol", "market", "roic", "shares_outstanding"],
+        ([r.date, r.symbol, r.market, r.roic, r.shares_outstanding]
+         for r in all_ratios),
     )
-    log.info("Fundamentals CSVs written to %s", FUND_DIR)
+    log.info("Fundamentals CSVs written to %s (market=%s)", FUND_DIR, market)
 
 
-def write_ohlc(all_ohlc: list[OHLCRow]) -> None:
+def write_ohlc(all_ohlc: list[OHLCRow], market: str) -> None:
     """
-    Writes one CSV per calendar year — mirrors the kdb+ date-partition layout
-    and keeps individual file sizes well within the 4 GB engine limit.
+    Writes one CSV per calendar year per market, mirroring kdb+ partition layout.
+    Files: data/ohlc/ohlc_YYYY_in.csv, data/ohlc/ohlc_YYYY_us.csv
     """
     OHLC_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = market.lower()
 
     by_year: dict[str, list[OHLCRow]] = {}
     for row in all_ohlc:
-        year = row.date[:4]  # YYYY from YYYY.MM.DD
+        year = row.date[:4]
         by_year.setdefault(year, []).append(row)
 
     for year, rows in sorted(by_year.items()):
         _write_csv(
-            OHLC_DIR / f"ohlc_{year}.csv",
-            ["date", "symbol", "open", "high", "low", "close", "volume"],
-            ([r.date, r.symbol, r.open, r.high, r.low, r.close, r.volume]
+            OHLC_DIR / f"ohlc_{year}_{suffix}.csv",
+            ["date", "symbol", "market", "open", "high", "low", "close", "volume"],
+            ([r.date, r.symbol, r.market, r.open, r.high, r.low, r.close, r.volume]
              for r in rows),
         )
-    log.info("OHLC CSVs written to %s (%d year-partitions)", OHLC_DIR, len(by_year))
+    log.info("OHLC CSVs written to %s (%d year-partitions, market=%s)",
+             OHLC_DIR, len(by_year), market)
 
 
-def write_pillar_metrics(metrics: list[PillarMetrics]) -> None:
+def write_pillar_metrics(metrics: list[PillarMetrics], market: str) -> None:
     FUND_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = market.lower()
     _write_csv(
-        FUND_DIR / "pillar_metrics.csv",
+        FUND_DIR / f"pillar_metrics_{suffix}.csv",
         [
-            "symbol", "avg_net_income_5y", "avg_fcf_5y",
+            "symbol", "market",
+            "avg_net_income_5y", "avg_fcf_5y",
             "latest_revenue", "latest_ebit",
             "latest_total_assets", "latest_total_liabilities",
             "latest_long_term_debt", "latest_total_equity",
@@ -416,7 +470,8 @@ def write_pillar_metrics(metrics: list[PillarMetrics]) -> None:
         ],
         (
             [
-                m.symbol, m.avg_net_income_5y, m.avg_fcf_5y,
+                m.symbol, m.market,
+                m.avg_net_income_5y, m.avg_fcf_5y,
                 m.latest_revenue, m.latest_ebit,
                 m.latest_total_assets, m.latest_total_liabilities,
                 m.latest_long_term_debt, m.latest_total_equity,
@@ -425,14 +480,13 @@ def write_pillar_metrics(metrics: list[PillarMetrics]) -> None:
             for m in metrics
         ),
     )
-    log.info("Pillar metrics written to %s", FUND_DIR / "pillar_metrics.csv")
+    log.info("Pillar metrics written to %s (market=%s)", FUND_DIR, market)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def _f(val: Any) -> Optional[float]:
-    """Coerce to float, returning None on null/empty."""
     if val is None or val == "":
         return None
     try:
@@ -451,7 +505,6 @@ def _avg(values: list[float]) -> Optional[float]:
 
 
 def _kdb_date(iso: str) -> str:
-    """Convert YYYY-MM-DD → YYYY.MM.DD for kdb+ date literals."""
     return iso.replace("-", ".") if iso else ""
 
 
@@ -460,44 +513,82 @@ def _write_csv(path: Path, headers: list[str], rows: Iterator) -> None:
         writer = csv.writer(f)
         writer.writerow(headers)
         for row in rows:
-            # kdb+ treats empty string as null for numeric columns
             writer.writerow(["" if v is None else v for v in row])
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Core run function
 # ---------------------------------------------------------------------------
-def run(tickers: list[str] = NIFTY_50, dry_run: bool = False) -> None:
+def run(
+    tickers: list[str] | None = None,
+    market: str = "IN",
+    dry_run: bool = False,
+) -> None:
+    """
+    Fetch and persist data for one market universe.
+
+    Args:
+        tickers : Override ticker list. Defaults to NIFTY_50 (IN) or live S&P 500 (US).
+        market  : "IN" (Nifty 50) | "US" (S&P 500) | "ALL" (both sequentially).
+        dry_run : Print plan without making API calls.
+    """
+    if market == "ALL":
+        run(tickers=tickers, market="IN", dry_run=dry_run)
+        run(tickers=tickers, market="US", dry_run=dry_run)
+        return
+
+    if market not in ("IN", "US"):
+        log.error("Invalid --market '%s'. Choose IN, US, or ALL.", market)
+        sys.exit(1)
+
     api_key = os.getenv("FMP_API_KEY", "")
     if not api_key and not dry_run:
-        log.error("FMP_API_KEY not set.  Copy .env.example → .env and add your key.")
+        log.error("FMP_API_KEY not set. Copy .env.example → .env and add your key.")
         sys.exit(1)
 
     LOG_DIR.mkdir(exist_ok=True)
 
+    # Resolve ticker list
+    if tickers:
+        universe = tickers
+    elif market == "IN":
+        universe = NIFTY_50
+    else:
+        # US: fetch live from API (or fallback for dry-run)
+        if dry_run:
+            universe = list(_SP500_FALLBACK)
+            log.info("DRY RUN — using %d-ticker S&P 500 fallback list", len(universe))
+        else:
+            extractor_tmp = FMPExtractor(api_key)
+            universe = extractor_tmp.fetch_sp500_constituents()
+
     if dry_run:
-        log.info("DRY RUN — would fetch %d tickers × 5 endpoints = %d API calls",
-                 len(tickers), len(tickers) * 5)
-        log.info("Estimated time at %.1f s/call: %.0f s (~%.0f min)",
-                 RATE_LIMIT_DELAY,
-                 len(tickers) * 5 * RATE_LIMIT_DELAY,
-                 len(tickers) * 5 * RATE_LIMIT_DELAY / 60)
+        log.info(
+            "DRY RUN [%s] — would fetch %d tickers × 5 endpoints = %d API calls",
+            market, len(universe), len(universe) * 5,
+        )
+        log.info(
+            "Estimated time at %.1f s/call: %.0f s (~%.0f min)",
+            RATE_LIMIT_DELAY,
+            len(universe) * 5 * RATE_LIMIT_DELAY,
+            len(universe) * 5 * RATE_LIMIT_DELAY / 60,
+        )
         return
 
     extractor = FMPExtractor(api_key)
 
-    all_income: list[IncomeRow]       = []
-    all_balance: list[BalanceRow]     = []
+    all_income:    list[IncomeRow]    = []
+    all_balance:   list[BalanceRow]   = []
     all_cash_flow: list[CashFlowRow]  = []
-    all_ratios: list[RatiosRow]       = []
-    all_ohlc: list[OHLCRow]           = []
-    all_pillars: list[PillarMetrics]  = []
+    all_ratios:    list[RatiosRow]    = []
+    all_ohlc:      list[OHLCRow]      = []
+    all_pillars:   list[PillarMetrics] = []
 
-    total = len(tickers)
-    for idx, ticker in enumerate(tickers, 1):
-        log.info("[%d/%d] Processing %s", idx, total, ticker)
+    total = len(universe)
+    for idx, ticker in enumerate(universe, 1):
+        log.info("[%d/%d] Processing %s [%s]", idx, total, ticker, market)
         try:
-            data = extractor.fetch_ticker(ticker)
+            data = extractor.fetch_ticker(ticker, market)
         except Exception as exc:
             log.error("Skipping %s — unexpected error: %s", ticker, exc)
             continue
@@ -510,34 +601,39 @@ def run(tickers: list[str] = NIFTY_50, dry_run: bool = False) -> None:
 
         pillars = compute_pillar_metrics(
             data["income"], data["balance"], data["cash_flow"], data["ratios"],
-            ticker,
+            ticker, market,
         )
         all_pillars.append(pillars)
         log.info(
-            "  %s → 5y avg NI=%.2f Cr  5y avg FCF=%.2f Cr",
+            "  %s → 5y avg NI=%.2f M  5y avg FCF=%.2f M",
             ticker,
-            (pillars.avg_net_income_5y or 0) / 1e7,   # raw INR → Crore
-            (pillars.avg_fcf_5y or 0) / 1e7,
+            (pillars.avg_net_income_5y or 0) / 1e6,
+            (pillars.avg_fcf_5y or 0) / 1e6,
         )
 
-    log.info("Writing CSVs …")
-    write_fundamentals(all_income, all_balance, all_cash_flow, all_ratios)
-    write_ohlc(all_ohlc)
-    write_pillar_metrics(all_pillars)
+    log.info("Writing CSVs [market=%s] …", market)
+    write_fundamentals(all_income, all_balance, all_cash_flow, all_ratios, market)
+    write_ohlc(all_ohlc, market)
+    write_pillar_metrics(all_pillars, market)
 
     log.info(
-        "Done.  %d tickers | %d income rows | %d OHLC rows",
-        total, len(all_income), len(all_ohlc),
+        "Done [%s]. %d tickers | %d income rows | %d OHLC rows",
+        market, total, len(all_income), len(all_ohlc),
     )
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="JARVIS FMP data extractor")
-    parser.add_argument("--dry-run", action="store_true", help="Print plan without API calls")
-    parser.add_argument(
-        "--tickers", nargs="*", default=None,
-        help="Override ticker list (e.g. RELIANCE.NS TCS.NS)",
-    )
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print plan without API calls")
+    parser.add_argument("--market", default="IN",
+                        choices=["IN", "US", "ALL"],
+                        help="Market universe: IN (Nifty 50), US (S&P 500), ALL (both)")
+    parser.add_argument("--tickers", nargs="*", default=None,
+                        help="Override ticker list (e.g. RELIANCE.NS TCS.NS)")
     args = parser.parse_args()
-    run(tickers=args.tickers or NIFTY_50, dry_run=args.dry_run)
+    run(tickers=args.tickers, market=args.market, dry_run=args.dry_run)

@@ -1,27 +1,32 @@
 // =============================================================================
 // kdb_loader.q  —  JARVIS CSV → KDB+ ingestion
 //
-// Reads the CSVs produced by fmp_client.py and writes splayed / date-partitioned
-// tables that stay well within the kdb+ 32-bit 4 GB RAM limit.
+// Reads market-specific CSVs produced by fmp_client.py and writes splayed /
+// date-partitioned tables under db/.  Both IN (Nifty 50) and US (S&P 500)
+// data are merged into the same tables, distinguished by the `market` column.
+//
+// CSV naming convention (written by Python layer):
+//   data/fundamentals/income_statement_in.csv   ← Indian stocks
+//   data/fundamentals/income_statement_us.csv   ← US stocks
+//   data/ohlc/ohlc_YYYY_in.csv
+//   data/ohlc/ohlc_YYYY_us.csv
 //
 // Usage:
-//   q data_layer/kdb_loader.q [-p 5000]      // loads everything, optional port
-//   q data_layer/kdb_loader.q -load ohlc     // load only OHLC partitions
+//   q data_layer/kdb_loader.q              // load all markets, all tables
+//   q data_layer/kdb_loader.q -load ohlc   // only OHLC
+//   q data_layer/kdb_loader.q -load income
+//   q data_layer/kdb_loader.q -market US   // only US data
+//   q data_layer/kdb_loader.q -market IN   // only Indian data
 //
-// On-disk layout created under db/:
+// On-disk layout:
 //   db/
-//   ├── fundamentals/               ← splayed tables (columnar, mmap'd lazily)
+//   ├── fundamentals/
 //   │   ├── incomeStatement/
 //   │   ├── balanceSheet/
 //   │   ├── cashFlow/
 //   │   ├── ratios/
 //   │   └── pillarMetrics/
-//   └── ohlc/                       ← date-partitioned (one dir per year)
-//       ├── 2021/ohlc/
-//       ├── 2022/ohlc/
-//       ├── 2023/ohlc/
-//       ├── 2024/ohlc/
-//       └── 2025/ohlc/
+//   └── YYYY/ohlc/          (date-partitioned, one dir per year)
 // =============================================================================
 
 \l data_layer/schema.q
@@ -29,139 +34,264 @@
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
-FUND_CSV:  `$":data/fundamentals/"
-OHLC_CSV:  `$":data/ohlc/"
-DB:        `$":db/"
+FUND_CSV: `$":data/fundamentals/"
+OHLC_CSV: `$":data/ohlc/"
+DB:       `$":db/"
 
 // ---------------------------------------------------------------------------
-// CSV column type strings (kdb+ .h.cd / 0: format)
-//   D = date, S = symbol, F = float, J = long
+// CSV column type strings
+//   D=date  S=symbol  F=float  J=long
+//
+// Column order mirrors Python CSV writers in fmp_client.py:
+//   fundamentals: date, symbol, market, <floats>
+//   ohlc:         date, symbol, market, open, high, low, close, volume
+//   pillar:       symbol, market, <9 floats>
 // ---------------------------------------------------------------------------
-INCOME_TYPES:   "DSFFFF"
-BALANCE_TYPES:  "DSFFFF"
-CASHFLOW_TYPES: "DSF"
-RATIOS_TYPES:   "DSFF"
-OHLC_TYPES:     "DSFFFFJ"
-PILLAR_TYPES:   "SFFFFFFFFF"   // symbol + 9 floats (no date column)
+INCOME_TYPES:  "DSSFFF"      // date, symbol, market, revenue, netIncome, ebit
+BALANCE_TYPES: "DSSFFFF"     // date, symbol, market, totalAssets, totalLiabilities, longTermDebt, totalEquity
+CASHFLOW_TYPES:"DSSF"        // date, symbol, market, freeCashFlow
+RATIOS_TYPES:  "DSSFF"       // date, symbol, market, roic, sharesOutstanding
+OHLC_TYPES:    "DSSFFFFJ"    // date, symbol, market, open, high, low, close, volume
+PILLAR_TYPES:  "SSFFFFFFFFF" // symbol, market, 9 floats
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Parse a CSV with given type string, first row = header
 loadCsv:{[types; path]
   (types; enlist ",") 0: path
 }
 
-// Ensure parent directory exists before splay
+// Concatenate two tables; handles the case where either may be empty
+safeCat:{[t1; t2]
+  $[0=count t1; t2;
+    0=count t2; t1;
+    t1, t2]
+}
+
+// Load one CSV if it exists, return empty table otherwise
+loadIfExists:{[types; path]
+  $[()~key hsym path;
+    (enlist"")!enlist();   // missing file → placeholder; caller checks count
+    loadCsv[types; hsym path]
+  ]
+}
+
 ensureDir:{[dir] if[not (type key dir)=9h; .[`; (); {[d] hsym `$string[d]}; dir]]}
 
-// Append rows to a splayed table, or create it if absent.
-// kdb+ 32-bit: use `append` (upsert into on-disk col files) for incremental load
 splaySave:{[dir; tbl]
   p: hsym `$string[dir];
   if[()~key p;
-    @[p; tbl; ,]           // first write: create splay
-  ; @[p; tbl; ,:]          // subsequent: append columns
+    @[p; tbl; ,]
+  ; @[p; tbl; ,:]
   ]
 }
+
+// ---------------------------------------------------------------------------
+// Resolve which market suffixes to load
+// ---------------------------------------------------------------------------
+MARKETS: `IN`US                    // both by default
+
+// If -market flag passed on CLI, restrict to that suffix
+if[`market in key .z.x;
+  MARKETS: enlist `$upper .z.x`market
+ ]
+
+// ---------------------------------------------------------------------------
+// Generic fundamental loader
+//   name     : table name atom (e.g. `incomeStatement)
+//   baseName : CSV file stem   (e.g. "income_statement")
+//   types    : kdb+ type string
+//   dir      : on-disk splay directory path string
+// ---------------------------------------------------------------------------
+loadFundamental:{[name; baseName; types; dir]
+  show "Loading ", baseName, " …";
+  rows: ();
+  {[mkts; baseName; types]
+    sfx: lower string mkts;
+    path: `$":data/fundamentals/", baseName, "_", sfx, ".csv";
+    $[()~key hsym path;
+      show "  [SKIP] not found: ", string[path];
+      [
+        t: loadCsv[types; hsym path];
+        t: update date:`date$date, market:`symbol$market from t;
+        show "  [", upper sfx, "] ", string[count t], " rows";
+        rows,: enlist t
+      ]
+    ]
+  }[; baseName; types] each MARKETS;
+  if[0=count rows; :()];
+  combined: $[1=count rows; first rows; (ssr/)[; (" ";""); raze] rows];  // concat all
+  combined: $[1=count rows; first rows; {x,y}/[rows]];
+  combined: update date:`date$date from combined;
+  dbDir: ` sv (DB; `$"fundamentals/", string[dir], "/");
+  ensureDir dbDir;
+  (` sv dbDir, `.) set .Q.en[DB] combined;
+  show "  → ", string[count combined], " total rows written to db/fundamentals/", string[dir]
+ }
 
 // ---------------------------------------------------------------------------
 // Fundamental loaders
 // ---------------------------------------------------------------------------
 
 loadIncomeStatement:{[]
-  path: ` sv (FUND_CSV; `income_statement.csv);
-  show "Loading income_statement.csv …";
-  t: loadCsv[INCOME_TYPES; path];
-  // Cast kdb+ date column (already YYYY.MM.DD from Python)
-  t: update date:`date$date from t;
+  show "=== incomeStatement ===";
+  all: ();
+  {[sfx]
+    path: hsym `$":data/fundamentals/income_statement_", sfx, ".csv";
+    $[()~key path;
+      show "  [SKIP] income_statement_", sfx, ".csv not found";
+      [
+        t: loadCsv[INCOME_TYPES; path];
+        t: update date:`date$date, market:`symbol$market from t;
+        show "  [", upper sfx, "] ", string[count t], " rows";
+        all,: enlist t
+      ]
+    ]
+  }[;] each string lower each MARKETS;
+  if[0=count all; :()];
+  combined: {x,y}/[all];
   dir: ` sv (DB; `fundamentals/incomeStatement/);
   ensureDir dir;
-  (` sv dir, `.) set .Q.en[DB] t;          // enumerate symbols, splay
-  show "  income_statement → ", string[count t], " rows";
+  (` sv dir, `.) set .Q.en[DB] combined;
+  show "  total → ", string[count combined], " rows"
  }
 
 loadBalanceSheet:{[]
-  path: ` sv (FUND_CSV; `balance_sheet.csv);
-  show "Loading balance_sheet.csv …";
-  t: loadCsv[BALANCE_TYPES; path];
-  t: update date:`date$date from t;
+  show "=== balanceSheet ===";
+  all: ();
+  {[sfx]
+    path: hsym `$":data/fundamentals/balance_sheet_", sfx, ".csv";
+    $[()~key path;
+      show "  [SKIP] balance_sheet_", sfx, ".csv not found";
+      [
+        t: loadCsv[BALANCE_TYPES; path];
+        t: update date:`date$date, market:`symbol$market from t;
+        show "  [", upper sfx, "] ", string[count t], " rows";
+        all,: enlist t
+      ]
+    ]
+  }[;] each string lower each MARKETS;
+  if[0=count all; :()];
+  combined: {x,y}/[all];
   dir: ` sv (DB; `fundamentals/balanceSheet/);
   ensureDir dir;
-  (` sv dir, `.) set .Q.en[DB] t;
-  show "  balance_sheet → ", string[count t], " rows";
+  (` sv dir, `.) set .Q.en[DB] combined;
+  show "  total → ", string[count combined], " rows"
  }
 
 loadCashFlow:{[]
-  path: ` sv (FUND_CSV; `cash_flow.csv);
-  show "Loading cash_flow.csv …";
-  t: loadCsv[CASHFLOW_TYPES; path];
-  t: update date:`date$date from t;
+  show "=== cashFlow ===";
+  all: ();
+  {[sfx]
+    path: hsym `$":data/fundamentals/cash_flow_", sfx, ".csv";
+    $[()~key path;
+      show "  [SKIP] cash_flow_", sfx, ".csv not found";
+      [
+        t: loadCsv[CASHFLOW_TYPES; path];
+        t: update date:`date$date, market:`symbol$market from t;
+        show "  [", upper sfx, "] ", string[count t], " rows";
+        all,: enlist t
+      ]
+    ]
+  }[;] each string lower each MARKETS;
+  if[0=count all; :()];
+  combined: {x,y}/[all];
   dir: ` sv (DB; `fundamentals/cashFlow/);
   ensureDir dir;
-  (` sv dir, `.) set .Q.en[DB] t;
-  show "  cash_flow → ", string[count t], " rows";
+  (` sv dir, `.) set .Q.en[DB] combined;
+  show "  total → ", string[count combined], " rows"
  }
 
 loadRatios:{[]
-  path: ` sv (FUND_CSV; `ratios.csv);
-  show "Loading ratios.csv …";
-  t: loadCsv[RATIOS_TYPES; path];
-  t: update date:`date$date from t;
+  show "=== ratios ===";
+  all: ();
+  {[sfx]
+    path: hsym `$":data/fundamentals/ratios_", sfx, ".csv";
+    $[()~key path;
+      show "  [SKIP] ratios_", sfx, ".csv not found";
+      [
+        t: loadCsv[RATIOS_TYPES; path];
+        t: update date:`date$date, market:`symbol$market from t;
+        show "  [", upper sfx, "] ", string[count t], " rows";
+        all,: enlist t
+      ]
+    ]
+  }[;] each string lower each MARKETS;
+  if[0=count all; :()];
+  combined: {x,y}/[all];
   dir: ` sv (DB; `fundamentals/ratios/);
   ensureDir dir;
-  (` sv dir, `.) set .Q.en[DB] t;
-  show "  ratios → ", string[count t], " rows";
+  (` sv dir, `.) set .Q.en[DB] combined;
+  show "  total → ", string[count combined], " rows"
  }
 
 loadPillarMetrics:{[]
-  path: ` sv (FUND_CSV; `pillar_metrics.csv);
-  show "Loading pillar_metrics.csv …";
-  t: loadCsv[PILLAR_TYPES; path];
+  show "=== pillarMetrics ===";
+  all: ();
+  {[sfx]
+    path: hsym `$":data/fundamentals/pillar_metrics_", sfx, ".csv";
+    $[()~key path;
+      show "  [SKIP] pillar_metrics_", sfx, ".csv not found";
+      [
+        t: loadCsv[PILLAR_TYPES; path];
+        t: update market:`symbol$market from t;
+        show "  [", upper sfx, "] ", string[count t], " rows";
+        all,: enlist t
+      ]
+    ]
+  }[;] each string lower each MARKETS;
+  if[0=count all; :()];
+  combined: {x,y}/[all];
   dir: ` sv (DB; `fundamentals/pillarMetrics/);
   ensureDir dir;
-  (` sv dir, `.) set .Q.en[DB] t;
-  show "  pillar_metrics → ", string[count t], " rows";
+  (` sv dir, `.) set .Q.en[DB] combined;
+  show "  total → ", string[count combined], " rows"
  }
 
 // ---------------------------------------------------------------------------
-// OHLC loader  — date-partitioned for memory efficiency
+// OHLC loader  — date-partitioned, one directory per year
 //
-// Each ohlc_YYYY.csv is written into db/YYYY/ohlc/ so that kdb+ only
-// maps the partitions actually queried into memory (critical for 32-bit).
+// Discovers all ohlc_YYYY_in.csv and ohlc_YYYY_us.csv files, groups by year,
+// merges IN+US rows for the same year, then writes a single db/YYYY/ohlc/ slab.
 // ---------------------------------------------------------------------------
 
-loadOhlcYear:{[csvFile]
-  // Extract year from filename: ohlc_2023.csv → 2023
-  yr: `long$ string[csvFile] except "ohlc_.csv:";  // naive but reliable
-  // Re-derive using file stem
-  stem: last ` vs csvFile;
-  yr:   `int$ last "_" vs string stem;
-
-  show "Loading ", string[csvFile], " (year=", string[yr], ") …";
-  t: loadCsv[OHLC_TYPES; hsym csvFile];
-  t: update date:`date$date from t;
-
-  // Sort by date within each symbol for efficient kdb+ queries
-  t: `date xasc t;
-
-  // Write partition: db/YYYY/ohlc/
+loadOhlcYear:{[yr; sfxList]
+  show "=== ohlc year ", string[yr], " ===";
+  all: ();
+  {[yr; sfx]
+    path: hsym `$":data/ohlc/ohlc_", string[yr], "_", sfx, ".csv";
+    $[()~key path;
+      show "  [SKIP] ohlc_", string[yr], "_", sfx, ".csv not found";
+      [
+        t: loadCsv[OHLC_TYPES; path];
+        t: update date:`date$date, market:`symbol$market from t;
+        show "  [", upper sfx, "] ", string[count t], " rows";
+        all,: enlist t
+      ]
+    ]
+  }[yr;] each sfxList;
+  if[0=count all; :()];
+  combined: {x,y}/[all];
+  combined: `date xasc combined;
   partDir: ` sv (DB; `$string[yr]; `ohlc/);
   ensureDir partDir;
-  (` sv partDir, `.) set .Q.en[DB] t;
-  show "  year ", string[yr], " → ", string[count t], " rows";
+  (` sv partDir, `.) set .Q.en[DB] combined;
+  show "  year ", string[yr], " total → ", string[count combined], " rows"
  }
 
 loadAllOhlc:{[]
-  // Discover all ohlc_*.csv files in data/ohlc/
-  csvFiles: key ` sv (OHLC_CSV; `);
-  ohlcFiles: csvFiles where csvFiles like "ohlc_????.csv";
+  sfxList: string lower each MARKETS;
+  // Discover all ohlc_YYYY_*.csv files and collect unique years
+  allFiles: key ` sv (OHLC_CSV; `);
+  ohlcFiles: string allFiles where allFiles like "ohlc_????_*.csv";
   if[0=count ohlcFiles;
-    show "WARNING: no ohlc_YYYY.csv files found in data/ohlc/";
+    show "WARNING: no ohlc_YYYY_<market>.csv files found in data/ohlc/";
     :()
   ];
-  loadOhlcYear each ` sv/: (OHLC_CSV;) each ohlcFiles;
+  // Extract years: "ohlc_2023_in.csv" → 2023
+  years: asc distinct `int${"_" vs x}[;1] each ohlcFiles;
+  loadOhlcYear[; sfxList] each years;
  }
 
 // ---------------------------------------------------------------------------
@@ -169,31 +299,28 @@ loadAllOhlc:{[]
 // ---------------------------------------------------------------------------
 
 loadAll:{[]
-  show "=== JARVIS KDB+ loader starting ===";
+  show "=== JARVIS KDB+ loader starting (markets: ", " " sv string MARKETS, ") ===";
   loadIncomeStatement[];
   loadBalanceSheet[];
   loadCashFlow[];
   loadRatios[];
   loadPillarMetrics[];
   loadAllOhlc[];
-
-  // Write partition metadata so \l db works correctly for partitioned ohlc
   .Q.dpft[DB; `ohlc; `date; `symbol];
-
-  show "=== Load complete. Run: \\l db ===";
+  show "=== Load complete. Run: \\l db ==="
  }
 
 // ---------------------------------------------------------------------------
-// Post-load: bring tables into session from disk
+// Post-load: open DB in session
 // ---------------------------------------------------------------------------
 
 openDb:{[]
   \l db
-  show "Tables available: ", " " sv string tables[];
+  show "Tables available: ", " " sv string tables[]
  }
 
 // ---------------------------------------------------------------------------
-// Memory usage report  (critical for 32-bit 4 GB cap)
+// Memory usage report
 // ---------------------------------------------------------------------------
 
 memReport:{[]
@@ -202,18 +329,17 @@ memReport:{[]
   show "Mapped (MB):    ", string .Q.w[][`mapped] % 1e6;
   show "Physical (MB):  ", string .Q.w[][`physical] % 1e6;
   if[.Q.w[][`heap] > 3e9;
-    show "WARNING: heap > 3 GB — approaching 32-bit limit!";
+    show "WARNING: heap > 3 GB — approaching 32-bit limit!"
   ]
  }
 
 // ---------------------------------------------------------------------------
-// CLI entry  — run loadAll when script is executed directly
+// CLI entry
 // ---------------------------------------------------------------------------
 
 if[`load in key .z.x;
-  // selective load mode: q kdb_loader.q -load ohlc
-  target: .z.x `load;
-  $[target~"ohlc";   loadAllOhlc[];
+  target: .z.x`load;
+  $[target~"ohlc";    loadAllOhlc[];
     target~"income";  loadIncomeStatement[];
     target~"balance"; loadBalanceSheet[];
     target~"cashflow";loadCashFlow[];
@@ -221,7 +347,7 @@ if[`load in key .z.x;
     target~"pillars"; loadPillarMetrics[];
     show "Unknown target: ", target]
 ; // default: load everything
-  loadAll[];
+  loadAll[]
  ]
 
 memReport[];
