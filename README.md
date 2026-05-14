@@ -237,14 +237,3 @@ db/
 All tables carry a `market` column (`\`IN` or `\`US`) so both universes coexist in the same tables. Fundamentals are keyed on `[date; symbol]`; `pillarMetrics` and `fundMeta` are keyed on `[symbol]`.
 
 Only partitions that are actively queried are mmap'd into RAM, keeping heap usage well within the 4 GB 32-bit engine limit. Run `memReport[]` after loading to verify.
-
----
-
-## FMP API tier guide
-
-| Tier | Cost | Calls | Suitable for |
-|---|---|---|---|
-| Free | $0 | 250 / day | Up to ~250 stocks with weekly fundamentals rotation |
-| Starter | $19 / month | 300 / min | Up to ~1,000 stocks with daily full refresh |
-
-For a passion project at ≤ 250 stocks, the free tier is sufficient: OHLC runs free via yfinance, and fundamentals rotate across the universe over ~4 weekdays.
