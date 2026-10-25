@@ -22,7 +22,7 @@ Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · 
 | Fundamentals (income, balance, cash flow, ROIC/shares) | FMP free (250 calls/day) | Annual | Rotating by staleness, ~62 tickers/day | Last 5 fiscal years | `lake/fundamentals/*.parquet` | `[~]` |
 | Daily OHLC, 4 markets | Yahoo (`yfinance`) | 1 day | Every trading day after the last close (22:30 UTC) | 5 years backfill | `lake/ohlc/year=YYYY/` | `[~]` not run live (Yahoo blocked in the build sandbox) |
 | Intraday bars, interim, **India only** | Yahoo (`yfinance`) | 5 min | Once, after the NSE close | About 59 days via `--backfill`, then forward (see 2.1) | `lake/bars/interval=5m/date=YYYY-MM-DD/` | `[~]` retire once the Upstox feed is live |
-| **Live ticks + L1 (new)** | Upstox API v2 WebSocket (Protobuf) | Tick / L1 snapshot, aggregated to 1 min | During market hours | Forward-only | `lake/bars/interval=1m/`, optional `lake/ticks/` | `[~]` core built, adapter blocked (section 13) |
+| **Live ticks + L1 (new)** | Upstox API **v3** WebSocket (Protobuf) | Tick / L1 snapshot, aggregated to 1 min | During market hours | Forward-only | `lake/bars/interval=1m/`, optional `lake/ticks/` | `[~]` built and tested against a fake server; not run against Upstox (section 13) |
 | Index F&O intraday | TBD | TBD | TBD | TBD | TBD | `[ ]` see section 9 |
 
 ### 2.1 Constraint that shapes the whole intraday plan
@@ -212,6 +212,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 
 | Date | Event | Notes |
 |---|---|---|
+| 2026-10-25 | Upstox v3 feed adapter built (`data_layer/upstox/`): decode, instrument keys from ISIN, reconnecting WebSocket runner, daily scheduling, 8 tests incl. fake server. Protobuf module vendored from the official SDK (ADR-4) | Not yet run against Upstox |
 | 2026-10-25 | Daily OHLC re-extended to India+US+UK+EU (5y, Yahoo); intraday, ticks and fundamentals stay India only; `--backfill` for deepest Yahoo intraday window; `currency` column added to universe (ADR-3). Earlier same day: scope narrowed to NSE only; US removed from universe, fetchers, scheduler, lake and tests. Upstox v2 WebSocket chosen for live tick/L1 (ADR-2); tick model, bar aggregator and segment storage built | Adapter blocked on proto/docs access (section 13) |
 | 2026-10-25 | Runbook created; intraday bars collector, `bars5m` schema and loader added | Not yet run on the VPS |
 | 2026-10-25 | `yf_client` universe now read from `data/universe.csv` (previously a hardcoded 20-ticker US fallback) | |
@@ -226,7 +227,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 | O4 | Universe target: stay at about 250 stocks or move toward 1,000? (drives FMP tier and storage) | Phase 1 |
 | O5 | First F&O underlying, and the first strategy that needs it | Phase 3 |
 | O6 | Monthly data budget ceiling | Phase 3 |
-| O7 | Upstox v2 or v3? Community reports say v2 is to be deprecated; the v2 feed may stop working | Section 13 |
+| O7 | ~~Upstox v2 or v3~~ Closed: v3 (ADR-4) | — |
 | O8 | Keep raw ticks/L1, or bars only? (sizing in 13.4) | Section 13 |
 | O9 | Fundamentals source for NSE: does the FMP free tier cover Indian tickers? Unverified, must be tested before relying on it | Phase 1 |
 | O11 | Which UK and EU indices define the universe, and how many names (about 1,200 total was mentioned earlier)? | Phase 1 |
@@ -244,7 +245,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 
 ### ADR-2: NSE only, Upstox WebSocket for live tick/L1 (2026-10-25)
 - **Context:** the product now targets Indian markets only. A live broker feed gives real ticks and top-of-book, which Yahoo cannot (Yahoo is delayed, unofficial and keeps only about 60 days of 5-minute history).
-- **Decision:** drop US/UK/EU. Ingest Upstox API v2 market data over WebSocket (Protobuf, binary frames), aggregate to 1-minute bars in-process, persist bars (and optionally raw ticks) as append-only Parquet segments.
+- **Decision:** drop US/UK/EU. Ingest Upstox API market data over WebSocket (Protobuf, binary frames), aggregate to 1-minute bars in-process, persist bars (and optionally raw ticks) as append-only Parquet segments.
 - **Consequences:** history starts the day the feed first runs. Upstox's historical-candle API can backfill daily bars; user reports say 1-minute history is limited to a rolling window of a few months (unverified, section 13.3). Fundamentals still need a separate source (Upstox does not provide them).
 - **Kept:** Yahoo daily/intraday collectors stay as an interim and cross-check source until the Upstox path is verified.
 
@@ -253,28 +254,51 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 - **Intraday depth:** Yahoo allows about 59 days of 5m and 6 of 1m; 60m bars reach about 729 days. **6 months of 5-minute history cannot come from Yahoo.** Options: take 60m for 2 years from Yahoo, rely on Upstox historical candles (reported as about six months of 1m; unverified, section 13.3), or let the live feed accumulate forward.
 - **Not yet handled:** (1) UK `.L` prices are in pence (GBp), not pounds, and EU is quoted in EUR, US in USD, India in INR; no FX table exists, so cross-market return comparisons need one. (2) Yahoo prices are adjusted at fetch time and the daily job refreshes only the last 7 days, so after a split or dividend older rows disagree with new ones. (3) UK and EU universe rows are 10-name placeholders without ISINs; the real index constituents (FTSE 100/250? STOXX 600? Euro Stoxx 50?) are not chosen. (4) Yahoo was unreachable from the build sandbox, so no live fetch has run.
 
+### ADR-4: Upstox API v3 for the live feed (2026-10-25)
+- **Decision:** use the v3 market data feed (`wss://api.upstox.com/v3/feed/market-data-feed`), not v2, which community posts report as heading for deprecation. Amends ADR-2.
+- **Source of truth for the protocol:** the official `upstox-python-sdk` 2.30.0 (MIT). The Upstox docs site was unreachable from the build sandbox, so endpoint, subscribe message, modes and Protobuf schema were read from the SDK's own source and generated module, which is vendored in `data_layer/upstox/proto/`.
+
 ## 13. Upstox live feed (tick + L1)
 
-**Status: `[~]` Core built and unit-tested. The WebSocket adapter is NOT written: the Upstox documentation host was not reachable from the build sandbox, so the Protobuf schema and message formats are unverified. Do not write the decoder from memory.**
+**Status: `[~]` Built and unit-tested end to end against a local fake server that speaks the SDK's protocol. NOT yet run against the real Upstox service (needs a valid token on a trading day). That run is Gate U1.**
 
 ### 13.1 What exists
-- `data_layer/ticks.py`: `Tick` (ts, symbol, ltp, cumulative day volume, bid/ask and sizes, OI) and `BarAggregator`. Session-aware (03:45-10:00 UTC), buckets aligned to the 09:15 IST open, volume from cumulative-volume deltas, late ticks ignored, no forward fill. Pure Python, about 220 k ticks/s measured, enough for a 1,200-symbol universe at a few thousand ticks per second.
-- `data_layer/tick_store.py`: append-only Parquet segments for bars and raw ticks, `compact_day()` to merge and deduplicate after the close. Queryable immediately as `bars_1m` via `data_layer.query.Lake`.
-- Tests: `tests/test_lake.py` (aggregation, volume deltas, 60-minute alignment, segment compaction).
+- `data_layer/upstox/decode.py`: Protobuf `FeedResponse` to `Tick`. Handles stock/derivative full feeds (LTP, last trade time, cumulative volume `vtt`, first level bid/ask and sizes, OI), index feeds (LTP only), `ltpc` mode and `option_greeks` mode; reads market-status frames.
+- `data_layer/upstox/instruments.py`: universe symbol to instrument key, `NSE_EQ|<ISIN>`, from the ISIN column. Symbols without a valid ISIN are reported and skipped. Optional validation against a locally saved instrument master.
+- `data_layer/upstox/feed.py`: `FeedProcessor` (frame bytes to bars, drops last-trade-yesterday and future-timestamped ticks) and `UpstoxFeed` (WebSocket with bearer token, binary JSON subscribe in batches of 500, periodic flush and write, watchdog that reconnects after 120 s without frames, exponential backoff, fatal error on HTTP 401/403 with a "token expires daily" message). The daemon waits for each weekday session (03:40-10:05 UTC), then compacts the day. `--once` runs a single session now.
+- `data_layer/ticks.py`, `data_layer/tick_store.py`: aggregation and storage (section 13.4). Bars land in `lake/bars/interval=1m/` and are queryable as `bars_1m`.
+- Tests: `tests/test_upstox.py`.
 
-### 13.2 What is missing (in order)
-1. [ ] **Gate U1, protocol:** obtain `MarketDataFeed.proto` and the current v2 docs (give the sandbox access to the Upstox docs host, or commit the `.proto` to the repo). Capture one real binary frame on a trading day and keep it as a test fixture.
-2. [ ] **Auth:** Upstox uses OAuth and the access token expires daily. Decide how it is refreshed (O10). The feed URL comes from an authorize call, not a fixed address.
-3. [ ] **Instrument map:** download the daily NSE instrument master, map each universe symbol to its Upstox instrument key (equity keys are ISIN-based, e.g. `NSE_EQ|<ISIN>`), cache locally. `universe.csv` already carries ISINs. Report symbols with no match.
-4. [ ] **Adapter (`upstox_feed.py`):** connect, subscribe in batches within the documented per-connection limits, decode frames to `Tick`, feed `BarAggregator`, call `flush(now)` every few seconds, write segments every minute, `compact_day()` after 10:00 UTC. Reconnect with backoff, resubscribe, and log gaps.
-5. [ ] **Service:** run under `systemd`, start before 03:45 UTC, alert on no ticks for N minutes during market hours.
+### 13.2 Run it (VPS)
+```bash
+export UPSTOX_ACCESS_TOKEN=...            # refresh daily, see O10
+python -m data_layer.upstox.feed --once --limit 20      # smoke test on a trading day
+python -m data_layer.upstox.feed                         # daemon
+```
+`systemd` unit (`/etc/systemd/system/jarvis-feed.service`):
+```ini
+[Service]
+User=jarvis
+WorkingDirectory=/home/jarvis/JARVIS
+EnvironmentFile=/home/jarvis/JARVIS/.env
+ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m data_layer.upstox.feed
+Restart=always
+RestartSec=10
+```
 
-### 13.3 Known risks (from community posts, unverified, check the official docs)
-- Upstox v2 is reported to be heading for deprecation in favour of v3 (O7). Building on v2 risks a forced rewrite.
-- Subscription count limits per connection and per user apply; 1,200 instruments may need several connections or a lower subscription mode.
-- Historical 1-minute candles are reported as a rolling window of about six months; daily candles reach back years. So a 5-year intraday history is not available from Upstox either; it accumulates forward from the first live day.
-- The instrument master download has been reported to return 403 to some automated clients.
-- Gaps: if the feed is down, the missing ticks are unrecoverable. Use the historical intraday API to repair 1-minute bars when it covers the gap.
+### 13.3 Gate U1: first real run (still to do)
+- [ ] Token obtained and the feed accepts it (HTTP 101, not 401)
+- [ ] One captured real frame saved as a test fixture; confirm `ltt` is epoch **milliseconds** (the processor warns if timestamps look wrong)
+- [ ] `full` mode for the whole universe works; find the real per-connection and per-user subscription limits and set `SUBSCRIBE_BATCH` and the connection count accordingly (not documented in the SDK)
+- [ ] Bars for a full session match a second source (open, high, low, close; volume differs slightly because bars are built from tick deltas)
+- [ ] First bar 03:45 UTC, last bar 09:59 UTC, no duplicate `(symbol, ts)` after `compact_day`
+- [ ] Behaviour on an NSE holiday (connection works, no ticks; the watchdog will reconnect every 2 minutes, harmless but noisy)
+- [ ] Decide O10: how the daily token is refreshed. Today it is an environment variable set by hand.
 
-### 13.4 Storage sizing for the optional raw tick/L1 store
+### 13.4 Known limits
+- The aggregator builds volume from cumulative-volume deltas; the first tick after connect is a baseline, so volume traded before the collector connected is not attributed to any bar. Start before 03:45 UTC.
+- If the feed is down, ticks in the gap are unrecoverable from the live path. Upstox's historical-candle API (community reports: about six months of 1-minute data, unverified) can repair 1-minute bars; no code for that exists yet.
+- Index instruments carry no volume.
+
+### 13.5 Storage sizing for the optional raw tick/L1 store
 At an average of 1 update per second per symbol over the 6.25-hour session, 1,200 symbols produce about 27 million ticks a day, roughly 1-2 GB a day compressed with L1 fields, about 250-500 GB a year. That is why bars are the default and raw ticks are opt-in (O8). 1-minute bars for the same universe are about 450 k rows a day, a few MB.
