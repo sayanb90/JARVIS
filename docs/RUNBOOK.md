@@ -267,6 +267,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 - `data_layer/upstox/decode.py`: Protobuf `FeedResponse` to `Tick`. Handles stock/derivative full feeds (LTP, last trade time, cumulative volume `vtt`, first level bid/ask and sizes, OI), index feeds (LTP only), `ltpc` mode and `option_greeks` mode; reads market-status frames.
 - `data_layer/upstox/instruments.py`: universe symbol to instrument key, `NSE_EQ|<ISIN>`, from the ISIN column. Symbols without a valid ISIN are reported and skipped. Optional validation against a locally saved instrument master.
 - `data_layer/upstox/feed.py`: `FeedProcessor` (frame bytes to bars, drops last-trade-yesterday and future-timestamped ticks) and `UpstoxFeed` (WebSocket with bearer token, binary JSON subscribe in batches of 500, periodic flush and write, watchdog that reconnects after 120 s without frames, exponential backoff, fatal error on HTTP 401/403 with a "token expires daily" message). The daemon waits for each weekday session (03:40-10:05 UTC), then compacts the day. `--once` runs a single session now.
+- `data_layer/upstox/candles.py`: REST candle API client for whole-day pulls, gap repair and range backfill (section 14.4b). Fills gaps only unless `--overwrite`; tags bars `src='rest'`.
 - `data_layer/ticks.py`, `data_layer/tick_store.py`: aggregation and storage (section 13.4). Bars land in `lake/bars/interval=1m/` and are queryable as `bars_1m`.
 - Tests: `tests/test_upstox.py`.
 
@@ -306,7 +307,7 @@ RestartSec=10
 
 ### 13.4 Known limits
 - The aggregator builds volume from cumulative-volume deltas; the first tick after connect is a baseline, so volume traded before the collector connected is not attributed to any bar. Start before 03:45 UTC.
-- If the feed is down, ticks in the gap are unrecoverable from the live path. Upstox's historical-candle API (community reports: about six months of 1-minute data, unverified) can repair 1-minute bars; no code for that exists yet.
+- If the feed is down, ticks in the gap are unrecoverable from the live path. Upstox's historical-candle API (community reports: about six months of 1-minute data, unverified) can repair 1-minute bars; use `python -m data_layer.upstox.candles` (section 14.4b).
 - Index instruments carry no volume.
 
 ### 13.5 Storage sizing for the optional raw tick/L1 store
@@ -328,6 +329,8 @@ At an average of 1 update per second per symbol over the 6.25-hour session, 1,20
 | 03:45 to 10:00 | 09:15 to 15:30 | session runs unattended; peek at the log |
 | 10:05 | 15:35 | feed stops by itself and compacts the day |
 | after about 11:00 | after 16:30 | 14.5 verify; Yahoo's daily bar for the day must exist first |
+
+**Can only test after the close?** Use the after-close path in 14.4b: the token steps work at any hour and the whole day's bars can be pulled at once from Upstox's candle API. That proves the token, the REST format, storage and verification; it does **not** prove the live WebSocket (needs a market-hours run on another day).
 
 First check the NSE holiday calendar for the test date (likely Monday 2026-10-26). On a holiday the connection works but no ticks arrive, so move 14.3-14.5 to the next trading day.
 
@@ -396,6 +399,19 @@ What the log should show:
 
 Red flags in the log: `ahead of local clock` (timestamp unit or VPS clock wrong), `no frames for 120s` repeatedly during market hours, `rejected the token` (expired; redo 14.3), repeated `connection lost`.
 
+### 14.4b After-close path: pull the whole day at once (REST)
+Use this if you cannot be online during the session. Needs only a token (14.3 works at any hour; at night `auth check` will say "accepted, no frame", which is normal).
+```bash
+python -m data_layer.upstox.candles --date 2026-10-26 --limit 20 --dump-raw 3     # one API call per instrument
+python -m data_layer.verify bars --date 2026-10-26 --interval 1m                   # as in 14.5
+```
+- `--dump-raw 3` saves the first three raw responses to `logs/candles/`: bring them back, they settle the exact response format.
+- It only **fills gaps**: bars already collected live are kept (`--overwrite` replaces them). Bars are tagged `src = 'rest'` (live ones are `'live'`); VWAP and tick count are empty for REST bars.
+- For the present trading day the tool asks the intraday endpoint first and falls back to the historical one. If both come back empty right after the close, run it again the next morning before the open, or force `--source intraday`.
+- `--from 2026-09-01 --to 2026-10-23 --chunk-days 5` repairs or backfills a range (community posts say 1-minute history reaches back about six months; unverified, and per-call range limits are unknown, so the default is one day per call).
+- **Pass when:** `verify bars` shows no FAIL, 375 bars for liquid names (first 03:45, last 09:59 UTC), last-bar close within 0.5% of Yahoo's daily close.
+- **Not proven by this path:** the WebSocket connection, tick decoding, and tick-to-bar aggregation. Do a live `feed --once` run in a market session before enabling the daemon.
+
 ### 14.5 Verify the intraday day (after about 11:00 UTC)
 ```bash
 python -m data_layer.yf_client --mode daily --market IN --days-back 3 && python -m data_layer.lake --load daily   # Yahoo daily bar to cross-check against
@@ -450,6 +466,7 @@ Run everything (no network, no credentials, no real data touched): `pip install 
 | `live_feed` | A full 375-minute session becomes complete 1-minute bars with bid/ask; passes verification and agrees with Yahoo's daily bar; reconnects without data loss; 401/403 stop with a clear message; stale and future-stamped ticks rejected; Ctrl+C saves and compacts |
 | `fundamentals_rotation` | Stalest-first within the 250-call budget; a full cycle covers every stock; a failed fetch is retried first and never marked fresh; India only |
 | `pillar_scoring` | Each of the 8 pillars costs exactly one point in isolation; strict boundaries; unknown or unpriced stocks score 0 |
+| `upstox_day_pull` | A whole session pulled at once after the close passes verification; live bars are kept and only gaps filled; overwrite mode; unknown instrument reported not fatal; expired token stops cleanly; intraday endpoint for today, historical for earlier days |
 | `token_setup` | Login link, token exchange stored with mode 600 and never printed, extended-token adoption only when the feed accepts it |
 | `scheduler_ops` | All four markets loaded; dry run writes nothing; overlapping runs refused; US bars refused; lock released after failure; a total Yahoo outage fails the job |
 

@@ -203,6 +203,8 @@ python -m data_layer.upstox.feed --once --limit 20     # one session now, 20 sym
 python -m data_layer.upstox.feed                       # daemon (waits for each NSE session)
 ```
 
+Missed the session? Pull a whole past or present day from the candle API: `python -m data_layer.upstox.candles --date 2026-10-26` (fills gaps only).
+
 Tested against a local fake server; not yet run against Upstox itself (runbook section 13, Gate U1).
 
 Go-live steps, daily ops, backups and the futures/options planning entry are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).

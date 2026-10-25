@@ -43,12 +43,13 @@ class Bar:
     low: float
     close: float
     volume: int
-    vwap: float
-    n_ticks: int
+    vwap: Optional[float]           # None for bars that came from the REST candle API
+    n_ticks: Optional[int]
     bid: Optional[float]            # last L1 seen inside the bar
     ask: Optional[float]
     bid_qty: Optional[int]
     ask_qty: Optional[int]
+    src: str = "live"               # "live" (built from ticks) or "rest" (Upstox candle API)
 
 
 class _Acc:
