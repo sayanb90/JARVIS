@@ -88,7 +88,7 @@ def _q(path: Path) -> str:
 def _read_csv_sql(path: Path, types: dict[str, str]) -> str:
     """
     SELECT over one staging CSV with explicit column types.  Dates and
-    timestamps are read as text first so the legacy q formats
+    timestamps are read as text first so the legacy dotted formats
     (2026.10.23, 2026.10.23D13:30:00.000000000) are accepted alongside ISO.
     """
     raw = {c: "VARCHAR" if t in ("DATE", "TIMESTAMP") else t for c, t in types.items()}

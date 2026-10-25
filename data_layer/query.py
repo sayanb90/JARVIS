@@ -1,5 +1,5 @@
 """
-JARVIS query layer — DuckDB over the Parquet lake (replaces helpers.q).
+JARVIS query layer — DuckDB over the Parquet lake.
 
   from data_layer.query import Lake
   lake = Lake()

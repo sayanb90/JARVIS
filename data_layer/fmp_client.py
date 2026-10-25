@@ -234,7 +234,7 @@ class FMPExtractor:
         rows = []
         for rec in (data if isinstance(data, list) else []):
             rows.append(IncomeRow(
-                date       = _kdb_date(rec.get("date", "")),
+                date       = _csv_date(rec.get("date", "")),
                 symbol     = ticker,
                 market     = market,
                 revenue    = _f(rec.get("revenue")),
@@ -248,7 +248,7 @@ class FMPExtractor:
         rows = []
         for rec in (data if isinstance(data, list) else []):
             rows.append(BalanceRow(
-                date              = _kdb_date(rec.get("date", "")),
+                date              = _csv_date(rec.get("date", "")),
                 symbol            = ticker,
                 market            = market,
                 total_assets      = _f(rec.get("totalAssets")),
@@ -263,7 +263,7 @@ class FMPExtractor:
         rows = []
         for rec in (data if isinstance(data, list) else []):
             rows.append(CashFlowRow(
-                date           = _kdb_date(rec.get("date", "")),
+                date           = _csv_date(rec.get("date", "")),
                 symbol         = ticker,
                 market         = market,
                 free_cash_flow = _f(rec.get("freeCashFlow")),
@@ -275,7 +275,7 @@ class FMPExtractor:
         rows = []
         for rec in (data if isinstance(data, list) else []):
             rows.append(RatiosRow(
-                date               = _kdb_date(rec.get("date", "")),
+                date               = _csv_date(rec.get("date", "")),
                 symbol             = ticker,
                 market             = market,
                 roic               = _f(rec.get("roic")),  # true ROIC (NOPAT/InvestedCapital)
@@ -423,7 +423,7 @@ def _avg(values: list[float]) -> Optional[float]:
     return sum(values) / len(values) if values else None
 
 
-def _kdb_date(iso: str) -> str:
+def _csv_date(iso: str) -> str:
     return iso.replace("-", ".") if iso else ""
 
 
@@ -442,7 +442,7 @@ def _write_csv(path: Path, headers: list[str], rows: Iterator) -> None:
 # needing a running database.  Also loaded into the fund_meta lake table
 # by lake.py for in-database querying.
 #
-# Format: symbol, market, last_updated  (date as YYYY.MM.DD for kdb+ compat)
+# Format: symbol, market, last_updated  (date as YYYY.MM.DD legacy staging format; lake.py accepts ISO too)
 # ---------------------------------------------------------------------------
 
 def read_fund_meta() -> dict[str, date]:
@@ -458,7 +458,7 @@ def read_fund_meta() -> dict[str, date]:
         for rec in reader:
             raw = rec.get("last_updated", "").strip()
             try:
-                # Accept both YYYY.MM.DD (kdb+) and YYYY-MM-DD (ISO)
+                # Accept both YYYY.MM.DD (legacy) and YYYY-MM-DD (ISO)
                 dt = date.fromisoformat(raw.replace(".", "-"))
                 result[rec["symbol"].strip()] = dt
             except (ValueError, KeyError):

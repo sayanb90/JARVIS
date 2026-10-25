@@ -213,7 +213,6 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 | Date | Event | Notes |
 |---|---|---|
 | 2026-10-25 | Runbook created; intraday bars collector, `bars5m` schema and loader added | Not yet run on the VPS |
-| 2026-10-25 | (superseded by ADR-1) Fixed `kdb_loader.q` CLI parsing (`.Q.opt` was missing, so `-mode`/`-load` flags were ignored and every run did a full reload) | Affected scheduler-triggered loads |
 | 2026-10-25 | `yf_client` universe now read from `data/universe.csv` (previously a hardcoded 20-ticker US fallback) | |
 
 ## 11. Open decisions for the owner
