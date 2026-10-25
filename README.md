@@ -10,7 +10,7 @@
 
 ---
 
-JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to **NSE-listed Indian equities** and ingests live tick / L1 data from the Upstox API, storing everything in a **Parquet lake queried with DuckDB** (no database server, no memory ceiling, free).
+JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to **NSE-listed Indian equities**, keeps 5 years of daily prices for **India, US, UK and EU**, and ingests live tick / L1 data for India from the Upstox API, storing everything in a **Parquet lake queried with DuckDB** (no database server, no memory ceiling, free).
 
 ---
 
@@ -48,7 +48,8 @@ The universe is defined in `data/universe.csv`. Each row carries all common iden
 | Column | Description | Example |
 |---|---|---|
 | `symbol` | **Primary key** used throughout the codebase (Yahoo `.NS` style) | `RELIANCE.NS` |
-| `market` | Always `IN` (kept for schema stability) | `IN` |
+| `market` | `IN`, `US`, `UK` or `EU` | `IN` |
+| `currency` | Quote currency (`INR`, `USD`, `GBp` = pence, `EUR`) | `INR` |
 | `exchange` | Listing exchange | `NSE` |
 | `isin` | 12-char identifier; also the basis of Upstox equity instrument keys (`NSE_EQ\|<ISIN>`) | `INE002A01018` |
 | `ric` | Reuters code | `RELI.NS` |
@@ -114,7 +115,7 @@ Edit `data/universe.csv` to add your stocks. The 10 NSE rows shipped with the re
 
 ```bash
 # Fetch 5 years of OHLC via Yahoo Finance — no API key needed
-python -m data_layer.yf_client --mode full --market IN
+python -m data_layer.yf_client --mode full --market ALL    # India, US, UK, EU (daily, 5 years)
 ```
 
 ### 4. Initial fundamentals load (FMP — uses API quota)
@@ -187,7 +188,8 @@ Each stock gets a full refresh roughly once a week.
 **Intraday bars** (aggregated 5-minute bars, collected forward after each market close):
 
 ```bash
-python scheduler.py --job bars --market IN     # interim Yahoo bars; upserts into lake/bars/
+python scheduler.py --job bars --market IN --backfill   # first run: deepest Yahoo window (about 59d of 5m)
+python scheduler.py --job bars --market IN              # daily; India only, upserts into lake/bars/
 ```
 
 **Live tick / L1 (Upstox):** `data_layer/ticks.py` (tick model + bar aggregator) and `data_layer/tick_store.py` (Parquet segments) are built and tested. The WebSocket adapter is not written yet because the Protobuf schema must be checked against the official Upstox docs first; see section 13 of the runbook.
@@ -197,7 +199,7 @@ Go-live steps, daily ops, backups and the futures/options planning entry are in 
 **Manual runs:**
 
 ```bash
-python scheduler.py --job ohlc-daily                # OHLC only
+python scheduler.py --job ohlc-daily                # daily OHLC, all four markets
 python scheduler.py --job fundamentals              # fundamentals only
 python scheduler.py --job all                       # ohlc + fundamentals
 python scheduler.py --job all --dry-run             # print plan only
@@ -225,5 +227,5 @@ lake/
 └── bars/interval=5m/date=YYYY-MM-DD/bars.parquet
 ```
 
-All tables carry a `market` column (`IN`). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in `docs/RUNBOOK.md`.
+All tables carry a `market` column (`IN`, `US`, `UK`, `EU` for daily OHLC; India only for bars and fundamentals). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in `docs/RUNBOOK.md`.
 

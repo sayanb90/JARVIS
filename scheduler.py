@@ -3,7 +3,8 @@ JARVIS Scheduler — cron-invokable data refresh orchestrator.
 
 Jobs
 ----
-ohlc-daily      Fetch last N days of OHLC via yfinance (free, no API key).
+ohlc-daily      Fetch last N days of daily OHLC via yfinance for India, US, UK and EU
+                (free, no API key). Bars and fundamentals are India only.
                 Writes data/ohlc/ohlc_daily_*.csv then calls:
                   data_layer.lake.load_ohlc(daily=True)  -> lake/ohlc/year=YYYY/
 
@@ -23,8 +24,8 @@ all             Run ohlc-daily then fundamentals.
 
 Crontab examples (crontab -e)
 ------------------------------
-# Daily OHLC — 6:30 PM every weekday
-30 18 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job ohlc-daily >> logs/scheduler.log 2>&1
+# Daily OHLC, all four markets — after the last close (UTC server)
+30 22 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job ohlc-daily >> logs/scheduler.log 2>&1
 
 # Fundamentals rotation — 7:00 PM every weekday (auto-picks stalest stocks)
 0 19 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
@@ -161,7 +162,8 @@ def job_fundamentals(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
     log.info("=== JOB: fundamentals [market=%s, budget=%d calls] ===", market, budget)
 
     # Determine which tickers to refresh today
-    mkt_filter = None if market == "ALL" else market
+    market = "IN"   # fundamentals are India only (FMP free-tier budget)
+    mkt_filter = market
     stale = get_stale_tickers(market=mkt_filter, budget=budget)
 
     if not stale:
@@ -186,16 +188,16 @@ def job_fundamentals(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
         return ok
 
     # Upsert fundamentals, pillar metrics and fund_meta into the Parquet lake
-    lake_ok = _load_lake("fundamentals upsert", lake.load_fundamentals, markets_of(market))
+    lake_ok = _load_lake("fundamentals upsert", lake.load_fundamentals, lake.FUND_MARKETS)
     return ok and lake_ok
 
 
 def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
-             dry_run: bool = False) -> bool:
+             dry_run: bool = False, backfill: bool = False) -> bool:
     """Fetch aggregated intraday bars -> data/bars/ -> upsert recent day files."""
     log.info("=== JOB: bars [market=%s, interval=%s] ===", market, interval)
     try:
-        run_bars(market=market, interval=interval, dry_run=dry_run)
+        run_bars(market=market, interval=interval, dry_run=dry_run, backfill=backfill)
     except Exception as exc:
         log.error("Bars fetch failed: %s", exc)
         return False
@@ -204,7 +206,7 @@ def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
         log.info("DRY RUN — skipping lake load")
         return True
 
-    return _load_lake("intraday bars", lake.load_bars, interval, markets=markets_of(market))
+    return _load_lake("intraday bars", lake.load_bars, interval, markets=lake.BARS_MARKETS)
 
 
 def job_all(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
@@ -227,19 +229,20 @@ def main() -> int:
     parser.add_argument("--job", required=True,
                         choices=["ohlc-daily", "fundamentals", "bars", "all"],
                         help="Which job to run")
-    parser.add_argument("--market", default="ALL", choices=["IN", "ALL"],
-                        help="Market universe; NSE only, ALL is an alias for IN (default: ALL)")
+    parser.add_argument("--market", default="ALL", choices=[*lake.MARKETS, "ALL"],
+                        help="Daily OHLC markets (default ALL). Bars and fundamentals are India only")
     parser.add_argument("--budget", type=int, default=FMP_DAILY_BUDGET,
                         help=f"FMP daily call budget for fundamentals (default: {FMP_DAILY_BUDGET})")
     parser.add_argument("--days-back", type=int, default=7,
                         help="Calendar days to look back for OHLC (default: 7)")
+    parser.add_argument("--backfill", action="store_true",
+                        help="bars job: fetch the deepest intraday window Yahoo allows")
     parser.add_argument("--interval", default=INTRADAY_INTERVAL,
                         help=f"Bar size for the bars job (default: {INTRADAY_INTERVAL})")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print plan without making any API calls or DB writes")
 
     args = parser.parse_args()
-    args.market = "IN"   # NSE-only; ALL is accepted as an alias
 
     log.info("JARVIS Scheduler starting — job=%s market=%s dry_run=%s date=%s",
              args.job, args.market, args.dry_run, date.today())
@@ -253,7 +256,7 @@ def main() -> int:
                 market=args.market, budget=args.budget, dry_run=args.dry_run)
         elif args.job == "bars":
             success = job_bars(
-                market=args.market, interval=args.interval, dry_run=args.dry_run)
+                market=args.market, interval=args.interval, dry_run=args.dry_run, backfill=args.backfill)
         else:
             success = job_all(
                 market=args.market, budget=args.budget,

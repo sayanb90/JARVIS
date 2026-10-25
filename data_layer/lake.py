@@ -42,7 +42,9 @@ ROOT = Path(os.getenv("JARVIS_ROOT", Path(__file__).resolve().parent.parent))
 DATA_DIR = ROOT / "data"
 LAKE_DIR = Path(os.getenv("JARVIS_LAKE", ROOT / "lake"))
 
-MARKETS = ("IN",)
+MARKETS = ("IN", "US", "UK", "EU")   # daily OHLC universe
+BARS_MARKETS = ("IN",)                # intraday signals use India only
+FUND_MARKETS = ("IN",)                # fundamentals (FMP free-tier budget) are India only
 
 # table -> (csv stem, key columns, {column: sql type})
 # Types are applied to the CSV on read; dates in the CSVs may be YYYY.MM.DD.
@@ -137,7 +139,7 @@ def _csv_paths(pattern: str, markets: tuple[str, ...]) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
-def load_fundamentals(markets: tuple[str, ...] = MARKETS) -> None:
+def load_fundamentals(markets: tuple[str, ...] = FUND_MARKETS) -> None:
     con = duckdb.connect()
     for name, (stem, keys, types) in FUNDAMENTALS.items():
         for csv_path in _csv_paths(f"fundamentals/{stem}_{{m}}.csv", markets):
@@ -175,7 +177,7 @@ def load_ohlc(markets: tuple[str, ...] = MARKETS, daily: bool = False) -> None:
 
 
 def load_bars(interval: str = "5m", since: date | None = None,
-              markets: tuple[str, ...] = MARKETS) -> int:
+              markets: tuple[str, ...] = BARS_MARKETS) -> int:
     """Upsert data/bars/<interval>/<m>/YYYY-MM-DD.csv into per-day Parquet files."""
     since = since or date.today() - timedelta(days=7)
     con = duckdb.connect()
@@ -196,7 +198,7 @@ def load_bars(interval: str = "5m", since: date | None = None,
 
 
 def load_all(markets: tuple[str, ...] = MARKETS) -> None:
-    load_fundamentals(markets)
+    load_fundamentals(tuple(m for m in markets if m in FUND_MARKETS))
     load_ohlc(markets)
 
 
@@ -205,17 +207,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Load staging CSVs into the Parquet lake")
     ap.add_argument("--load", required=True,
                     choices=["fundamentals", "ohlc", "daily", "bars", "all"])
-    ap.add_argument("--market", choices=["IN", "ALL"], default="ALL")
+    ap.add_argument("--market", choices=[*MARKETS, "ALL"], default="ALL")
     ap.add_argument("--interval", default="5m")
     ap.add_argument("--since", type=date.fromisoformat, default=None,
                     help="bars only: first day to (re)load, YYYY-MM-DD; default last 7 days")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     mk = MARKETS if a.market == "ALL" else (a.market,)
-    {"fundamentals": lambda: load_fundamentals(mk),
+    mk_f = tuple(m for m in mk if m in FUND_MARKETS)
+    mk_b = tuple(m for m in mk if m in BARS_MARKETS)
+    {"fundamentals": lambda: load_fundamentals(mk_f),
      "ohlc": lambda: load_ohlc(mk),
      "daily": lambda: load_ohlc(mk, daily=True),
-     "bars": lambda: load_bars(a.interval, a.since, mk),
+     "bars": lambda: load_bars(a.interval, a.since, mk_b),
      "all": lambda: load_all(mk)}[a.load]()
 
 

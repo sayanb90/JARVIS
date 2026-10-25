@@ -1,7 +1,7 @@
 """
 Yahoo Finance OHLC data layer for JARVIS.
 
-Fetches daily and intraday price data for NSE-listed Indian stocks
+Fetches daily price data for India, US, UK and EU stocks, and intraday bars for India only,
 using the yfinance library — completely free, no API key required.
 
 Ticker formats (same as the rest of the codebase):
@@ -17,10 +17,10 @@ Two modes:
             Run every trading day; data_layer.lake --load daily upserts into the Parquet lake.
 
 Usage:
-    python -m data_layer.yf_client --mode full  --market IN
-    python -m data_layer.yf_client --mode daily --market IN
-    python -m data_layer.yf_client --mode daily --market IN --days-back 3
-    python -m data_layer.yf_client --mode intraday --market IN --interval 5m
+    python -m data_layer.yf_client --mode full  --market ALL
+    python -m data_layer.yf_client --mode daily --market ALL
+    python -m data_layer.yf_client --mode daily --market UK --days-back 3
+    python -m data_layer.yf_client --mode intraday --market IN --interval 5m --backfill
     python -m data_layer.yf_client --dry-run
 
   intraday — Aggregated bars (default 5m), regular session only, forward
@@ -42,6 +42,7 @@ import pandas as pd
 import yfinance as yf
 
 from .fmp_client import read_universe
+from .lake import BARS_MARKETS, MARKETS
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -383,11 +384,19 @@ def run_bars(
     interval: str = INTRADAY_INTERVAL,
     days_back: int = INTRADAY_DAYS_BACK,
     dry_run: bool = False,
+    backfill: bool = False,
 ) -> None:
     """
-    Intraday bar collection.  Run AFTER each market closes, then:
+    Intraday bar collection (India only).  backfill=True pulls the deepest window
+    Yahoo allows (about 59 days of 5m, 6 of 1m, 729 of 60m); there is no more.  Run AFTER each market closes, then:
       python -m data_layer.lake --load bars --interval 5m
     """
+    if market == "ALL":
+        market = BARS_MARKETS[0]
+    if market not in BARS_MARKETS:
+        raise ValueError(f"intraday bars are collected for {BARS_MARKETS} only, not {market!r}")
+    if backfill:
+        days_back = INTRADAY_MAX_DAYS[interval] - 1   # deepest window Yahoo allows
     universe = _resolve_universe(market, tickers)
     if dry_run:
         log.info("DRY RUN bars [%s] — %d tickers, interval=%s, last %d days",
@@ -414,7 +423,7 @@ def _resolve_universe(market: str, tickers: list[str] | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def run_ohlc(
-    market: str = "IN",
+    market: str = "ALL",
     tickers: list[str] | None = None,
     dry_run: bool = False,
 ) -> None:
@@ -422,6 +431,11 @@ def run_ohlc(
     Full historical OHLC refresh (5 years).  No API key needed.
     Run once for initial setup, then monthly to catch any backfill gaps.
     """
+    if market == "ALL":
+        for m in MARKETS:
+            run_ohlc(m, tickers=tickers, dry_run=dry_run)
+        return
+
     universe = _resolve_universe(market, tickers)
 
     if dry_run:
@@ -435,7 +449,7 @@ def run_ohlc(
 
 
 def run_ohlc_daily(
-    market: str = "IN",
+    market: str = "ALL",
     tickers: list[str] | None = None,
     days_back: int = DAILY_OHLC_DAYS,
     dry_run: bool = False,
@@ -444,6 +458,11 @@ def run_ohlc_daily(
     Daily incremental OHLC (last N calendar days).  No API key needed.
     Run every trading day, then:  python -m data_layer.lake --load daily
     """
+    if market == "ALL":
+        for m in MARKETS:
+            run_ohlc_daily(m, tickers=tickers, days_back=days_back, dry_run=dry_run)
+        return
+
     universe = _resolve_universe(market, tickers)
 
     if dry_run:
@@ -482,10 +501,12 @@ if __name__ == "__main__":
     parser.add_argument("--interval", default=INTRADAY_INTERVAL,
                         choices=sorted(INTRADAY_MAX_DAYS),
                         help=f"Bar size for intraday mode (default: {INTRADAY_INTERVAL})")
-    parser.add_argument("--market", default="IN", choices=["IN"],
-                        help="Market (NSE only)")
+    parser.add_argument("--market", default="ALL", choices=[*MARKETS, "ALL"],
+                        help="Daily OHLC: IN, US, UK, EU or ALL. Intraday: IN only")
     parser.add_argument("--days-back", type=int, default=DAILY_OHLC_DAYS,
                         help=f"Calendar days to look back in daily mode (default: {DAILY_OHLC_DAYS})")
+    parser.add_argument("--backfill", action="store_true",
+                        help="intraday: fetch the deepest window Yahoo allows for --interval")
     parser.add_argument("--tickers", nargs="*", default=None,
                         help="Override ticker list")
     parser.add_argument("--dry-run", action="store_true",
@@ -499,7 +520,7 @@ if __name__ == "__main__":
     elif args.mode == "intraday":
         run_bars(market=args.market, tickers=args.tickers, interval=args.interval,
                  days_back=args.days_back if args.days_back != DAILY_OHLC_DAYS else INTRADAY_DAYS_BACK,
-                 dry_run=args.dry_run)
+                 dry_run=args.dry_run, backfill=args.backfill)
     else:
         run_ohlc_daily(market=args.market, tickers=args.tickers,
                        days_back=args.days_back, dry_run=args.dry_run)

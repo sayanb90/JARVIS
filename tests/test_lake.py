@@ -156,3 +156,20 @@ def test_segments_compact_and_query(env):
     assert df.close.tolist() == [100.0, 555.0]
     assert list((ld / "bars/interval=1m/date=2026-10-23").glob("seg-*")) == []
     assert tick_store.write_ticks([T(3, 45, 0, 100.0, 10, bid=99.9)], ld) == 1
+
+
+def test_ohlc_all_markets_but_bars_india_only(env):
+    root, lake = env
+    h = ["date", "symbol", "market", "open", "high", "low", "close", "volume"]
+    for m, sym in (("in", "INFY.NS"), ("us", "AAPL"), ("uk", "SHEL.L"), ("eu", "SAP.DE")):
+        w(root / f"data/ohlc/ohlc_2026_{m}.csv", h, [["2026.10.23", sym, m.upper(), 1, 2, 1, 1.5, 10]])
+    bh = ["ts", "symbol", "market", "open", "high", "low", "close", "volume"]
+    w(root / "data/bars/5m/in/2026-10-23.csv", bh, [["2026.10.23D03:45:00.000000000", "INFY.NS", "IN", 1, 2, 1, 1.5, 10]])
+    w(root / "data/bars/5m/us/2026-10-23.csv", bh, [["2026.10.23D13:30:00.000000000", "AAPL", "US", 1, 2, 1, 1.5, 10]])
+    lake.load_ohlc()
+    lake.load_bars("5m", since=lake.date(2026, 10, 1))           # default markets = India only
+    from data_layer.query import Lake
+    q = Lake(root / "lake")
+    assert set(q.sql("SELECT DISTINCT market FROM ohlc").market) == {"IN", "US", "UK", "EU"}
+    assert set(q.sql("SELECT DISTINCT market FROM bars_5m").market) == {"IN"}
+    assert lake.BARS_MARKETS == ("IN",) and lake.FUND_MARKETS == ("IN",)
