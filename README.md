@@ -10,7 +10,7 @@
 
 ---
 
-JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to both **Indian (Nifty 50 / NSE)** and **US (S&P 500)** equities, storing everything in a **KDB+/q** time-series database optimised for the 32-bit (4 GB) engine.
+JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to both **Indian (Nifty 50 / NSE)** and **US (S&P 500)** equities, storing everything in a **Parquet lake queried with DuckDB** (no database server, no memory ceiling, free).
 
 ---
 
@@ -21,19 +21,18 @@ JARVIS/
 ├── data_layer/
 │   ├── fmp_client.py     # FMP API client — annual fundamentals only
 │   ├── yf_client.py      # Yahoo Finance client — daily OHLC (free, no key)
-│   ├── schema.q          # KDB+ table definitions + 8-pillar scoring
-│   ├── kdb_loader.q      # CSV → KDB+ ingestion (splayed + partitioned)
-│   └── helpers.q         # KDB+ query helpers for analysis
+│   ├── lake.py           # CSV staging files → Parquet lake (idempotent upserts)
+│   └── query.py          # DuckDB query helpers + 8-pillar scoring
+├── tests/                # pytest: loader + query + scoring (no network)
 ├── data/
 │   ├── universe.csv      # Stock universe with all identifiers (see below)
 │   ├── fund_meta.csv     # Auto-generated: last fundamentals refresh per ticker
 │   ├── fundamentals/     # FMP output CSVs (income, balance, cashflow, ratios)
 │   └── ohlc/             # yfinance output CSVs (year-partitioned + daily)
-├── db/                   # KDB+ on-disk tables (created by kdb_loader.q)
-│   ├── fundamentals/     # Splayed: incomeStatement, balanceSheet, cashFlow,
-│   │   │                 #          ratios, pillarMetrics, fundMeta
-│   │   └── ...
-│   └── YYYY/ohlc/        # Date-partitioned OHLC (one dir per year)
+├── lake/                 # Parquet lake (created by lake.py, git-ignored)
+│   ├── fundamentals/     # one file per table, both markets
+│   ├── ohlc/year=YYYY/   # daily bars
+│   └── bars/interval=5m/date=YYYY-MM-DD/   # intraday bars (UTC day)
 ├── scheduler.py          # Cron-invokable orchestrator
 ├── logs/
 ├── .env.example
@@ -60,7 +59,7 @@ The universe is defined in `data/universe.csv`. Each row carries all common iden
 **How symbols differ between markets:**
 - **US stocks** use plain exchange tickers (`AAPL`, `MSFT`, `BRK-B`). These are the same across FMP and yfinance.
 - **Indian stocks** use Yahoo Finance's `.NS` suffix for NSE-listed securities (`RELIANCE.NS`, `INFY.NS`). This is also the format FMP uses, and is equivalent to the Reuters RIC convention Yahoo adopted.
-- Both are stored in the `symbol` column in KDB+. The `market` column (`\`IN` or `\`US`) distinguishes them.
+- Both are stored in the `symbol` column. The `market` column (`IN` or `US`) distinguishes them.
 
 To expand the universe, add rows to `data/universe.csv`. The scheduler will automatically pick up new stocks and prioritise them (they have no `last_updated` date and sort to the top of the refresh queue).
 
@@ -137,37 +136,30 @@ python -m data_layer.fmp_client --market ALL --slice 62 123
 # ... etc.
 ```
 
-### 5. Load into KDB+
+### 5. Load into the lake
 
 ```bash
-q data_layer/kdb_loader.q                     # full load (all tables)
-q data_layer/kdb_loader.q -load fundamentals  # fundamentals only
-q data_layer/kdb_loader.q -load ohlc          # OHLC only
-q data_layer/kdb_loader.q -mode daily         # append daily OHLC increment
+python -m data_layer.lake --load all            # fundamentals + full-history OHLC
+python -m data_layer.lake --load fundamentals   # upsert fundamentals, pillar metrics, fund_meta
+python -m data_layer.lake --load ohlc           # full-history year files
+python -m data_layer.lake --load daily          # incremental daily OHLC
+python -m data_layer.lake --load bars --since 2026-10-20
 ```
 
-### 6. Query with helpers
+Loads are upserts keyed on (symbol, date) or (symbol, ts), so re-running is safe and fundamentals accumulate across the rotating refresh.
 
-```q
-\l data_layer/helpers.q
+### 6. Query
 
-// Score all US stocks against latest price
-topByScore[`US; 10]
+```python
+from data_layer.query import Lake
+lake = Lake()
 
-// Compare top scorers across both markets
-compareMarkets[5]
-
-// Latest fundamentals for a ticker
-getLatestFundamentals[`AAPL]
-getLatestFundamentals[`RELIANCE.NS]
-
-// Revenue growth history
-revenueGrowth[`TCS.NS]
-
-// Market summary
-marketSummary[]
+lake.top_by_score("US", 10)                    # 8-pillar screen vs latest close
+lake.score_all()                               # both markets
+lake.ohlc("INFY.NS", "2024-01-01", "2024-12-31")
+lake.bars("AAPL", "2026-10-23", "2026-10-24")  # 5m bars, UTC
+lake.sql("SELECT market, count(*) FROM ohlc GROUP BY 1")   # ad-hoc SQL
 ```
-
 ---
 
 ## Scheduler (daily automation)
@@ -199,7 +191,7 @@ Each stock gets a full refresh roughly once a week.
 **Intraday bars** (aggregated 5-minute bars, collected forward after each market close):
 
 ```bash
-python scheduler.py --job bars --market IN     # then US; loads db_intraday/ via q
+python scheduler.py --job bars --market IN     # then US; upserts into lake/bars/
 ```
 
 Go-live steps, daily ops, backups and the futures/options planning entry are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
@@ -221,27 +213,19 @@ python scheduler.py --job fundamentals --budget 200 # custom call budget
 | `FMP_API_KEY` | — | Required for fundamentals |
 | `FMP_DAILY_BUDGET` | `248` | FMP calls to spend per scheduler run |
 | `FMP_RATE_LIMIT_DELAY` | `0.5` | Seconds between FMP calls (free tier) |
-| `Q_BINARY` | `q` | Path to the q executable |
+| `JARVIS_LAKE` | `<root>/lake` | Parquet lake directory |
 
 ---
 
-## KDB+ Database Layout
+## Lake Layout
 
 ```
-db/
-├── fundamentals/           ← splayed on-disk tables (lazy mmap)
-│   ├── incomeStatement/
-│   ├── balanceSheet/
-│   ├── cashFlow/
-│   ├── ratios/
-│   ├── pillarMetrics/
-│   └── fundMeta/           ← last fundamentals refresh date per ticker
-└── YYYY/ohlc/              ← date-partitioned OHLC
-    ├── 2021/ohlc/
-    ├── 2022/ohlc/
-    └── ...
+lake/
+├── fundamentals/           ← income_statement, balance_sheet, cash_flow,
+│                              ratios, pillar_metrics, fund_meta (.parquet)
+├── ohlc/year=YYYY/ohlc.parquet
+└── bars/interval=5m/date=YYYY-MM-DD/bars.parquet
 ```
 
-All tables carry a `market` column (`\`IN` or `\`US`) so both universes coexist in the same tables. Fundamentals are keyed on `[date; symbol]`; `pillarMetrics` and `fundMeta` are keyed on `[symbol]`.
+All tables carry a `market` column (`IN` or `US`). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Why not KDB+: see the ADR in `docs/RUNBOOK.md`.
 
-Only partitions that are actively queried are mmap'd into RAM, keeping heap usage well within the 4 GB 32-bit engine limit. Run `memReport[]` after loading to verify.

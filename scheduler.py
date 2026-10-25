@@ -5,17 +5,17 @@ Jobs
 ----
 ohlc-daily      Fetch last N days of OHLC via yfinance (free, no API key).
                 Writes data/ohlc/ohlc_daily_*.csv then calls:
-                  q data_layer/kdb_loader.q -mode daily
+                  data_layer.lake.load_ohlc(daily=True)  -> lake/ohlc/year=YYYY/
 
 fundamentals    Read data/universe.csv + data/fund_meta.csv, pick the
                 stalest tickers that fit within today's FMP free-tier budget
                 (default 248 calls = 62 tickers × 4 endpoints), fetch from FMP,
-                update fund_meta.csv, then reload fundamentals into KDB+:
-                  q data_layer/kdb_loader.q -load fundamentals
+                update fund_meta.csv, then upsert into the Parquet lake:
+                  data_layer.lake.load_fundamentals()  -> lake/fundamentals/
 
 bars            Collect aggregated intraday bars (default 5m) via yfinance and
-                load them into the date-partitioned db_intraday/ HDB:
-                  q data_layer/kdb_loader.q -mode bars -interval 5m
+                upsert them into per-day Parquet files:
+                  data_layer.lake.load_bars()  -> lake/bars/interval=5m/date=YYYY-MM-DD/
                 Run once per market AFTER its close (see crontab below).
                 Not part of `all` because the two markets close at different times.
 
@@ -43,7 +43,7 @@ Environment
 FMP_API_KEY        Required for fundamentals job.
 FMP_DAILY_BUDGET   FMP calls to spend today (default 248).
 FMP_RATE_LIMIT_DELAY  Seconds between FMP calls (default 0.5 for free tier).
-Q_BINARY           Path to the q executable (default: q).
+JARVIS_LAKE        Parquet lake directory (default: <root>/lake).
 JARVIS_ROOT        Project root; defaults to the directory of this file.
 """
 
@@ -52,7 +52,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -66,6 +65,7 @@ from data_layer.fmp_client import (
     get_stale_tickers,
     run as fmp_run,
 )
+from data_layer import lake
 from data_layer.yf_client import INTRADAY_INTERVAL, run_bars, run_ohlc_daily
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-Q_BINARY = os.getenv("Q_BINARY", "q")
 LOCK_FILE = ROOT / "logs" / "scheduler.lock"
 
 
@@ -109,39 +108,21 @@ class SchedulerLock:
 
 
 # ---------------------------------------------------------------------------
-# KDB+ helper
+# Lake loader helper
 # ---------------------------------------------------------------------------
-def _run_kdb(args: list[str], description: str) -> bool:
-    """
-    Invoke q with the given arguments.  Returns True on success.
-    Requires q to be installed and on PATH (or Q_BINARY env var set).
-    """
-    cmd = [Q_BINARY, "data_layer/kdb_loader.q"] + args
-    log.info("KDB+: %s", " ".join(cmd))
+def markets_of(market: str) -> tuple[str, ...]:
+    return lake.MARKETS if market == "ALL" else (market,)
+
+
+def _load_lake(description: str, fn, *args, **kwargs) -> bool:
+    """Run a data_layer.lake loader in-process.  Returns True on success."""
+    log.info("Lake load: %s", description)
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        if result.stdout:
-            for line in result.stdout.strip().splitlines():
-                log.info("  q> %s", line)
-        if result.returncode != 0:
-            log.error("KDB+ %s failed (exit %d): %s",
-                      description, result.returncode, result.stderr.strip())
-            return False
-        log.info("KDB+ %s complete", description)
+        fn(*args, **kwargs)
+        log.info("Lake load complete: %s", description)
         return True
-    except FileNotFoundError:
-        log.warning("q binary not found (%s) — skipping KDB+ load. "
-                    "Run manually: q data_layer/kdb_loader.q %s",
-                    Q_BINARY, " ".join(args))
-        return False
-    except subprocess.TimeoutExpired:
-        log.error("KDB+ %s timed out after 300 s", description)
+    except Exception as exc:
+        log.error("Lake load %s failed: %s", description, exc)
         return False
 
 
@@ -152,7 +133,7 @@ def _run_kdb(args: list[str], description: str) -> bool:
 def job_ohlc_daily(market: str = "ALL", days_back: int = 7,
                    dry_run: bool = False) -> bool:
     """
-    Fetch incremental OHLC via yfinance → append to KDB+ year partitions.
+    Fetch incremental OHLC via yfinance → upsert into the Parquet lake.
 
     Zero FMP API calls.  Safe to run every trading day.
     """
@@ -164,17 +145,17 @@ def job_ohlc_daily(market: str = "ALL", days_back: int = 7,
         return False
 
     if dry_run:
-        log.info("DRY RUN — skipping KDB+ load")
+        log.info("DRY RUN — skipping lake load")
         return True
 
-    return _run_kdb(["-mode", "daily"], "daily OHLC append")
+    return _load_lake("daily OHLC append", lake.load_ohlc, markets_of(market), daily=True)
 
 
 def job_fundamentals(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
                      dry_run: bool = False) -> bool:
     """
     Read universe + fund_meta, fetch fundamentals for the stalest tickers
-    within today's FMP call budget, update fund_meta, reload KDB+.
+    within today's FMP call budget, update fund_meta, upsert into the lake.
 
     Automatic rotation: over a 4-day cycle every stock in a 250-stock
     universe gets refreshed (62 tickers/day × 4 days = 248 calls/day).
@@ -213,17 +194,17 @@ def job_fundamentals(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
             ok = False
 
     if dry_run:
-        log.info("DRY RUN — skipping KDB+ fundamentals reload")
+        log.info("DRY RUN — skipping lake load")
         return ok
 
-    # Reload all fundamental tables (income, balance, cashflow, ratios, pillars, fundmeta)
-    kdb_ok = _run_kdb(["-load", "fundamentals"], "fundamentals reload")
-    return ok and kdb_ok
+    # Upsert fundamentals, pillar metrics and fund_meta into the Parquet lake
+    lake_ok = _load_lake("fundamentals upsert", lake.load_fundamentals, markets_of(market))
+    return ok and lake_ok
 
 
 def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
              dry_run: bool = False) -> bool:
-    """Fetch aggregated intraday bars -> data/bars/ -> reload recent date partitions."""
+    """Fetch aggregated intraday bars -> data/bars/ -> upsert recent day files."""
     log.info("=== JOB: bars [market=%s, interval=%s] ===", market, interval)
     try:
         run_bars(market=market, interval=interval, dry_run=dry_run)
@@ -232,10 +213,10 @@ def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
         return False
 
     if dry_run:
-        log.info("DRY RUN — skipping KDB+ bars load")
+        log.info("DRY RUN — skipping lake load")
         return True
 
-    return _run_kdb(["-mode", "bars", "-interval", interval], "intraday bars load")
+    return _load_lake("intraday bars", lake.load_bars, interval, markets=markets_of(market))
 
 
 def job_all(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,

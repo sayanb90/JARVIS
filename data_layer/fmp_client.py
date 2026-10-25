@@ -102,7 +102,7 @@ log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Domain dataclasses — one row per ticker per fiscal year
-# Each carries `market` so both universes share the same KDB+ tables.
+# Each carries `market` so both universes share the same lake tables.
 # ---------------------------------------------------------------------------
 @dataclass
 class IncomeRow:
@@ -336,7 +336,7 @@ def compute_pillar_metrics(
 
 
 # ---------------------------------------------------------------------------
-# CSV writers — kdb+-compatible format
+# CSV writers — staging format read by lake.py
 #
 # Column order: date, symbol, market, <floats>
 # Files are market-specific so each universe can be refreshed independently:
@@ -439,8 +439,8 @@ def _write_csv(path: Path, headers: list[str], rows: Iterator) -> None:
 # Fund-meta: tracks when each ticker's fundamentals were last fetched.
 #
 # Stored in data/fund_meta.csv — a plain CSV readable by Python without
-# needing a running KDB+ process.  Also loaded into the fundMeta KDB+ table
-# by kdb_loader.q for in-database querying.
+# needing a running database.  Also loaded into the fund_meta lake table
+# by lake.py for in-database querying.
 #
 # Format: symbol, market, last_updated  (date as YYYY.MM.DD for kdb+ compat)
 # ---------------------------------------------------------------------------

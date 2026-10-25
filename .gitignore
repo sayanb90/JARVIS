@@ -2,8 +2,7 @@ __pycache__/
 *.pyc
 .env
 logs/
-db/
-db_intraday/
+lake/
 data/bars/
 data/ohlc/*.csv
 data/fundamentals/*.csv

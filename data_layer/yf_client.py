@@ -15,7 +15,7 @@ Two modes:
 
   daily  — Last N calendar days, written as a flat incremental CSV
             (data/ohlc/ohlc_daily_in.csv, data/ohlc/ohlc_daily_us.csv)
-            Run every trading day; kdb_loader.q -mode daily appends to DB.
+            Run every trading day; data_layer.lake --load daily upserts into the Parquet lake.
 
 Usage:
     python -m data_layer.yf_client --mode full  --market ALL
@@ -59,7 +59,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Domain dataclass (mirrors schema.q ohlc table)
+# Domain dataclass (mirrors the lake ohlc table)
 # ---------------------------------------------------------------------------
 @dataclass
 class OHLCRow:
@@ -209,7 +209,7 @@ def fetch_ohlc_daily(tickers: list[str], market: str,
 
 
 # ---------------------------------------------------------------------------
-# CSV writers  (kdb+-compatible format — same as fmp_client conventions)
+# CSV writers  (staging format; dates as YYYY.MM.DD, accepted by lake.py)
 # ---------------------------------------------------------------------------
 
 _OHLC_HEADERS = ["date", "symbol", "market", "open", "high", "low", "close", "volume"]
@@ -243,7 +243,7 @@ def write_ohlc_daily(rows: list[OHLCRow], market: str) -> None:
     Write a flat incremental OHLC CSV for the daily append path.
       data/ohlc/ohlc_daily_in.csv
       data/ohlc/ohlc_daily_us.csv
-    The KDB+ loader reads these and upserts into the correct year partitions.
+    lake.py upserts these into the correct year partitions.
     """
     OHLC_DIR.mkdir(parents=True, exist_ok=True)
     path = OHLC_DIR / f"ohlc_daily_{market.lower()}.csv"
@@ -282,7 +282,7 @@ _BAR_HEADERS = ["ts", "symbol", "market", "open", "high", "low", "close", "volum
 
 @dataclass
 class BarRow:
-    ts:     str          # UTC, q timestamp literal: 2026.10.24D13:30:00.000000000
+    ts:     str          # UTC, 2026.10.24D13:30:00.000000000 (lake.py also accepts ISO)
     symbol: str
     market: str
     open:   Optional[float]
@@ -352,7 +352,7 @@ def write_bars(rows: list[BarRow], market: str, interval: str) -> int:
     Merge rows into one CSV per UTC session day:
       data/bars/<interval>/<market>/YYYY-MM-DD.csv
     Each file always holds the COMPLETE state for that market/day (new rows
-    overwrite on (ts, symbol)), so the KDB+ loader can replace a date partition
+    overwrite on (ts, symbol)), so lake.py can rebuild a day partition
     from the files alone. Returns the number of day-files written.
     """
     folder = BARS_DIR / interval / market.lower()
@@ -387,7 +387,7 @@ def run_bars(
 ) -> None:
     """
     Intraday bar collection.  Run AFTER each market closes, then:
-      q data_layer/kdb_loader.q -mode bars -interval 5m
+      python -m data_layer.lake --load bars --interval 5m
     """
     if market == "ALL":
         run_bars("IN", tickers, interval, days_back, dry_run)
@@ -453,7 +453,7 @@ def run_ohlc_daily(
 ) -> None:
     """
     Daily incremental OHLC (last N calendar days).  No API key needed.
-    Run every trading day, then:  q data_layer/kdb_loader.q -mode daily
+    Run every trading day, then:  python -m data_layer.lake --load daily
     """
     if market == "ALL":
         run_ohlc_daily("IN", tickers=tickers, days_back=days_back, dry_run=dry_run)

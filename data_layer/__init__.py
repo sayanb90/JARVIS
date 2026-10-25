@@ -2,7 +2,8 @@
 
 Two sub-clients:
   fmp_client  — FMP API, annual fundamentals (income, balance, cashflow, ratios)
-  yf_client   — Yahoo Finance, daily OHLC (free, no API key)
+  yf_client   — Yahoo Finance, daily OHLC + intraday bars (free, no API key)
+Storage/query: lake (CSV -> Parquet upsert) and query (DuckDB helpers + scoring).
 """
 
 from .fmp_client import (
