@@ -195,7 +195,10 @@ python scheduler.py --job bars --market IN              # daily; India only, ups
 **Live tick / L1 (Upstox API v3):** `data_layer/upstox/` connects to the v3 WebSocket, decodes the Protobuf frames, aggregates ticks into 1-minute bars (with last bid/ask, VWAP, tick count) and stores them in `lake/bars/interval=1m/`.
 
 ```bash
-export UPSTOX_ACCESS_TOKEN=...                         # expires daily
+# one-time: create an Upstox app (developer console), put API key/secret/redirect URI in .env
+python -m data_layer.upstox.auth login-url             # log in on your phone, then:
+python -m data_layer.upstox.auth exchange "<redirected URL>"
+python -m data_layer.upstox.auth check                 # does the feed accept the long-lived extended token?
 python -m data_layer.upstox.feed --once --limit 20     # one session now, 20 symbols
 python -m data_layer.upstox.feed                       # daemon (waits for each NSE session)
 ```

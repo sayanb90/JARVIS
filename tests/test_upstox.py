@@ -146,3 +146,62 @@ def test_rejected_token_is_fatal(tmp_path):
 
     with pytest.raises(RuntimeError, match="expires daily"):
         run(main())
+
+
+# ---------------------------------------------------------------------------
+# Auth helper
+# ---------------------------------------------------------------------------
+from data_layer.upstox import auth  # noqa: E402
+
+
+def test_extract_code_and_login_url():
+    assert auth.extract_code("http://localhost:8000/?code=AbC123&state=x") == "AbC123"
+    assert auth.extract_code("  AbC123 \n") == "AbC123"
+    u = auth.login_url("KEY", "http://localhost:8000")
+    assert u.startswith("https://api.upstox.com/v2/login/authorization/dialog?client_id=KEY")
+    assert "response_type=code" in u and "redirect_uri=http%3A%2F%2Flocalhost%3A8000" in u
+
+
+def test_exchange_posts_form_and_update_env_preserves_lines(tmp_path):
+    seen = {}
+
+    class R:
+        status_code = 200
+        text = ""
+        def json(self): return {"access_token": "ACC-1234567890", "extended_token": "EXT-0987654321"}
+
+    def fake_post(url, headers, data, timeout):
+        seen.update(url=url, headers=headers, data=data)
+        return R()
+
+    tok = auth.exchange_code("CODE", "KEY", "SECRET", "http://localhost:8000", post=fake_post)
+    assert seen["url"].endswith("/v2/login/authorization/token")
+    assert seen["data"] == {"code": "CODE", "client_id": "KEY", "client_secret": "SECRET",
+                            "redirect_uri": "http://localhost:8000", "grant_type": "authorization_code"}
+    env = tmp_path / ".env"
+    env.write_text("FMP_API_KEY=abc\n# note\nUPSTOX_ACCESS_TOKEN=old\n")
+    auth.update_env(env, {"UPSTOX_ACCESS_TOKEN": tok["access_token"], "UPSTOX_EXTENDED_TOKEN": tok["extended_token"]})
+    lines = env.read_text().splitlines()
+    assert lines == ["FMP_API_KEY=abc", "# note", "UPSTOX_ACCESS_TOKEN=ACC-1234567890",
+                     "UPSTOX_EXTENDED_TOKEN=EXT-0987654321"]
+    assert oct(env.stat().st_mode & 0o777) == "0o600"
+    assert "ACC-1234567890" not in auth.mask("ACC-1234567890")
+
+
+def test_probe_distinguishes_accepted_and_rejected_tokens():
+    async def deny_old(connection, request):
+        if request.headers.get("Authorization") == "Bearer OLD":
+            return connection.respond(HTTPStatus.UNAUTHORIZED, "no\n")
+
+    async def handler(ws):
+        await ws.recv()
+        await ws.send(stock_frame(ms(3, 45, 5), 100.0, 1))
+        await asyncio.sleep(0.2)
+
+    async def main():
+        async with serve(handler, "127.0.0.1", 0, process_request=deny_old) as srv:
+            url = f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}"
+            return (await auth.probe_feed("OLD", url, KEY, 1.0), await auth.probe_feed("NEW", url, KEY, 1.0))
+
+    old, new = run(main())
+    assert old == "rejected HTTP 401" and new == "accepted, frame received"

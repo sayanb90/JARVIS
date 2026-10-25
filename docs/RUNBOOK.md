@@ -212,6 +212,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 
 | Date | Event | Notes |
 |---|---|---|
+| 2026-10-25 | Added `data_layer/upstox/auth.py`: login URL, code exchange, `.env` token storage, and a feed probe that tests access vs extended token. Owner must first create the Upstox developer-console app | Waiting on app credentials |
 | 2026-10-25 | Upstox v3 feed adapter built (`data_layer/upstox/`): decode, instrument keys from ISIN, reconnecting WebSocket runner, daily scheduling, 8 tests incl. fake server. Protobuf module vendored from the official SDK (ADR-4) | Not yet run against Upstox |
 | 2026-10-25 | Daily OHLC re-extended to India+US+UK+EU (5y, Yahoo); intraday, ticks and fundamentals stay India only; `--backfill` for deepest Yahoo intraday window; `currency` column added to universe (ADR-3). Earlier same day: scope narrowed to NSE only; US removed from universe, fetchers, scheduler, lake and tests. Upstox v2 WebSocket chosen for live tick/L1 (ADR-2); tick model, bar aggregator and segment storage built | Adapter blocked on proto/docs access (section 13) |
 | 2026-10-25 | Runbook created; intraday bars collector, `bars5m` schema and loader added | Not yet run on the VPS |
@@ -231,7 +232,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 | O8 | Keep raw ticks/L1, or bars only? (sizing in 13.4) | Section 13 |
 | O9 | Fundamentals source for NSE: does the FMP free tier cover Indian tickers? Unverified, must be tested before relying on it | Phase 1 |
 | O11 | Which UK and EU indices define the universe, and how many names (about 1,200 total was mentioned earlier)? | Phase 1 |
-| O10 | Token handling: Upstox access tokens expire daily and need a login step; who refreshes it and where is it stored? | Section 13 |
+| O10 | Token handling. Plan: test whether the v3 feed accepts the `extended_token` (`auth check`); if yes, adopt it; if no, build the mobile-approval webhook. Stored in `.env` (mode 600) | Section 13 |
 | 2026-10-25 | Replaced KDB+ with Parquet + DuckDB (`lake.py`, `query.py`, tests); removed `schema.q`, `kdb_loader.q`, `helpers.q`. Pillar scorer ported to Python with explicit date ordering for the growth/decrease pillars | ADR-1 |
 
 ## 12. Architecture decisions
@@ -269,9 +270,16 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 - `data_layer/ticks.py`, `data_layer/tick_store.py`: aggregation and storage (section 13.4). Bars land in `lake/bars/interval=1m/` and are queryable as `bars_1m`.
 - Tests: `tests/test_upstox.py`.
 
-### 13.2 Run it (VPS)
+### 13.2 Get a token, then run it (VPS)
+One-time, by the owner: at the Upstox developer console choose **New App**, set the redirect URL (for example `http://localhost:8000`), and put the API key, API secret and redirect URL in `.env` (`UPSTOX_API_KEY`, `UPSTOX_API_SECRET`, `UPSTOX_REDIRECT_URI`). Nothing below can run without this.
 ```bash
-export UPSTOX_ACCESS_TOKEN=...            # refresh daily, see O10
+python -m data_layer.upstox.auth login-url      # open the link on your phone, log in, approve
+python -m data_layer.upstox.auth exchange "<the URL you were redirected to>"   # stores tokens in .env (mode 600)
+python -m data_layer.upstox.auth check          # does the v3 feed accept the access token? the extended token?
+python -m data_layer.upstox.auth check --adopt  # if the extended token works: collector uses it (UPSTOX_FEED_TOKEN)
+```
+`check` is the O10 experiment: if the feed accepts the extended token and it lives long enough, no daily refresh is needed; otherwise the access token must be redone every trading morning (steps 1-2) or the approval-webhook flow (`/v3/login/auth/token/request/{client_id}`, unverified) is built. Tokens are never printed or logged.
+```bash
 python -m data_layer.upstox.feed --once --limit 20      # smoke test on a trading day
 python -m data_layer.upstox.feed                         # daemon
 ```
@@ -287,6 +295,7 @@ RestartSec=10
 ```
 
 ### 13.3 Gate U1: first real run (still to do)
+- [ ] **U0:** developer-console app created, `auth exchange` succeeds, `auth check` shows which token the feed accepts and I record the extended token's real lifetime here: ______
 - [ ] Token obtained and the feed accepts it (HTTP 101, not 401)
 - [ ] One captured real frame saved as a test fixture; confirm `ltt` is epoch **milliseconds** (the processor warns if timestamps look wrong)
 - [ ] `full` mode for the whole universe works; find the real per-connection and per-user subscription limits and set `SUBSCRIBE_BATCH` and the connection count accordingly (not documented in the SDK)

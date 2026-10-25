@@ -1,7 +1,7 @@
 """
 Upstox v3 live market-data collector: WebSocket -> ticks -> bars -> Parquet.
 
-  export UPSTOX_ACCESS_TOKEN=...          # OAuth token; expires daily (runbook O10)
+  python -m data_layer.upstox.auth ...      # obtain a token (writes .env); expires daily (runbook O10)
   python -m data_layer.upstox.feed                 # daemon: waits for each NSE session
   python -m data_layer.upstox.feed --once          # run one session now (until close)
   python -m data_layer.upstox.feed --limit 20 --raw-ticks
@@ -239,9 +239,12 @@ def main() -> None:
     ap.add_argument("--url", default=FEED_URL)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    token = os.getenv("UPSTOX_ACCESS_TOKEN", "")
+    from dotenv import load_dotenv
+    load_dotenv()
+    # UPSTOX_FEED_TOKEN (e.g. a long-lived extended token adopted by `auth check --adopt`) wins
+    token = os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN", "")
     if not token:
-        raise SystemExit("UPSTOX_ACCESS_TOKEN is not set (see .env.example)")
+        raise SystemExit("no token: set UPSTOX_ACCESS_TOKEN (see python -m data_layer.upstox.auth)")
     key_map, _ = build_key_map()
     if a.limit:
         key_map = dict(list(key_map.items())[: a.limit])
