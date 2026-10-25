@@ -65,7 +65,8 @@ def extract_code(text: str) -> str:
 
 
 def exchange_code(code: str, client_id: str, client_secret: str, redirect_uri: str,
-                  post=requests.post) -> dict:
+                  post=None) -> dict:
+    post = post or requests.post                     # resolved at call time so tests can stub it
     r = post(TOKEN_URL, headers={"Accept": "application/json", "Api-Version": "2.0"},
              data={"code": code, "client_id": client_id, "client_secret": client_secret,
                    "redirect_uri": redirect_uri, "grant_type": "authorization_code"}, timeout=30)

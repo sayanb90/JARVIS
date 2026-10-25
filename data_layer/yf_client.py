@@ -380,6 +380,25 @@ def write_bars(rows: list[BarRow], market: str, interval: str) -> int:
     return len(by_day)
 
 
+def _all_markets(fn, label: str, **kw) -> None:
+    """Run `fn(market, **kw)` for every market; keep going after a failure, then raise once."""
+    failed = []
+    for m in MARKETS:
+        try:
+            fn(m, **kw)
+        except Exception as exc:
+            log.error("%s [%s] failed: %s", label, m, exc)
+            failed.append(m)
+    if failed:
+        raise RuntimeError(f"{label} failed for market(s): {', '.join(failed)}")
+
+
+def _require_rows(rows: list, universe: list[str], market: str, what: str) -> None:
+    """Zero rows for a non-empty universe means Yahoo is down or blocking us: fail loudly so cron alerts."""
+    if universe and not rows:
+        raise RuntimeError(f"{what} [{market}]: Yahoo returned no data for any of {len(universe)} tickers")
+
+
 def run_bars(
     market: str = "IN",
     tickers: list[str] | None = None,
@@ -406,6 +425,7 @@ def run_bars(
         return
 
     rows = fetch_bars(universe, market, interval, days_back)
+    _require_rows(rows, universe, market, f"{interval} bars")
     write_bars(rows, market, interval)
 
 
@@ -434,9 +454,7 @@ def run_ohlc(
     Run once for initial setup, then monthly to catch any backfill gaps.
     """
     if market == "ALL":
-        for m in MARKETS:
-            run_ohlc(m, tickers=tickers, dry_run=dry_run)
-        return
+        return _all_markets(run_ohlc, "full OHLC", tickers=tickers, dry_run=dry_run)
 
     universe = _resolve_universe(market, tickers)
 
@@ -447,6 +465,7 @@ def run_ohlc(
         return
 
     rows = fetch_ohlc_full(universe, market)
+    _require_rows(rows, universe, market, "full OHLC")
     write_ohlc(rows, market)
 
 
@@ -461,9 +480,7 @@ def run_ohlc_daily(
     Run every trading day, then:  python -m data_layer.lake --load daily
     """
     if market == "ALL":
-        for m in MARKETS:
-            run_ohlc_daily(m, tickers=tickers, days_back=days_back, dry_run=dry_run)
-        return
+        return _all_markets(run_ohlc_daily, "daily OHLC", tickers=tickers, days_back=days_back, dry_run=dry_run)
 
     universe = _resolve_universe(market, tickers)
 
@@ -473,6 +490,7 @@ def run_ohlc_daily(
         return
 
     rows = fetch_ohlc_daily(universe, market, days_back)
+    _require_rows(rows, universe, market, "daily OHLC")
     write_ohlc_daily(rows, market)
 
 

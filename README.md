@@ -240,3 +240,15 @@ lake/
 
 All tables carry a `market` column (`IN`, `US`, `UK`, `EU` for daily OHLC; India only for bars and fundamentals). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in `docs/RUNBOOK.md`.
 
+---
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest --cov            # unit tests + Gherkin scenarios, no network or credentials needed
+python -m pytest -m bdd           # only the Gherkin scenarios in tests/features
+```
+
+About 220 tests, about 98% coverage; CI fails below 90%. Layout, scenario list and the limits of what they prove are in section 15 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+

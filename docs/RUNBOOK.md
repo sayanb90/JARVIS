@@ -65,7 +65,7 @@ VPS spec, provider and OS are **not yet decided** (open decision O1). Minimum I 
 - [ ] Clone repo; copy `.env.example` to `.env` and add `FMP_API_KEY`
 - [ ] Backups configured and a restore tested (section 7)
 
-**Gate 0:** `pytest` passes, `python -m data_layer.yf_client --dry-run` runs, a test backup restores.
+**Gate 0:** `python -m pytest --cov` passes, `python -m data_layer.yf_client --dry-run` runs, a test backup restores.
 
 ### Phase 1 — Data foundation (start collecting immediately)
 Order matters: bars first because they cannot be backfilled.
@@ -315,7 +315,7 @@ At an average of 1 update per second per symbol over the 6.25-hour session, 1,20
 ## 14. VPS test day: 5-year OHLC (US, UK, EU, India) and one day of Upstox intraday (India)
 
 **Goal:** prove on the VPS, with real data, the two things that have only been tested offline: (A) a 5-year daily OHLC backfill for all four markets, and (B) one full NSE session of Upstox v3 ticks turned into 1-minute bars.
-**Tested so far:** everything in this section's code path runs end to end against stubbed Yahoo data and a local fake Upstox server (20 tests). **Not tested:** real Yahoo, real Upstox, the real token flow.
+**Tested so far:** everything in this section's code path runs end to end against stubbed Yahoo data and a local fake Upstox server (section 15: unit tests plus Gherkin scenarios). **Not tested:** real Yahoo, real Upstox, the real token flow.
 **Scope of the test universe:** `data/universe.csv` has 10 stocks per market (UK and EU rows are placeholders, section 11 O11). That is enough to prove the pipeline; widen the universe after it passes.
 
 ### 14.0 Timeline (all times UTC; IST = UTC + 5:30)
@@ -337,7 +337,8 @@ timedatectl | grep "Time zone"        # must show UTC; fix: sudo timedatectl set
 git clone <repo> JARVIS && cd JARVIS && git checkout claude/us-stock-market-analysis-MZtcm   # until merged to master
 python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
 cp .env.example .env && chmod 600 .env     # fill UPSTOX_API_KEY, UPSTOX_API_SECRET, UPSTOX_REDIRECT_URI
-python -m pytest -q tests                  # expect: 20 passed
+python -m pip install -r requirements-dev.txt
+python -m pytest --cov                      # expect: all tests pass, coverage about 98%
 python scheduler.py --job all --dry-run    # expect 10 tickers per market in the log
 ```
 Before this: the owner has created the app in the Upstox developer console (section 13.2). FMP is **not** needed for this test.
@@ -428,3 +429,39 @@ Paste or attach: the output of both `verify` commands; the first and last 15 lin
 
 ### 14.8 After a pass
 Tick the Gate 1 and Gate U1 boxes in sections 4 and 13.3, record the extended-token result, then: widen the universe (real UK and EU constituents, O11), schedule the daily OHLC cron (section 5), and enable the `jarvis-feed` service (section 13.2). Do not enable the daemon before the intraday checks above pass.
+
+## 15. Automated tests
+
+Run everything (no network, no credentials, no real data touched): `pip install -r requirements-dev.txt && python -m pytest --cov`. CI runs the same on every push (Python 3.11 and 3.13) and fails below 90% coverage; current coverage is about 98%.
+
+### 15.1 Layout
+| Path | What it holds |
+|---|---|
+| `tests/unit/` | One file per module: FMP client, Yahoo client, lake loader, query and scoring, ticks and tick store, scheduler, verify, Upstox decode/auth/feed, command-line entry points |
+| `tests/features/*.feature` | Plain-English Gherkin scenarios describing whole flows (the "cucumbers") |
+| `tests/bdd/` | Step definitions for the scenarios, plus `fake_upstox.py`, a local WebSocket server that speaks the Upstox v3 protocol |
+| `tests/conftest.py`, `tests/helpers.py` | `world` fixture (every path redirected into a temp directory), builders for Yahoo-shaped frames and Upstox Protobuf frames |
+
+### 15.2 Scenarios (what the business flows guarantee)
+| Feature | Guarantees |
+|---|---|
+| `ohlc_history` | 5-year daily history for IN/US/UK/EU; reruns never duplicate; a corrected Yahoo price replaces the stored one; a failed Yahoo batch or unknown symbol is caught by verification |
+| `intraday_yahoo` | Interim Yahoo bars: India only, UTC, forming bar excluded, no duplicates, deepest windows 59/6/729 days |
+| `live_feed` | A full 375-minute session becomes complete 1-minute bars with bid/ask; passes verification and agrees with Yahoo's daily bar; reconnects without data loss; 401/403 stop with a clear message; stale and future-stamped ticks rejected; Ctrl+C saves and compacts |
+| `fundamentals_rotation` | Stalest-first within the 250-call budget; a full cycle covers every stock; a failed fetch is retried first and never marked fresh; India only |
+| `pillar_scoring` | Each of the 8 pillars costs exactly one point in isolation; strict boundaries; unknown or unpriced stocks score 0 |
+| `token_setup` | Login link, token exchange stored with mode 600 and never printed, extended-token adoption only when the feed accepts it |
+| `scheduler_ops` | All four markets loaded; dry run writes nothing; overlapping runs refused; US bars refused; lock released after failure; a total Yahoo outage fails the job |
+
+### 15.3 What the tests do NOT prove
+Real Yahoo, FMP and Upstox behaviour (field formats, limits, outages), real network timing, and the real Upstox token lifetime. Section 14 is the live check for those. The fake Upstox server encodes our reading of the protocol from the official SDK, so a mismatch with the live service would pass here and fail there; the raw frames saved by `--dump-frames` are the first thing to turn into fixtures.
+
+### 15.4 Adding a test
+New behaviour gets a unit test next to its module and, if it changes a user-visible flow, a scenario in the matching `.feature` file. Never call the real network from a test: use the `world` fixture and stub `yf_client._batch_download`, `fmp_client.FMPExtractor` or the fake Upstox server.
+
+### 15.5 Defects found while writing these tests (all fixed)
+- A complete Yahoo outage made the OHLC and bars jobs report success with zero rows; they now fail so cron alerts.
+- `auth.exchange_code` bound `requests.post` at import time, so it could not be stubbed and would have hit the real API from a test.
+- The collector ignored a stop signal while the feed was quiet.
+- Known and left as is: `ebit` is filled from FMP's `ebitda` (characterised by `test_ebit_is_currently_sourced_from_fmp_ebitda`; no pillar uses it).
+
