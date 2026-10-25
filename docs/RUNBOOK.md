@@ -9,8 +9,8 @@ Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · 
 
 ## 1. Scope and principles
 
-- Markets: US (S&P 500 subset) and India (NSE). Universe lives in `data/universe.csv` (single source of truth for every feed).
-- **Aggregated bars, not raw ticks.** Default 5-minute regular-session bars. Strategies are not sub-second; raw tick storage is out of scope until a strategy proves it needs it.
+- Market: **NSE only** (ADR-2). US/UK/EU are out of scope. Universe lives in `data/universe.csv` (single source of truth for every feed). The `market` column is kept (always `IN`) so schemas do not change.
+- **Ingest ticks and L1 live, store aggregates.** The Upstox feed (section 13) delivers ticks and top-of-book; we fold them into 1-minute bars (with last bid/ask, VWAP, tick count) in-process. Raw tick storage is optional and off by default. Strategies are not sub-second.
 - Free sources first (FMP free tier for fundamentals, Yahoo Finance for prices). Paid upgrades are gated on a concrete limitation, listed in section 9.
 - Storage: Parquet lake queried with DuckDB (ADR-1, section 12). Partitioned by year (daily) and by day (bars); no server process, no heap ceiling.
 - Prod runs on the VPS. Dev/cloud sandboxes can build and run the test suite; collectors run on the VPS.
@@ -21,7 +21,8 @@ Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · 
 |---|---|---|---|---|---|---|
 | Fundamentals (income, balance, cash flow, ROIC/shares) | FMP free (250 calls/day) | Annual | Rotating by staleness, ~62 tickers/day | Last 5 fiscal years | `lake/fundamentals/*.parquet` | `[~]` |
 | Daily OHLC | Yahoo (`yfinance`) | 1 day | Every trading day after close | 5 years backfill | `lake/ohlc/year=YYYY/` | `[~]` |
-| **Intraday bars (new)** | Yahoo (`yfinance`) | 5 min (1m/15m/30m/60m selectable) | Once per market, after close | **Forward-only** (see 2.1) | `lake/bars/interval=5m/date=YYYY-MM-DD/` | `[~]` |
+| Intraday bars, interim | Yahoo (`yfinance`) | 5 min | Once, after the NSE close | **Forward-only** (see 2.1) | `lake/bars/interval=5m/date=YYYY-MM-DD/` | `[~]` retire once the Upstox feed is live |
+| **Live ticks + L1 (new)** | Upstox API v2 WebSocket (Protobuf) | Tick / L1 snapshot, aggregated to 1 min | During market hours | Forward-only | `lake/bars/interval=1m/`, optional `lake/ticks/` | `[~]` core built, adapter blocked (section 13) |
 | Index F&O intraday | TBD | TBD | TBD | TBD | TBD | `[ ]` see section 9 |
 
 ### 2.1 Constraint that shapes the whole intraday plan
@@ -42,7 +43,7 @@ Row is about 56 bytes (timestamp, 2 enumerated syms, 4 floats, long).
 | 250 stocks, 1m | about 96 k | about 1.4 GB |
 | 1,000 stocks, 1m | about 385 k | about 5.5 GB |
 
-Fits comfortably. Parquet files are already ZSTD-compressed (typically several times smaller than the figures above). Keep a retention policy for the per-day CSVs (section 7).
+Fits comfortably (NSE only roughly halves these). Parquet files are already ZSTD-compressed (typically several times smaller than the figures above). Keep a retention policy for the per-day CSVs (section 7).
 
 ## 3. Environments
 
@@ -69,21 +70,21 @@ VPS spec, provider and OS are **not yet decided** (open decision O1). Minimum I 
 ### Phase 1 — Data foundation (start collecting immediately)
 Order matters: bars first because they cannot be backfilled.
 
-1. [ ] `python scheduler.py --job bars --market ALL --dry-run` shows the expected ticker counts
-2. [ ] Run once for real: `python scheduler.py --job bars --market IN` then `--market US`
-3. [ ] Confirm CSVs exist under `data/bars/5m/{in,us}/YYYY-MM-DD.csv`
+1. [ ] `python scheduler.py --job bars --dry-run` shows the expected ticker counts
+2. [ ] Run once for real: `python scheduler.py --job bars --market IN`
+3. [ ] Confirm CSVs exist under `data/bars/5m/in/YYYY-MM-DD.csv`
 4. [ ] Confirm the load worked: `python -c "from data_layer.query import Lake; print(Lake().sql('SELECT market, count(*) n FROM bars_5m GROUP BY 1'))"`
-5. [ ] Daily OHLC 5-year backfill: `python -m data_layer.yf_client --mode full --market ALL`, then `python -m data_layer.lake --load ohlc`
+5. [ ] Daily OHLC 5-year backfill: `python -m data_layer.yf_client --mode full --market IN`, then `python -m data_layer.lake --load ohlc`
 6. [ ] Fundamentals first pass: `python scheduler.py --job fundamentals` daily until `fund_meta.csv` covers the universe (about 4 days for 250 stocks)
 7. [ ] Install cron (section 5)
-8. [ ] Spot-check 3 US and 3 India tickers against a second source (close price and volume, one day each)
+8. [ ] Spot-check 3 NSE tickers against a second source (close price and volume, one day each)
 
 **Gate 1 (data is trustworthy):**
 - [ ] Bars: every universe ticker has bars on the last trading day; bar count per ticker is about 75–78 for a full session
 - [ ] No duplicate `(ts, symbol)` rows after running the same job twice
-- [ ] First bar of the day is 03:45 UTC for NSE and 13:30 or 14:30 UTC for NYSE (DST), last bar is complete
+- [ ] First bar of the day is 03:45 UTC (09:15 IST), last bar is complete (ends 10:00 UTC)
 - [ ] 5 consecutive trading days of unattended cron runs with no failures in `logs/scheduler.log`
-- [ ] Scoring: `topByScore[`US;10]` and `topByScore[`IN;10]` return sensible results against a known-good ticker
+- [ ] Scoring: `Lake().top_by_score("IN", 10)` returns sensible results against a known-good ticker
 
 ### Phase 2 — Backtester webapp on the VPS
 `backtester/` and `webapp/` are empty stubs today. Plan:
@@ -105,18 +106,18 @@ Planning only. See section 9. **Do not write collector code until the decisions 
 ## 5. Daily operations (all times UTC, trading weekdays)
 
 ```cron
-# Daily OHLC (both markets, after US close)
-30 22 * * 1-5  cd /home/jarvis/JARVIS && python scheduler.py --job ohlc-daily   >> logs/scheduler.log 2>&1
-# Intraday bars, once per market after its close
+# Daily OHLC (after the NSE close)
+30 11 * * 1-5  cd /home/jarvis/JARVIS && python scheduler.py --job ohlc-daily   >> logs/scheduler.log 2>&1
+# Interim Yahoo bars, after the NSE close (retire when the Upstox feed runs)
 20 10 * * 1-5  cd /home/jarvis/JARVIS && python scheduler.py --job bars --market IN >> logs/scheduler.log 2>&1
-20 21 * * 1-5  cd /home/jarvis/JARVIS && python scheduler.py --job bars --market US >> logs/scheduler.log 2>&1
 # Fundamentals rotation
-0 23 * * 1-5   cd /home/jarvis/JARVIS && python scheduler.py --job fundamentals  >> logs/scheduler.log 2>&1
+0 12 * * 1-5   cd /home/jarvis/JARVIS && python scheduler.py --job fundamentals  >> logs/scheduler.log 2>&1
 ```
 
 Notes:
-- NSE closes 10:00 UTC. NYSE closes 20:00 UTC (summer) or 21:00 UTC (winter); the 21:20 run covers both.
-- Exchange holidays differ between the two markets. A job on a holiday should fetch nothing and exit cleanly; confirm this during Gate 1.
+- NSE regular session is 03:45-10:00 UTC (09:15-15:30 IST). India has no daylight saving, so these times never shift.
+- The live feed process (section 13) is a long-running service started before 03:45 UTC, not a cron job.
+- A job on an NSE holiday should fetch nothing and exit cleanly; confirm this during Gate 1.
 - The scheduler holds a lock file (`logs/scheduler.lock`). If a run was killed, delete a stale lock before re-running.
 
 ### Daily check (2 minutes)
@@ -178,7 +179,7 @@ Reloads are idempotent: every load is an upsert on the table key, and each bar d
 - Free equity sources like Yahoo do **not** cover this well enough for systematic work
 
 ### 9.2 Decisions to make (in order)
-1. [ ] **Underlyings:** for example Nifty 50 and Bank Nifty on NSE; S&P 500 index options and index futures in the US. Pick the first one or two only
+1. [ ] **Underlyings:** for example Nifty 50 and Bank Nifty on NSE. Pick the first one or two only
 2. [ ] **Instruments:** futures only, options only, or both; weekly expiries or monthly only
 3. [ ] **Data needed by the first strategy:** bars only, or bars plus OI/IV/greeks and chain snapshots? Define the strategy before buying data
 4. [ ] **Granularity:** 1-minute bars to start (consistent with "no raw tick"); revisit only if a strategy needs finer
@@ -191,10 +192,8 @@ Reloads are idempotent: every load is an upsert on the table key, and each bar d
 | Market | Candidate type | Examples to look at | What to check |
 |---|---|---|---|
 | India | Exchange end-of-day files | NSE bhavcopy (free, EOD only) | Good for daily F&O and OI history, not intraday |
-| India | Broker APIs | Zerodha Kite Connect, Upstox, Angel One SmartAPI | Intraday history depth, rate limits, cost, whether expired contracts are available |
+| India | Broker APIs | **Upstox (already chosen for equities, section 13)**, Zerodha Kite Connect, Angel One SmartAPI | Intraday history depth, rate limits, cost, whether expired contracts are available |
 | India | Data vendors | TrueData, Global Datafeeds | Historical F&O depth, licence for personal use, price |
-| US | Data vendors | Databento, Polygon, CBOE DataShop | Index options coverage, history depth, price per GB or per month |
-| US | Broker API | Interactive Brokers | Historical data limits, market-data subscriptions required |
 
 Evaluation criteria: coverage of **expired** contracts, adjusted vs raw history, bar sizes available, OI/IV included, licence terms for storing and processing, API rate limits, total monthly cost, reliability.
 
@@ -212,6 +211,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 
 | Date | Event | Notes |
 |---|---|---|
+| 2026-10-25 | Scope narrowed to NSE only; US removed from universe, fetchers, scheduler, lake and tests. Upstox v2 WebSocket chosen for live tick/L1 (ADR-2); tick model, bar aggregator and segment storage built | Adapter blocked on proto/docs access (section 13) |
 | 2026-10-25 | Runbook created; intraday bars collector, `bars5m` schema and loader added | Not yet run on the VPS |
 | 2026-10-25 | `yf_client` universe now read from `data/universe.csv` (previously a hardcoded 20-ticker US fallback) | |
 
@@ -225,6 +225,10 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 | O4 | Universe target: stay at about 250 stocks or move toward 1,000? (drives FMP tier and storage) | Phase 1 |
 | O5 | First F&O underlying, and the first strategy that needs it | Phase 3 |
 | O6 | Monthly data budget ceiling | Phase 3 |
+| O7 | Upstox v2 or v3? Community reports say v2 is to be deprecated; the v2 feed may stop working | Section 13 |
+| O8 | Keep raw ticks/L1, or bars only? (sizing in 13.4) | Section 13 |
+| O9 | Fundamentals source for NSE: does the FMP free tier cover Indian tickers? Unverified, must be tested before relying on it | Phase 1 |
+| O10 | Token handling: Upstox access tokens expire daily and need a login step; who refreshes it and where is it stored? | Section 13 |
 | 2026-10-25 | Replaced KDB+ with Parquet + DuckDB (`lake.py`, `query.py`, tests); removed `schema.q`, `kdb_loader.q`, `helpers.q`. Pillar scorer ported to Python with explicit date ordering for the growth/decrease pillars | ADR-1 |
 
 ## 12. Architecture decisions
@@ -235,3 +239,35 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 - **Consequences:** free, no server, no heap ceiling, SQL as-of joins and window functions available to the backtester, plain Python on the VPS. We give up kdb's native tick-plant and in-memory tables.
 - **Hot layer:** with aggregated bars (not ticks) today's data for 1,000 symbols at 5 minutes is a few MB, so the current day stays as a pandas/Polars frame in the collector or webapp process. Revisit if the F&O chain feed (section 9) outgrows one box: ClickHouse is the next step, not a return to KDB+.
 - **Reversible:** CSV staging files remain the rebuild source for every table.
+
+### ADR-2: NSE only, Upstox WebSocket for live tick/L1 (2026-10-25)
+- **Context:** the product now targets Indian markets only. A live broker feed gives real ticks and top-of-book, which Yahoo cannot (Yahoo is delayed, unofficial and keeps only about 60 days of 5-minute history).
+- **Decision:** drop US/UK/EU. Ingest Upstox API v2 market data over WebSocket (Protobuf, binary frames), aggregate to 1-minute bars in-process, persist bars (and optionally raw ticks) as append-only Parquet segments.
+- **Consequences:** history starts the day the feed first runs. Upstox's historical-candle API can backfill daily bars; user reports say 1-minute history is limited to a rolling window of a few months (unverified, section 13.3). Fundamentals still need a separate source (Upstox does not provide them).
+- **Kept:** Yahoo daily/intraday collectors stay as an interim and cross-check source until the Upstox path is verified.
+
+## 13. Upstox live feed (tick + L1)
+
+**Status: `[~]` Core built and unit-tested. The WebSocket adapter is NOT written: the Upstox documentation host was not reachable from the build sandbox, so the Protobuf schema and message formats are unverified. Do not write the decoder from memory.**
+
+### 13.1 What exists
+- `data_layer/ticks.py`: `Tick` (ts, symbol, ltp, cumulative day volume, bid/ask and sizes, OI) and `BarAggregator`. Session-aware (03:45-10:00 UTC), buckets aligned to the 09:15 IST open, volume from cumulative-volume deltas, late ticks ignored, no forward fill. Pure Python, about 220 k ticks/s measured, enough for a 1,200-symbol universe at a few thousand ticks per second.
+- `data_layer/tick_store.py`: append-only Parquet segments for bars and raw ticks, `compact_day()` to merge and deduplicate after the close. Queryable immediately as `bars_1m` via `data_layer.query.Lake`.
+- Tests: `tests/test_lake.py` (aggregation, volume deltas, 60-minute alignment, segment compaction).
+
+### 13.2 What is missing (in order)
+1. [ ] **Gate U1, protocol:** obtain `MarketDataFeed.proto` and the current v2 docs (give the sandbox access to the Upstox docs host, or commit the `.proto` to the repo). Capture one real binary frame on a trading day and keep it as a test fixture.
+2. [ ] **Auth:** Upstox uses OAuth and the access token expires daily. Decide how it is refreshed (O10). The feed URL comes from an authorize call, not a fixed address.
+3. [ ] **Instrument map:** download the daily NSE instrument master, map each universe symbol to its Upstox instrument key (equity keys are ISIN-based, e.g. `NSE_EQ|<ISIN>`), cache locally. `universe.csv` already carries ISINs. Report symbols with no match.
+4. [ ] **Adapter (`upstox_feed.py`):** connect, subscribe in batches within the documented per-connection limits, decode frames to `Tick`, feed `BarAggregator`, call `flush(now)` every few seconds, write segments every minute, `compact_day()` after 10:00 UTC. Reconnect with backoff, resubscribe, and log gaps.
+5. [ ] **Service:** run under `systemd`, start before 03:45 UTC, alert on no ticks for N minutes during market hours.
+
+### 13.3 Known risks (from community posts, unverified, check the official docs)
+- Upstox v2 is reported to be heading for deprecation in favour of v3 (O7). Building on v2 risks a forced rewrite.
+- Subscription count limits per connection and per user apply; 1,200 instruments may need several connections or a lower subscription mode.
+- Historical 1-minute candles are reported as a rolling window of about six months; daily candles reach back years. So a 5-year intraday history is not available from Upstox either; it accumulates forward from the first live day.
+- The instrument master download has been reported to return 403 to some automated clients.
+- Gaps: if the feed is down, the missing ticks are unrecoverable. Use the historical intraday API to repair 1-minute bars when it covers the gap.
+
+### 13.4 Storage sizing for the optional raw tick/L1 store
+At an average of 1 update per second per symbol over the 6.25-hour session, 1,200 symbols produce about 27 million ticks a day, roughly 1-2 GB a day compressed with L1 fields, about 250-500 GB a year. That is why bars are the default and raw ticks are opt-in (O8). 1-minute bars for the same universe are about 450 k rows a day, a few MB.

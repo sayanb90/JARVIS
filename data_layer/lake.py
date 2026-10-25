@@ -18,7 +18,7 @@ load is idempotent.  Files are written to a temp name and renamed, so a reader
 never sees a half-written file.
 
 CLI:
-  python -m data_layer.lake --load fundamentals [--market US]
+  python -m data_layer.lake --load fundamentals
   python -m data_layer.lake --load ohlc          # full-history year files
   python -m data_layer.lake --load daily         # ohlc_daily_*.csv
   python -m data_layer.lake --load bars [--interval 5m] [--since 2026-10-20]
@@ -42,7 +42,7 @@ ROOT = Path(os.getenv("JARVIS_ROOT", Path(__file__).resolve().parent.parent))
 DATA_DIR = ROOT / "data"
 LAKE_DIR = Path(os.getenv("JARVIS_LAKE", ROOT / "lake"))
 
-MARKETS = ("IN", "US")
+MARKETS = ("IN",)
 
 # table -> (csv stem, key columns, {column: sql type})
 # Types are applied to the CSV on read; dates in the CSVs may be YYYY.MM.DD.
@@ -205,7 +205,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Load staging CSVs into the Parquet lake")
     ap.add_argument("--load", required=True,
                     choices=["fundamentals", "ohlc", "daily", "bars", "all"])
-    ap.add_argument("--market", choices=["IN", "US", "ALL"], default="ALL")
+    ap.add_argument("--market", choices=["IN", "ALL"], default="ALL")
     ap.add_argument("--interval", default="5m")
     ap.add_argument("--since", type=date.fromisoformat, default=None,
                     help="bars only: first day to (re)load, YYYY-MM-DD; default last 7 days")

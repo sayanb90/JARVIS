@@ -2,28 +2,25 @@
 FMP (Financial Modeling Prep) data extraction layer for JARVIS — fundamentals only.
 
 Pulls 5 years of annual fundamental data (income statement, balance sheet,
-cash flow, ratios) for Nifty 50 (market="IN") and S&P 500 (market="US").
+cash flow, ratios) for NSE-listed Indian equities (market="IN").
 
 OHLC price data is handled separately by yf_client.py (Yahoo Finance, free).
 
 Identifiers:
-  Indian stocks : Yahoo-Finance/RIC style  (e.g. RELIANCE.NS, INFY.NS)
-  US stocks     : Plain exchange ticker    (e.g. AAPL, MSFT)
-Both stored in `symbol`; `market` column distinguishes origin.
+  Indian stocks : Yahoo-Finance style  (e.g. RELIANCE.NS, INFY.NS)
+Stored in `symbol`; the `market` column is always "IN" (kept for schema stability).
 
 FMP free tier: 250 requests/day.
   250 stocks × 4 fundamental endpoints = 1,000 calls → spread over 4 days.
   Run monthly; annual data rarely changes more frequently.
 
 Usage:
-    python -m data_layer.fmp_client --market IN     # Nifty 50 fundamentals
-    python -m data_layer.fmp_client --market US     # S&P 500 fundamentals
-    python -m data_layer.fmp_client --market ALL    # both
+    python -m data_layer.fmp_client --market IN     # NSE universe fundamentals
     python -m data_layer.fmp_client --dry-run       # print plan, no API calls
 
     # Batch mode: run a slice of tickers (to stay within 250-call daily limit)
-    python -m data_layer.fmp_client --market US --slice 0 62   # first 63 tickers
-    python -m data_layer.fmp_client --market US --slice 63 125  # next 63
+    python -m data_layer.fmp_client --market IN --slice 0 62   # first 63 tickers
+    python -m data_layer.fmp_client --market IN --slice 63 125  # next 63
 """
 
 from __future__ import annotations
@@ -62,13 +59,6 @@ NIFTY_50: list[str] = [
     "WIPRO.NS",     "ZOMATO.NS",
 ]
 
-# Minimal fallback used only when --dry-run is passed without an API key.
-# The live list is fetched from FMP's /sp500_constituent endpoint.
-_SP500_FALLBACK: list[str] = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "BRK-B", "TSLA",
-    "UNH",  "LLY",  "JPM",  "XOM",  "V",     "AVGO", "PG",    "MA",
-    "HD",   "COST", "MRK",  "CVX",
-]
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -217,17 +207,6 @@ class FMPExtractor:
 
     def __init__(self, api_key: str) -> None:
         self._sess = FMPSession(api_key)
-
-    def fetch_sp500_constituents(self) -> list[str]:
-        """Return current S&P 500 ticker list from FMP's /sp500_constituent (1 API call)."""
-        log.info("Fetching S&P 500 constituent list from FMP …")
-        data = self._sess.get("sp500_constituent")
-        if not isinstance(data, list) or not data:
-            log.warning("Failed to fetch S&P 500 constituents — using fallback list")
-            return list(_SP500_FALLBACK)
-        tickers = [rec["symbol"] for rec in data if rec.get("symbol")]
-        log.info("S&P 500: %d constituents loaded", len(tickers))
-        return tickers
 
     def income_statement(self, ticker: str, market: str) -> list[IncomeRow]:
         data = self._sess.get(f"income-statement/{ticker}", period="annual", limit=YEARS_BACK)
@@ -508,17 +487,15 @@ def _load_universe_market_map() -> dict[str, str]:
 
 def read_universe(market: str | None = None) -> list[dict]:
     """
-    Read data/universe.csv, optionally filtered by market ("IN", "US").
+    Read data/universe.csv, optionally filtered by market ("IN").
     Returns list of dicts with keys: symbol, name, market, exchange, isin, ...
-    Falls back to NIFTY_50 / _SP500_FALLBACK if the file doesn't exist.
+    Falls back to NIFTY_50 if the file doesn't exist.
     """
     if not UNIVERSE_CSV.exists():
         log.warning("universe.csv not found — falling back to built-in lists")
         rows = []
         if market in (None, "IN"):
             rows += [{"symbol": s, "market": "IN"} for s in NIFTY_50]
-        if market in (None, "US"):
-            rows += [{"symbol": s, "market": "US"} for s in _SP500_FALLBACK]
         return rows
 
     rows = []
@@ -578,11 +555,7 @@ def _resolve_universe(market: str, api_key: str, dry_run: bool,
                       tickers: list[str] | None) -> list[str]:
     if tickers:
         return tickers
-    if market == "IN":
-        return NIFTY_50
-    if dry_run:
-        return list(_SP500_FALLBACK)
-    return FMPExtractor(api_key).fetch_sp500_constituents()
+    return [r["symbol"] for r in read_universe(market)]
 
 
 def run(
@@ -603,20 +576,13 @@ def run(
 
     Args:
         tickers     : Override ticker list.
-        market      : "IN" | "US" | "ALL"
+        market      : "IN" (the only supported market)
         dry_run     : Print plan without API calls.
         slice_start : First ticker index (inclusive) for batched runs.
         slice_end   : Last ticker index (inclusive) for batched runs.
     """
-    if market == "ALL":
-        run(tickers=tickers, market="IN", dry_run=dry_run,
-            slice_start=slice_start, slice_end=slice_end)
-        run(tickers=tickers, market="US", dry_run=dry_run,
-            slice_start=slice_start, slice_end=slice_end)
-        return
-
-    if market not in ("IN", "US"):
-        log.error("Invalid --market '%s'. Choose IN, US, or ALL.", market)
+    if market != "IN":
+        log.error("Invalid --market '%s'. JARVIS is NSE-only: use IN.", market)
         sys.exit(1)
 
     api_key = os.getenv("FMP_API_KEY", "")
@@ -689,8 +655,8 @@ if __name__ == "__main__":
         description="JARVIS FMP fundamentals extractor (OHLC → use yf_client.py)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print plan without API calls")
-    parser.add_argument("--market", default="IN", choices=["IN", "US", "ALL"],
-                        help="Market universe: IN (Nifty 50), US (S&P 500), ALL (both)")
+    parser.add_argument("--market", default="IN", choices=["IN"],
+                        help="Market universe (NSE only)")
     parser.add_argument("--slice", nargs=2, type=int, metavar=("START", "END"),
                         help=(
                             "Run only tickers[START:END+1] to stay within 250 FMP calls/day. "

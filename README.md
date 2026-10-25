@@ -10,7 +10,7 @@
 
 ---
 
-JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to both **Indian (Nifty 50 / NSE)** and **US (S&P 500)** equities, storing everything in a **Parquet lake queried with DuckDB** (no database server, no memory ceiling, free).
+JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to **NSE-listed Indian equities** and ingests live tick / L1 data from the Upstox API, storing everything in a **Parquet lake queried with DuckDB** (no database server, no memory ceiling, free).
 
 ---
 
@@ -45,21 +45,17 @@ JARVIS/
 
 The universe is defined in `data/universe.csv`. Each row carries all common identifier types:
 
-| Column | Description | US example | India example |
-|---|---|---|---|
-| `symbol` | **Primary key** used throughout the codebase | `AAPL` | `RELIANCE.NS` |
-| `market` | `US` or `IN` | `US` | `IN` |
-| `exchange` | Listing exchange | `NASDAQ` | `NSE` |
-| `isin` | 12-char global identifier | `US0378331005` | `INE002A01018` |
-| `cusip` | 9-char US/Canada only | `037833100` | *(blank — not applicable)* |
-| `ric` | Reuters code | `AAPL.O` (NASDAQ) / `JPM.N` (NYSE) | `RELI.NS` |
-| `bbg_code` | Bloomberg ticker | `AAPL US Equity` | `RIL IN Equity` |
-| `sector` | GICS sector | `Information Technology` | `Energy` |
+| Column | Description | Example |
+|---|---|---|
+| `symbol` | **Primary key** used throughout the codebase (Yahoo `.NS` style) | `RELIANCE.NS` |
+| `market` | Always `IN` (kept for schema stability) | `IN` |
+| `exchange` | Listing exchange | `NSE` |
+| `isin` | 12-char identifier; also the basis of Upstox equity instrument keys (`NSE_EQ\|<ISIN>`) | `INE002A01018` |
+| `ric` | Reuters code | `RELI.NS` |
+| `bbg_code` | Bloomberg ticker | `RIL IN Equity` |
+| `sector` | Sector | `Energy` |
 
-**How symbols differ between markets:**
-- **US stocks** use plain exchange tickers (`AAPL`, `MSFT`, `BRK-B`). These are the same across FMP and yfinance.
-- **Indian stocks** use Yahoo Finance's `.NS` suffix for NSE-listed securities (`RELIANCE.NS`, `INFY.NS`). This is also the format FMP uses, and is equivalent to the Reuters RIC convention Yahoo adopted.
-- Both are stored in the `symbol` column. The `market` column (`IN` or `US`) distinguishes them.
+`cusip` is blank for Indian securities. Symbols use Yahoo's `.NS` suffix, which FMP also accepts.
 
 To expand the universe, add rows to `data/universe.csv`. The scheduler will automatically pick up new stocks and prioritise them (they have no `last_updated` date and sort to the top of the refresh queue).
 
@@ -112,27 +108,27 @@ pip install -r requirements.txt
 
 ### 2. Populate the universe
 
-Edit `data/universe.csv` to add your stocks. The 20 rows shipped with the repo (10 US, 10 India) are working examples.
+Edit `data/universe.csv` to add your stocks. The 10 NSE rows shipped with the repo are working examples.
 
 ### 3. Initial OHLC backfill (free, ~30 seconds for 250 stocks)
 
 ```bash
 # Fetch 5 years of OHLC via Yahoo Finance — no API key needed
-python -m data_layer.yf_client --mode full --market ALL
+python -m data_layer.yf_client --mode full --market IN
 ```
 
 ### 4. Initial fundamentals load (FMP — uses API quota)
 
 ```bash
 # Dry run first to see the call plan
-python -m data_layer.fmp_client --market ALL --dry-run
+python -m data_layer.fmp_client --market IN --dry-run
 
 # Full run for all stocks in universe.csv
-python -m data_layer.fmp_client --market ALL
+python -m data_layer.fmp_client --market IN
 
 # Or batch to stay within 250-call free tier (62 tickers × 4 calls = 248)
-python -m data_layer.fmp_client --market ALL --slice 0 61
-python -m data_layer.fmp_client --market ALL --slice 62 123
+python -m data_layer.fmp_client --market IN --slice 0 61
+python -m data_layer.fmp_client --market IN --slice 62 123
 # ... etc.
 ```
 
@@ -154,10 +150,10 @@ Loads are upserts keyed on (symbol, date) or (symbol, ts), so re-running is safe
 from data_layer.query import Lake
 lake = Lake()
 
-lake.top_by_score("US", 10)                    # 8-pillar screen vs latest close
-lake.score_all()                               # both markets
+lake.top_by_score("IN", 10)                    # 8-pillar screen vs latest close
+lake.score_all()                               # whole universe
 lake.ohlc("INFY.NS", "2024-01-01", "2024-12-31")
-lake.bars("AAPL", "2026-10-23", "2026-10-24")  # 5m bars, UTC
+lake.bars("RELIANCE.NS", "2026-10-23", "2026-10-24")  # 5m bars, UTC
 lake.sql("SELECT market, count(*) FROM ohlc GROUP BY 1")   # ad-hoc SQL
 ```
 ---
@@ -191,8 +187,10 @@ Each stock gets a full refresh roughly once a week.
 **Intraday bars** (aggregated 5-minute bars, collected forward after each market close):
 
 ```bash
-python scheduler.py --job bars --market IN     # then US; upserts into lake/bars/
+python scheduler.py --job bars --market IN     # interim Yahoo bars; upserts into lake/bars/
 ```
+
+**Live tick / L1 (Upstox):** `data_layer/ticks.py` (tick model + bar aggregator) and `data_layer/tick_store.py` (Parquet segments) are built and tested. The WebSocket adapter is not written yet because the Protobuf schema must be checked against the official Upstox docs first; see section 13 of the runbook.
 
 Go-live steps, daily ops, backups and the futures/options planning entry are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
@@ -201,7 +199,7 @@ Go-live steps, daily ops, backups and the futures/options planning entry are in 
 ```bash
 python scheduler.py --job ohlc-daily                # OHLC only
 python scheduler.py --job fundamentals              # fundamentals only
-python scheduler.py --job all                       # both
+python scheduler.py --job all                       # ohlc + fundamentals
 python scheduler.py --job all --dry-run             # print plan only
 python scheduler.py --job fundamentals --budget 200 # custom call budget
 ```
@@ -227,5 +225,5 @@ lake/
 └── bars/interval=5m/date=YYYY-MM-DD/bars.parquet
 ```
 
-All tables carry a `market` column (`IN` or `US`). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in `docs/RUNBOOK.md`.
+All tables carry a `market` column (`IN`). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in `docs/RUNBOOK.md`.
 

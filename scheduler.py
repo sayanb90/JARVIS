@@ -16,8 +16,8 @@ fundamentals    Read data/universe.csv + data/fund_meta.csv, pick the
 bars            Collect aggregated intraday bars (default 5m) via yfinance and
                 upsert them into per-day Parquet files:
                   data_layer.lake.load_bars()  -> lake/bars/interval=5m/date=YYYY-MM-DD/
-                Run once per market AFTER its close (see crontab below).
-                Not part of `all` because the two markets close at different times.
+                Run once after the NSE close (see crontab below).
+                Not part of `all`. Superseded by the Upstox live feed once it is wired.
 
 all             Run ohlc-daily then fundamentals.
 
@@ -31,9 +31,7 @@ Crontab examples (crontab -e)
 
 # Intraday bars — after each close. Server clock must be UTC.
 #   NSE closes 15:30 IST = 10:00 UTC  -> run 10:20 UTC
-#   NYSE closes 16:00 ET = 20:00 UTC (EDT) / 21:00 UTC (EST) -> run 21:20 UTC covers both
 20 10 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job bars --market IN >> logs/scheduler.log 2>&1
-20 21 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job bars --market US >> logs/scheduler.log 2>&1
 
 # Both together (if runtime is acceptable)
 0 18 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job all >> logs/scheduler.log 2>&1
@@ -172,7 +170,6 @@ def job_fundamentals(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
 
     # Split by market and run FMP for each
     in_tickers = [r["symbol"] for r in stale if r["market"] == "IN"]
-    us_tickers = [r["symbol"] for r in stale if r["market"] == "US"]
 
     ok = True
     if in_tickers:
@@ -182,15 +179,6 @@ def job_fundamentals(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
             fmp_run(tickers=in_tickers, market="IN", dry_run=dry_run)
         except Exception as exc:
             log.error("FMP IN fundamentals failed: %s", exc)
-            ok = False
-
-    if us_tickers:
-        log.info("Refreshing %d US tickers: %s …", len(us_tickers),
-                 ", ".join(us_tickers[:5]) + ("…" if len(us_tickers) > 5 else ""))
-        try:
-            fmp_run(tickers=us_tickers, market="US", dry_run=dry_run)
-        except Exception as exc:
-            log.error("FMP US fundamentals failed: %s", exc)
             ok = False
 
     if dry_run:
@@ -239,8 +227,8 @@ def main() -> int:
     parser.add_argument("--job", required=True,
                         choices=["ohlc-daily", "fundamentals", "bars", "all"],
                         help="Which job to run")
-    parser.add_argument("--market", default="ALL", choices=["IN", "US", "ALL"],
-                        help="Market universe (default: ALL)")
+    parser.add_argument("--market", default="ALL", choices=["IN", "ALL"],
+                        help="Market universe; NSE only, ALL is an alias for IN (default: ALL)")
     parser.add_argument("--budget", type=int, default=FMP_DAILY_BUDGET,
                         help=f"FMP daily call budget for fundamentals (default: {FMP_DAILY_BUDGET})")
     parser.add_argument("--days-back", type=int, default=7,
@@ -251,6 +239,7 @@ def main() -> int:
                         help="Print plan without making any API calls or DB writes")
 
     args = parser.parse_args()
+    args.market = "IN"   # NSE-only; ALL is accepted as an alias
 
     log.info("JARVIS Scheduler starting — job=%s market=%s dry_run=%s date=%s",
              args.job, args.market, args.dry_run, date.today())

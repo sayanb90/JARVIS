@@ -3,7 +3,7 @@ JARVIS query layer — DuckDB over the Parquet lake.
 
   from data_layer.query import Lake
   lake = Lake()
-  lake.latest_prices("US")
+  lake.latest_prices("IN")
   lake.ohlc("INFY.NS", "2024-01-01", "2024-12-31")
   lake.score_all("IN").head(10)
 
@@ -40,7 +40,7 @@ class Lake:
         for iv in sorted(p.name.split("=", 1)[1] for p in (self.dir / "bars").glob("interval=*")):
             self.con.execute(
                 f"CREATE VIEW bars_{iv} AS SELECT * FROM "
-                f"read_parquet('{self.dir}/bars/interval={iv}/date=*/bars.parquet')")
+                f"read_parquet('{self.dir}/bars/interval={iv}/date=*/*.parquet', union_by_name=true)")
 
     # -- generic ------------------------------------------------------------
     def sql(self, query: str, params: list | None = None) -> pd.DataFrame:
