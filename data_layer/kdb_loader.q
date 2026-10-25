@@ -92,9 +92,13 @@ splaySave:{[dir; tbl]
 // ---------------------------------------------------------------------------
 MARKETS: `IN`US                    // both by default
 
+// CLI args: .Q.opt turns ("-mode";"daily") into `mode!enlist "daily"
+ARGS: .Q.opt .z.x
+arg:{[k; dflt] $[k in key ARGS; first ARGS k; dflt]}
+
 // If -market flag passed on CLI, restrict to that suffix
-if[`market in key .z.x;
-  MARKETS: enlist `$upper .z.x`market
+if[`market in key ARGS;
+  MARKETS: enlist `$upper arg[`market; ""]
  ]
 
 // ---------------------------------------------------------------------------
@@ -383,6 +387,55 @@ appendOhlcDaily:{[]
  }
 
 // ---------------------------------------------------------------------------
+// Intraday bars  — separate HDB root (db_intraday/), partitioned by DATE.
+//
+// Why a separate root: a kdb+ HDB has one partition type. db/ is partitioned by
+// year (int); intraday needs per-day partitions (date) so a day can be
+// replaced cheaply and old days dropped/archived independently.
+//
+// Python (yf_client --mode intraday) keeps one CSV per market per UTC session
+// day holding the COMPLETE state for that day:
+//   data/bars/<interval>/<market>/YYYY-MM-DD.csv
+// So a reload of a date simply merges IN+US files and replaces the partition:
+// idempotent, no q-side merge logic.
+//
+// Table per interval: bars5m (add bars1m / bars15m in schema.q when needed).
+//   q data_layer/kdb_loader.q -mode bars [-interval 5m] [-since 2026.10.20]
+// ---------------------------------------------------------------------------
+BARS_DB:    `$":db_intraday"
+BARS_TYPES: "PSSFFFFJ"   // ts, symbol, market, open, high, low, close, volume
+
+barsFile:{[iv; m; d]
+  hsym `$"data/bars/", iv, "/", (lower string m), "/", (ssr[string d; "."; "-"]), ".csv"
+ }
+
+// Dates that have a CSV for any selected market, on/after `since`
+barsDates:{[iv; since]
+  files: raze {[iv; m] key hsym `$"data/bars/", iv, "/", lower string m}[iv] each MARKETS;
+  ds: "D"$ssr[;"-";"."] each 10#' string files;
+  asc distinct ds where ds >= since
+ }
+
+loadBarsDay:{[iv; d]
+  tbls: {[iv; d; m] p: barsFile[iv; m; d]; $[()~key p; (); loadCsv[BARS_TYPES; p]]}[iv; d] each MARKETS;
+  tbls: tbls where 0 < count each tbls;
+  if[0 = count tbls; :0];
+  t: `symbol`ts xasc raze tbls;
+  tname: `$"bars", iv;
+  tname set t;
+  .Q.dpft[BARS_DB; d; `symbol; tname];
+  show "  ", string[d], " ", string[tname], " → ", string[count t], " rows";
+ }
+
+appendBars:{[iv; since]
+  show "=== appendBars interval=", iv, " since=", string since, " ===";
+  ds: barsDates[iv; since];
+  if[0 = count ds; show "  no bar CSVs found — nothing to load"; :()];
+  loadBarsDay[iv;] each ds;
+  show "Bars load complete"
+ }
+
+// ---------------------------------------------------------------------------
 // Full load sequence
 // ---------------------------------------------------------------------------
 
@@ -426,15 +479,18 @@ memReport:{[]
 // CLI entry
 // ---------------------------------------------------------------------------
 
-$[`mode in key .z.x;
+$[`mode in key ARGS;
   // -mode daily  →  incremental OHLC append only
-  $[(.z.x`mode)~"daily";
+  // -mode bars   →  intraday bars (reloads dates since -since, default last 7 days)
+  $[(arg[`mode; ""])~"daily";
     appendOhlcDaily[];
-    show "Unknown -mode: ", .z.x`mode
+    (arg[`mode; ""])~"bars";
+    appendBars[arg[`interval; "5m"]; $[`since in key ARGS; "D"$arg[`since; ""]; .z.D - 7]];
+    show "Unknown -mode: ", arg[`mode; ""]
   ]
-; `load in key .z.x;
+; `load in key ARGS;
   // -load <table>  →  selective full reload
-  [target: .z.x`load;
+  [target: arg[`load; ""];
    $[target~"ohlc";         loadAllOhlc[];
      target~"income";       loadIncomeStatement[];
      target~"balance";      loadBalanceSheet[];

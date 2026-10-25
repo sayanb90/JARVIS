@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+logs/
+db/
+db_intraday/
+data/bars/
+data/ohlc/*.csv
+data/fundamentals/*.csv
+data/fund_meta.csv

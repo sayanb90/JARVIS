@@ -196,6 +196,14 @@ marketSummary[]
 
 Each stock gets a full refresh roughly once a week.
 
+**Intraday bars** (aggregated 5-minute bars, collected forward after each market close):
+
+```bash
+python scheduler.py --job bars --market IN     # then US; loads db_intraday/ via q
+```
+
+Go-live steps, daily ops, backups and the futures/options planning entry are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
 **Manual runs:**
 
 ```bash

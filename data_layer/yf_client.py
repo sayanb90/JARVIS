@@ -21,7 +21,12 @@ Usage:
     python -m data_layer.yf_client --mode full  --market ALL
     python -m data_layer.yf_client --mode daily --market ALL
     python -m data_layer.yf_client --mode daily --market US --days-back 3
+    python -m data_layer.yf_client --mode intraday --market US --interval 5m
     python -m data_layer.yf_client --dry-run
+
+  intraday — Aggregated bars (default 5m), regular session only, forward
+            collection (Yahoo keeps only ~60d of 5m history). One CSV per
+            market per UTC day under data/bars/<interval>/<market>/.
 """
 
 from __future__ import annotations
@@ -37,7 +42,7 @@ from typing import Iterator, Optional
 import pandas as pd
 import yfinance as yf
 
-from .fmp_client import NIFTY_50, _SP500_FALLBACK, log as _fmp_log
+from .fmp_client import read_universe
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -258,17 +263,156 @@ def _write_csv(path: Path, headers: list[str], rows: Iterator) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Intraday aggregated bars  (1m / 5m / 15m / ... — NOT raw ticks)
+#
+# Yahoo only serves a short trailing window of intraday history, so this feed
+# can only be collected FORWARD (run daily after each market closes). There is
+# no deep backfill: history starts the day the job first runs.
+# ---------------------------------------------------------------------------
+BARS_DIR = DATA_DIR / "bars"
+
+# Max look-back Yahoo allows per interval (calendar days)
+INTRADAY_MAX_DAYS = {"1m": 7, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
+INTRADAY_INTERVAL = "5m"
+INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent)
+
+_INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
+_BAR_HEADERS = ["ts", "symbol", "market", "open", "high", "low", "close", "volume"]
+
+
+@dataclass
+class BarRow:
+    ts:     str          # UTC, q timestamp literal: 2026.10.24D13:30:00.000000000
+    symbol: str
+    market: str
+    open:   Optional[float]
+    high:   Optional[float]
+    low:    Optional[float]
+    close:  Optional[float]
+    volume: Optional[int]
+
+
+def _bars_to_rows(df: pd.DataFrame, ticker: str, market: str,
+                  interval: str, now_utc: pd.Timestamp) -> list[BarRow]:
+    """DataFrame -> BarRows in UTC, dropping bars that have not yet closed."""
+    width = pd.Timedelta(minutes=_INTERVAL_MINUTES[interval])
+    rows: list[BarRow] = []
+    for ts, row in df.iterrows():
+        if pd.isna(row.get("Close")):
+            continue
+        ts = pd.Timestamp(ts)
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+        if ts + width > now_utc:          # still-forming bar: skip
+            continue
+        rows.append(BarRow(
+            ts     = ts.strftime("%Y.%m.%dD%H:%M:%S.000000000"),
+            symbol = ticker,
+            market = market,
+            open   = _fv(row.get("Open")),
+            high   = _fv(row.get("High")),
+            low    = _fv(row.get("Low")),
+            close  = _fv(row.get("Close")),
+            volume = _iv(row.get("Volume")),
+        ))
+    return rows
+
+
+def fetch_bars(tickers: list[str], market: str,
+               interval: str = INTRADAY_INTERVAL,
+               days_back: int = INTRADAY_DAYS_BACK) -> list[BarRow]:
+    """Fetch regular-session intraday bars for the last `days_back` days."""
+    if interval not in INTRADAY_MAX_DAYS:
+        raise ValueError(f"Unsupported interval {interval!r}; use one of {sorted(INTRADAY_MAX_DAYS)}")
+    days_back = min(days_back, INTRADAY_MAX_DAYS[interval])
+    now_utc = pd.Timestamp.now(tz="UTC")
+
+    all_rows: list[BarRow] = []
+    total_chunks = (len(tickers) + CHUNK_SIZE - 1) // CHUNK_SIZE
+    for i in range(0, len(tickers), CHUNK_SIZE):
+        chunk = tickers[i : i + CHUNK_SIZE]
+        chunk_num = i // CHUNK_SIZE + 1
+        log.info("[%s] bars %s chunk %d/%d (%d tickers) …",
+                 market, interval, chunk_num, total_chunks, len(chunk))
+        try:
+            batch = _batch_download(chunk, period=f"{days_back}d",
+                                    interval=interval, prepost=False)
+        except Exception as exc:
+            log.error("Chunk %d failed: %s — skipping", chunk_num, exc)
+            continue
+        for ticker, df in batch.items():
+            all_rows.extend(_bars_to_rows(df, ticker, market, interval, now_utc))
+
+    log.info("[%s] bars %s: %d rows from %d tickers", market, interval,
+             len(all_rows), len(tickers))
+    return all_rows
+
+
+def write_bars(rows: list[BarRow], market: str, interval: str) -> int:
+    """
+    Merge rows into one CSV per UTC session day:
+      data/bars/<interval>/<market>/YYYY-MM-DD.csv
+    Each file always holds the COMPLETE state for that market/day (new rows
+    overwrite on (ts, symbol)), so the KDB+ loader can replace a date partition
+    from the files alone. Returns the number of day-files written.
+    """
+    folder = BARS_DIR / interval / market.lower()
+    folder.mkdir(parents=True, exist_ok=True)
+
+    by_day: dict[str, dict[tuple[str, str], BarRow]] = {}
+    for r in rows:
+        day = r.ts[:10].replace(".", "-")
+        by_day.setdefault(day, {})[(r.ts, r.symbol)] = r
+
+    for day, fresh in sorted(by_day.items()):
+        path = folder / f"{day}.csv"
+        merged: dict[tuple[str, str], tuple] = {}
+        if path.exists():
+            with path.open(newline="", encoding="utf-8") as f:
+                for rec in csv.DictReader(f):
+                    merged[(rec["ts"], rec["symbol"])] = tuple(rec[h] for h in _BAR_HEADERS)
+        for key, r in fresh.items():
+            merged[key] = (r.ts, r.symbol, r.market, r.open, r.high, r.low, r.close, r.volume)
+        _write_csv(path, _BAR_HEADERS,
+                   (merged[k] for k in sorted(merged, key=lambda k: (k[1], k[0]))))
+    log.info("Bars written: %d day-file(s) under %s", len(by_day), folder)
+    return len(by_day)
+
+
+def run_bars(
+    market: str = "ALL",
+    tickers: list[str] | None = None,
+    interval: str = INTRADAY_INTERVAL,
+    days_back: int = INTRADAY_DAYS_BACK,
+    dry_run: bool = False,
+) -> None:
+    """
+    Intraday bar collection.  Run AFTER each market closes, then:
+      q data_layer/kdb_loader.q -mode bars -interval 5m
+    """
+    if market == "ALL":
+        run_bars("IN", tickers, interval, days_back, dry_run)
+        run_bars("US", tickers, interval, days_back, dry_run)
+        return
+
+    universe = _resolve_universe(market, tickers)
+    if dry_run:
+        log.info("DRY RUN bars [%s] — %d tickers, interval=%s, last %d days",
+                 market, len(universe), interval, days_back)
+        return
+
+    rows = fetch_bars(universe, market, interval, days_back)
+    write_bars(rows, market, interval)
+
+
+# ---------------------------------------------------------------------------
 # Universe resolver (mirrors fmp_client logic, no API call needed for IN)
 # ---------------------------------------------------------------------------
 
 def _resolve_universe(market: str, tickers: list[str] | None) -> list[str]:
+    """Explicit tickers win; otherwise data/universe.csv is the single source of truth."""
     if tickers:
         return tickers
-    if market == "IN":
-        return NIFTY_50
-    # US: try to reuse any already-fetched constituent list, else use fallback
-    # (full S&P 500 list is fetched by fmp_client.py — run that first)
-    return list(_SP500_FALLBACK)
+    return [r["symbol"] for r in read_universe(market)]
 
 
 # ---------------------------------------------------------------------------
@@ -345,11 +489,15 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="JARVIS yfinance OHLC fetcher")
-    parser.add_argument("--mode", default="daily", choices=["full", "daily"],
+    parser.add_argument("--mode", default="daily", choices=["full", "daily", "intraday"],
                         help=(
-                            "full  = 5-year OHLC for initial/monthly backfill; "
-                            "daily = last --days-back calendar days (run every trading day)"
+                            "full     = 5-year OHLC for initial/monthly backfill; "
+                            "daily    = last --days-back calendar days (run every trading day); "
+                            "intraday = aggregated intraday bars (run after each market close)"
                         ))
+    parser.add_argument("--interval", default=INTRADAY_INTERVAL,
+                        choices=sorted(INTRADAY_MAX_DAYS),
+                        help=f"Bar size for intraday mode (default: {INTRADAY_INTERVAL})")
     parser.add_argument("--market", default="ALL", choices=["IN", "US", "ALL"],
                         help="IN = Nifty 50, US = S&P 500, ALL = both")
     parser.add_argument("--days-back", type=int, default=DAILY_OHLC_DAYS,
@@ -364,6 +512,10 @@ if __name__ == "__main__":
 
     if args.mode == "full":
         run_ohlc(market=args.market, tickers=args.tickers, dry_run=args.dry_run)
+    elif args.mode == "intraday":
+        run_bars(market=args.market, tickers=args.tickers, interval=args.interval,
+                 days_back=args.days_back if args.days_back != DAILY_OHLC_DAYS else INTRADAY_DAYS_BACK,
+                 dry_run=args.dry_run)
     else:
         run_ohlc_daily(market=args.market, tickers=args.tickers,
                        days_back=args.days_back, dry_run=args.dry_run)

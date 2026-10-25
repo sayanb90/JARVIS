@@ -100,6 +100,22 @@ fundMeta:(
 )
 
 // ---------------------------------------------------------------------------
+// 4b. Intraday bars  — lives in the separate date-partitioned HDB db_intraday/
+//     Unkeyed (required by .Q.dpft). ts is UTC. One table per bar interval;
+//     clone this definition (bars1m, bars15m, ...) when a new interval is added.
+// ---------------------------------------------------------------------------
+bars5m:(
+  [] ts:`timestamp$();
+  symbol:`symbol$();
+  market:`symbol$();
+  open:`float$();
+  high:`float$();
+  low:`float$();
+  close:`float$();
+  volume:`long$()
+)
+
+// ---------------------------------------------------------------------------
 // 5. Derived views
 // ---------------------------------------------------------------------------
 

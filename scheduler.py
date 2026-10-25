@@ -13,6 +13,12 @@ fundamentals    Read data/universe.csv + data/fund_meta.csv, pick the
                 update fund_meta.csv, then reload fundamentals into KDB+:
                   q data_layer/kdb_loader.q -load fundamentals
 
+bars            Collect aggregated intraday bars (default 5m) via yfinance and
+                load them into the date-partitioned db_intraday/ HDB:
+                  q data_layer/kdb_loader.q -mode bars -interval 5m
+                Run once per market AFTER its close (see crontab below).
+                Not part of `all` because the two markets close at different times.
+
 all             Run ohlc-daily then fundamentals.
 
 Crontab examples (crontab -e)
@@ -22,6 +28,12 @@ Crontab examples (crontab -e)
 
 # Fundamentals rotation — 7:00 PM every weekday (auto-picks stalest stocks)
 0 19 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
+
+# Intraday bars — after each close. Server clock must be UTC.
+#   NSE closes 15:30 IST = 10:00 UTC  -> run 10:20 UTC
+#   NYSE closes 16:00 ET = 20:00 UTC (EDT) / 21:00 UTC (EST) -> run 21:20 UTC covers both
+20 10 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job bars --market IN >> logs/scheduler.log 2>&1
+20 21 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job bars --market US >> logs/scheduler.log 2>&1
 
 # Both together (if runtime is acceptable)
 0 18 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job all >> logs/scheduler.log 2>&1
@@ -54,7 +66,7 @@ from data_layer.fmp_client import (
     get_stale_tickers,
     run as fmp_run,
 )
-from data_layer.yf_client import run_ohlc_daily
+from data_layer.yf_client import INTRADAY_INTERVAL, run_bars, run_ohlc_daily
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -209,6 +221,23 @@ def job_fundamentals(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
     return ok and kdb_ok
 
 
+def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
+             dry_run: bool = False) -> bool:
+    """Fetch aggregated intraday bars -> data/bars/ -> reload recent date partitions."""
+    log.info("=== JOB: bars [market=%s, interval=%s] ===", market, interval)
+    try:
+        run_bars(market=market, interval=interval, dry_run=dry_run)
+    except Exception as exc:
+        log.error("Bars fetch failed: %s", exc)
+        return False
+
+    if dry_run:
+        log.info("DRY RUN — skipping KDB+ bars load")
+        return True
+
+    return _run_kdb(["-mode", "bars", "-interval", interval], "intraday bars load")
+
+
 def job_all(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,
             days_back: int = 7, dry_run: bool = False) -> bool:
     """Run ohlc-daily then fundamentals."""
@@ -227,7 +256,7 @@ def main() -> int:
         epilog=__doc__,
     )
     parser.add_argument("--job", required=True,
-                        choices=["ohlc-daily", "fundamentals", "all"],
+                        choices=["ohlc-daily", "fundamentals", "bars", "all"],
                         help="Which job to run")
     parser.add_argument("--market", default="ALL", choices=["IN", "US", "ALL"],
                         help="Market universe (default: ALL)")
@@ -235,6 +264,8 @@ def main() -> int:
                         help=f"FMP daily call budget for fundamentals (default: {FMP_DAILY_BUDGET})")
     parser.add_argument("--days-back", type=int, default=7,
                         help="Calendar days to look back for OHLC (default: 7)")
+    parser.add_argument("--interval", default=INTRADAY_INTERVAL,
+                        help=f"Bar size for the bars job (default: {INTRADAY_INTERVAL})")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print plan without making any API calls or DB writes")
 
@@ -250,6 +281,9 @@ def main() -> int:
         elif args.job == "fundamentals":
             success = job_fundamentals(
                 market=args.market, budget=args.budget, dry_run=args.dry_run)
+        elif args.job == "bars":
+            success = job_bars(
+                market=args.market, interval=args.interval, dry_run=args.dry_run)
         else:
             success = job_all(
                 market=args.market, budget=args.budget,

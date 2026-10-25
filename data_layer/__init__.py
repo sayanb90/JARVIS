@@ -14,11 +14,15 @@ from .fmp_client import (
     run,
 )
 from .yf_client import (
+    BarRow,
     OHLCRow,
+    fetch_bars,
     fetch_ohlc_full,
     fetch_ohlc_daily,
     write_ohlc,
+    write_bars,
     write_ohlc_daily,
+    run_bars,
     run_ohlc,
     run_ohlc_daily,
 )
@@ -33,6 +37,10 @@ __all__ = [
     "run",
     # yfinance — OHLC
     "OHLCRow",
+    "BarRow",
+    "fetch_bars",
+    "write_bars",
+    "run_bars",
     "fetch_ohlc_full",
     "fetch_ohlc_daily",
     "write_ohlc",
