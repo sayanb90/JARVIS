@@ -205,3 +205,53 @@ def test_probe_distinguishes_accepted_and_rejected_tokens():
 
     old, new = run(main())
     assert old == "rejected HTTP 401" and new == "accepted, frame received"
+
+
+def test_sigint_saves_and_compacts(tmp_path):
+    import os
+    import signal
+    from data_layer.upstox.feed import run_day
+
+    async def handler(ws):
+        await ws.recv()
+        await ws.send(stock_frame(ms(3, 45, 5), 100.0, 1000))
+        await ws.send(stock_frame(ms(3, 46, 10), 101.0, 1200))
+        await asyncio.sleep(5)
+
+    async def main():
+        async with serve(handler, "127.0.0.1", 0) as srv:
+            clock = lambda: datetime(2026, 10, 23, 3, 50, 0)  # noqa: E731
+            feed = UpstoxFeed("T", KMAP, url=f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}",
+                              lake_dir=tmp_path / "lake", flush_s=30, write_s=30, clock=clock)
+            asyncio.get_running_loop().call_later(0.3, os.kill, os.getpid(), signal.SIGINT)
+            await asyncio.wait_for(run_day(feed, datetime(2026, 10, 23, 10, 5)), timeout=5)
+
+    run(main())
+    from data_layer.query import Lake
+    df = Lake(tmp_path / "lake").sql("SELECT * FROM bars_1m ORDER BY ts")
+    assert df.close.tolist() == [100.0, 101.0]
+    assert not list((tmp_path / "lake/bars/interval=1m/date=2026-10-23").glob("seg-*"))   # compacted
+
+
+def test_dump_frames_saves_raw_bytes(tmp_path):
+    frame = stock_frame(ms(3, 45, 5), 100.0, 1000)
+
+    async def handler(ws):
+        await ws.recv()
+        for _ in range(3):
+            await ws.send(frame)
+        await asyncio.sleep(0.3)
+
+    async def main():
+        async with serve(handler, "127.0.0.1", 0) as srv:
+            feed = UpstoxFeed("T", KMAP, url=f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}",
+                              lake_dir=tmp_path / "lake", clock=lambda: datetime(2026, 10, 23, 3, 50, 0),
+                              dump_frames=2, dump_dir=tmp_path / "frames")
+            stop = asyncio.Event()
+            asyncio.get_running_loop().call_later(0.2, stop.set)
+            await feed.run_session(stop)
+
+    run(main())
+    files = sorted((tmp_path / "frames").glob("*.bin"))
+    assert len(files) == 2 and all(f.read_bytes() == frame for f in files)
+    assert next(decode.ticks_from_response(decode.parse_frame(files[0].read_bytes()), KMAP)).ltp == 100.0

@@ -1,6 +1,6 @@
 # JARVIS Go-Live Runbook
 
-Living document. Update the **Status** column and tick the gates as each item is
+**Next test: section 14 (VPS test day).** Living document. Update the **Status** column and tick the gates as each item is
 proven *on the VPS*, not on a dev box. Last reviewed: 2026-10-25.
 
 Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · `[ ]` not started
@@ -311,3 +311,120 @@ RestartSec=10
 
 ### 13.5 Storage sizing for the optional raw tick/L1 store
 At an average of 1 update per second per symbol over the 6.25-hour session, 1,200 symbols produce about 27 million ticks a day, roughly 1-2 GB a day compressed with L1 fields, about 250-500 GB a year. That is why bars are the default and raw ticks are opt-in (O8). 1-minute bars for the same universe are about 450 k rows a day, a few MB.
+
+## 14. VPS test day: 5-year OHLC (US, UK, EU, India) and one day of Upstox intraday (India)
+
+**Goal:** prove on the VPS, with real data, the two things that have only been tested offline: (A) a 5-year daily OHLC backfill for all four markets, and (B) one full NSE session of Upstox v3 ticks turned into 1-minute bars.
+**Tested so far:** everything in this section's code path runs end to end against stubbed Yahoo data and a local fake Upstox server (20 tests). **Not tested:** real Yahoo, real Upstox, the real token flow.
+**Scope of the test universe:** `data/universe.csv` has 10 stocks per market (UK and EU rows are placeholders, section 11 O11). That is enough to prove the pipeline; widen the universe after it passes.
+
+### 14.0 Timeline (all times UTC; IST = UTC + 5:30)
+
+| UTC | IST | Step |
+|---|---|---|
+| Any time before market | any | 14.1 setup, 14.2 OHLC test (needs no token, about 15-30 min) |
+| before 03:35 | 09:05 | 14.3 get and check the Upstox token |
+| 03:40 | 09:10 | 14.4 start the feed (inside `tmux`) |
+| 03:45 to 10:00 | 09:15 to 15:30 | session runs unattended; peek at the log |
+| 10:05 | 15:35 | feed stops by itself and compacts the day |
+| after about 11:00 | after 16:30 | 14.5 verify; Yahoo's daily bar for the day must exist first |
+
+First check the NSE holiday calendar for the test date (likely Monday 2026-10-26). On a holiday the connection works but no ticks arrive, so move 14.3-14.5 to the next trading day.
+
+### 14.1 One-time setup (VPS)
+```bash
+timedatectl | grep "Time zone"        # must show UTC; fix: sudo timedatectl set-timezone UTC
+git clone <repo> JARVIS && cd JARVIS && git checkout claude/us-stock-market-analysis-MZtcm   # until merged to master
+python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+cp .env.example .env && chmod 600 .env     # fill UPSTOX_API_KEY, UPSTOX_API_SECRET, UPSTOX_REDIRECT_URI
+python -m pytest -q tests                  # expect: 20 passed
+python scheduler.py --job all --dry-run    # expect 10 tickers per market in the log
+```
+Before this: the owner has created the app in the Upstox developer console (section 13.2). FMP is **not** needed for this test.
+
+### 14.2 Test A: 5-year daily OHLC, four markets (no token needed)
+```bash
+python -m data_layer.yf_client --mode full --market ALL     # about 1-3 min; logs/yf_client.log
+python -m data_layer.lake --load ohlc
+python -m data_layer.verify ohlc --years 5
+```
+Quick look:
+```bash
+python - <<'PY'
+from data_layer.query import Lake
+q = Lake()
+print(q.sql("SELECT market, count(*) rows, count(DISTINCT symbol) symbols, min(date) first, max(date) last FROM ohlc GROUP BY 1 ORDER BY 1"))
+print(q.ohlc("SHEL.L").tail(3))      # UK closes are in PENCE (about 2,500-3,000), not pounds
+PY
+ls lake/ohlc                          # year=2021 ... year=2026
+```
+Idempotency (must not change the row count):
+```bash
+python -m data_layer.yf_client --mode daily --market ALL && python -m data_layer.lake --load daily
+python -m data_layer.lake --load ohlc            # re-run the full load
+python -m data_layer.verify ohlc | grep -i "duplicate"
+```
+**Pass when:**
+- [ ] `verify ohlc` prints no `FAIL`; every market shows all its universe symbols with data
+- [ ] 5-6 year folders under `lake/ohlc/`; about 1,200-1,270 rows per symbol (US/UK/EU more than India because of holidays)
+- [ ] duplicates stay 0 after the re-runs
+- [ ] 3 spot checks per market (close and volume for one date) agree with a second source such as the exchange site or a broker screen
+- [ ] write down every `WARN` and why; unexplained one-day moves over 40% usually mean unadjusted splits
+
+### 14.3 Test B1: Upstox token (before 03:35 UTC)
+```bash
+python -m data_layer.upstox.auth login-url        # open on your phone, log in, approve
+python -m data_layer.upstox.auth exchange "<the full URL you were redirected to>"
+python -m data_layer.upstox.auth check            # tells you which token the v3 feed accepts
+```
+Record the result of `check` in section 13.3 (Gate U0). If it says the extended token is accepted, run `check --adopt`; otherwise the access token is used and must be redone every trading morning. The exchange step must happen within a couple of minutes of the login (the code is single-use).
+
+### 14.4 Test B2: run the feed for one session (India)
+```bash
+tmux new -s feed
+. .venv/bin/activate
+python -m data_layer.upstox.feed --once --limit 20 --dump-frames 5 2>&1 | tee logs/feed-test.log
+```
+`--dump-frames 5` saves the first 5 raw frames to `logs/frames/*.bin`: bring these back, they become the real test fixtures and settle whether `ltt` is in milliseconds. Detach with `Ctrl+b d`. It subscribes to the universe's India rows (10 today, the `--limit` is an upper bound) in `full` mode and stops itself at 10:05 UTC. `Ctrl+C` at any time is safe: it saves the last bars and compacts the day.
+
+What the log should show:
+- `subscribed 10 instruments in mode full` (a `N universe symbols have no usable Upstox key` warning means missing ISINs)
+- `market status: {...NORMAL_OPEN...}` around 03:45
+- every 30 s `frames=... ticks=... bars_written=...` with `ticks` growing
+- at the end `session YYYY-MM-DD done: compacted N bars`
+
+Red flags in the log: `ahead of local clock` (timestamp unit or VPS clock wrong), `no frames for 120s` repeatedly during market hours, `rejected the token` (expired; redo 14.3), repeated `connection lost`.
+
+### 14.5 Verify the intraday day (after about 11:00 UTC)
+```bash
+python -m data_layer.yf_client --mode daily --market IN --days-back 3 && python -m data_layer.lake --load daily   # Yahoo daily bar to cross-check against
+python -m data_layer.verify bars --date 2026-10-26 --interval 1m      # use the real date
+du -sh lake/bars lake
+```
+**Pass when:**
+- [ ] `verify bars` prints no `FAIL`
+- [ ] first bar 03:45 UTC, last bar about 09:59 UTC
+- [ ] liquid names (for example RELIANCE, HDFCBANK, INFY) have close to 375 one-minute bars; illiquid names may have fewer (that is a `WARN`, not a failure)
+- [ ] last-bar close is within 0.5% of Yahoo's daily close for each symbol
+- [ ] median volume ratio (bars / Yahoo daily) is close to 1; far from 1 means a unit or volume-delta problem
+- [ ] no `seg-*.parquet` files left in `lake/bars/interval=1m/date=<day>/` (only `bars.parquet`)
+- [ ] 3 spot checks of a one-minute bar (open, high, low, close) against a charting screen
+
+### 14.6 Results to bring back
+Paste or attach: the output of both `verify` commands; the first and last 15 lines of `logs/feed-test.log`; the `auth check` output (tokens are masked); `ls lake/ohlc`; `du -sh lake`; the `logs/frames/*.bin` files; the lines of the log containing `WARN` or `ahead of local clock`; and answers to: did the extended token work, how many instruments subscribed without error, any disconnects.
+
+### 14.7 If something goes wrong
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `yf_client` returns 0 rows or "possibly delisted" | Yahoo throttling, network, or wrong ticker | Retry later; test one ticker by hand; fix the symbol in `universe.csv` |
+| UK prices look 100x too big | `.L` prices are in pence | Expected; divide by 100 for pounds. See ADR-3 |
+| `exchange` fails with HTTP 4xx | Redirect URI differs from the console, or the code expired or was reused | Make the redirect URI identical in `.env` and the console; redo `login-url` |
+| `check` shows `rejected HTTP 401` for both tokens | Token expired or app not authorised for market data | Redo 14.3; if it persists, report the exact message |
+| Connected, no frames all day | NSE holiday, subscribed keys wrong, or the instrument master uses different keys | Check the key warning in the log; confirm the ISINs in `universe.csv`; try `--mode ltpc` |
+| Ticks flow but `verify bars` finds no rows | All ticks dropped as last-trade-yesterday or in the future | Look at the `stale=` and `future=` counters in the 30 s log lines; check the VPS clock |
+| Feed killed, `seg-*` files remain | Crash or `kill -9` | `python -c "from datetime import date; from data_layer.tick_store import compact_day; print(compact_day('1m', date(2026,10,26)))"` |
+| Volume ratio far from 1 | Cumulative-volume baseline or units | Report it; do not tune by hand |
+| Disk fills | Raw ticks enabled | Do not use `--raw-ticks` on the test day |
+
+### 14.8 After a pass
+Tick the Gate 1 and Gate U1 boxes in sections 4 and 13.3, record the extended-token result, then: widen the universe (real UK and EU constituents, O11), schedule the daily OHLC cron (section 5), and enable the `jarvis-feed` service (section 13.2). Do not enable the daemon before the intraday checks above pass.

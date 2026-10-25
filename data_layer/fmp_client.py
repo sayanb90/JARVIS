@@ -69,8 +69,10 @@ RATE_LIMIT_DELAY = float(os.getenv("FMP_RATE_LIMIT_DELAY", "0.5"))
 MAX_RETRIES      = 3
 RETRY_BACKOFF    = 2.0
 
-LOG_DIR        = Path("logs")
-DATA_DIR       = Path("data")
+from .lake import ROOT                    # project root (JARVIS_ROOT or the repo directory)
+
+LOG_DIR        = ROOT / "logs"
+DATA_DIR       = ROOT / "data"
 FUND_DIR       = DATA_DIR / "fundamentals"
 UNIVERSE_CSV   = DATA_DIR / "universe.csv"
 FUND_META_CSV  = DATA_DIR / "fund_meta.csv"
@@ -79,6 +81,7 @@ FUND_META_CSV  = DATA_DIR / "fund_meta.csv"
 # Each ticker costs 4 calls (income + balance + cashflow + ratios).
 FMP_DAILY_BUDGET = int(os.getenv("FMP_DAILY_BUDGET", "248"))  # leave 2 spare
 
+LOG_DIR.mkdir(parents=True, exist_ok=True)   # logs/ is git-ignored: absent on a fresh clone
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",

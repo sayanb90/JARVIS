@@ -1,5 +1,6 @@
 """Lake loader + DuckDB query tests on synthetic CSVs (no network)."""
 import csv
+from datetime import timedelta
 import importlib
 
 import pytest
@@ -173,3 +174,71 @@ def test_ohlc_all_markets_but_bars_india_only(env):
     assert set(q.sql("SELECT DISTINCT market FROM ohlc").market) == {"IN", "US", "UK", "EU"}
     assert set(q.sql("SELECT DISTINCT market FROM bars_5m").market) == {"IN"}
     assert lake.BARS_MARKETS == ("IN",) and lake.FUND_MARKETS == ("IN",)
+
+
+# ---------------------------------------------------------------------------
+# Full offline pipeline: stubbed Yahoo -> CSV -> lake -> verify
+# ---------------------------------------------------------------------------
+def test_full_5y_pipeline_with_stubbed_yahoo_and_verify(env, monkeypatch, capsys):
+    import numpy as np
+    import pandas as pd
+    root, lake = env
+    import data_layer.yf_client as yf
+    importlib.reload(yf)
+    monkeypatch.setattr(yf, "DATA_DIR", root / "data")
+    monkeypatch.setattr(yf, "OHLC_DIR", root / "data" / "ohlc")
+    import data_layer.fmp_client as fmp
+    uni = {"IN": ["INFY.NS", "TCS.NS"], "US": ["AAPL"], "UK": ["SHEL.L"], "EU": ["SAP.DE"]}
+    monkeypatch.setattr(yf, "read_universe",
+                        lambda m=None: [{"symbol": s, "market": m} for s in uni.get(m, [])])
+    monkeypatch.setattr(fmp, "read_universe",
+                        lambda m=None: [{"symbol": s, "market": m} for s in uni.get(m, [])])
+    idx = pd.bdate_range(end=pd.Timestamp.today().normalize() - pd.Timedelta(days=1), periods=1300)
+
+    def fake_download(tickers, **kw):
+        out = {}
+        for t in tickers:
+            c = 100 + np.cumsum(np.random.default_rng(abs(hash(t)) % 99).normal(0, 1, len(idx)))
+            c = np.abs(c) + 10
+            out[t] = pd.DataFrame({"Open": c, "High": c + 1, "Low": c - 1, "Close": c,
+                                   "Volume": np.full(len(idx), 1_000_000)}, index=idx)
+        return out
+
+    monkeypatch.setattr(yf, "_batch_download", fake_download)
+    yf.run_ohlc("ALL")                                   # 5y full, all four markets -> CSV
+    lake.load_ohlc()                                     # CSV -> Parquet
+    from data_layer import verify
+    from data_layer.query import Lake
+    q = Lake(root / "lake")
+    assert set(q.sql("SELECT DISTINCT market FROM ohlc").market) == {"IN", "US", "UK", "EU"}
+    monkeypatch.setattr(verify, "read_universe", lambda m=None: [{"symbol": s} for s in uni.get(m, [])])
+    rep = verify.verify_ohlc(q, years=5)
+    out = capsys.readouterr().out
+    assert rep.fails == 0, out
+    assert "[PASS] IN symbols with no data: none" in out and "== EU: 1 in universe" in out
+    # a symbol missing from the lake must FAIL
+    monkeypatch.setattr(verify, "read_universe",
+                        lambda m=None: [{"symbol": s} for s in uni.get(m, []) + (["GHOST.L"] if m == "UK" else [])])
+    assert verify.verify_ohlc(q, years=5).fails == 1
+
+
+def test_verify_bars_flags(env, monkeypatch, capsys):
+    root, lake = env
+    from datetime import date as d
+    from data_layer import tick_store, verify
+    from data_layer.query import Lake
+    from data_layer.ticks import BarAggregator, Tick
+    ld = root / "lake"
+    ag = BarAggregator(60)
+    bars = []
+    for k in range(375):
+        ts = datetime(2026, 10, 23, 3, 45) + timedelta(minutes=k)
+        bars += ag.add(Tick(ts, "INFY.NS", 100 + k * 0.01, 1000 + k * 10))
+    bars += ag.flush_all()
+    tick_store.write_bars(bars, "1m", ld)
+    monkeypatch.setattr(verify, "read_universe", lambda m=None: [{"symbol": "INFY.NS"}, {"symbol": "TCS.NS"}])
+    rep = verify.verify_bars(Lake(ld), d(2026, 10, 23), "1m")
+    out = capsys.readouterr().out
+    assert rep.fails == 0, out
+    assert "first bar 2026-10-23 03:45:00 UTC" in out and "[PASS] first bar" in out
+    assert "universe symbols with no bars" in out and "TCS.NS" in out and "[WARN] universe symbols" in out

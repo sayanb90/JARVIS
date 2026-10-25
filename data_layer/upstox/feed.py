@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -96,7 +97,8 @@ class UpstoxFeed:
     def __init__(self, token: str, key_map: dict[str, str], *, url: str = FEED_URL,
                  mode: str = "full", interval_s: int = 60, raw_ticks: bool = False,
                  lake_dir: Path | None = None, flush_s: float = 5.0, write_s: float = 30.0,
-                 stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow) -> None:
+                 stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
+                 dump_frames: int = 0, dump_dir: Path | None = None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
@@ -105,6 +107,7 @@ class UpstoxFeed:
         self.label = interval_label(interval_s)
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.clock = clock
+        self.dump_left, self.dump_dir = dump_frames, dump_dir or Path("logs/frames")
         self._last_frame = self.clock()
 
     # -- persistence -------------------------------------------------------
@@ -128,17 +131,28 @@ class UpstoxFeed:
             log.info("subscribed %d instruments in mode %s", len(self.keys), self.mode)
             self._last_frame = self.clock()
             aux = asyncio.create_task(self._housekeeping(ws, stop))
+            closer = asyncio.create_task(self._close_on_stop(ws, stop))
             try:
                 async for msg in ws:
                     if stop.is_set():
                         break
                     if isinstance(msg, bytes):
                         self._last_frame = self.clock()
+                        if self.dump_left > 0:                    # keep raw frames as real test fixtures
+                            self.dump_dir.mkdir(parents=True, exist_ok=True)
+                            (self.dump_dir / f"frame-{self._last_frame:%H%M%S}-{self.dump_left}.bin").write_bytes(msg)
+                            self.dump_left -= 1
                         self.proc.handle(msg, self._last_frame)
                     else:
                         log.info("text frame from server: %s", msg[:200])
             finally:
                 aux.cancel()
+                closer.cancel()
+
+    @staticmethod
+    async def _close_on_stop(ws, stop: asyncio.Event) -> None:
+        await stop.wait()                                 # wake a receive loop that is waiting on a quiet feed
+        await ws.close()
 
     async def _housekeeping(self, ws, stop: asyncio.Event) -> None:
         last_write = self.clock()
@@ -208,6 +222,12 @@ async def run_day(feed: UpstoxFeed, end: datetime) -> None:
         await asyncio.sleep(max(0.0, (end - feed.clock()).total_seconds()))
         stop.set()
     t = asyncio.create_task(stopper())
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):          # Ctrl+C / systemctl stop: save and compact
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError):      # non-main thread / Windows
+            pass
     try:
         await feed.run_session(stop)
     finally:
@@ -236,6 +256,8 @@ def main() -> None:
     ap.add_argument("--mode", choices=MODES, default="full")
     ap.add_argument("--limit", type=int, default=None, help="subscribe only the first N universe symbols")
     ap.add_argument("--raw-ticks", action="store_true", help="also store every tick with L1 (large)")
+    ap.add_argument("--dump-frames", type=int, default=0, metavar="N",
+                    help="save the first N raw binary frames to logs/frames/ (test fixtures, market data only)")
     ap.add_argument("--url", default=FEED_URL)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -251,7 +273,7 @@ def main() -> None:
     if not key_map:
         raise SystemExit("no universe symbols with a usable ISIN")
     make = lambda: UpstoxFeed(token, key_map, url=a.url, mode=a.mode, interval_s=a.interval,  # noqa: E731
-                              raw_ticks=a.raw_ticks)
+                              raw_ticks=a.raw_ticks, dump_frames=a.dump_frames)
     asyncio.run(run_forever(make, once=a.once))
 
 

@@ -52,7 +52,9 @@ DAILY_OHLC_DAYS  = 7          # calendar days back for incremental pulls
                                # (7 covers Mon after a long weekend + any gaps)
 CHUNK_SIZE       = 100         # tickers per yfinance batch call
 
-DATA_DIR = Path("data")
+from .lake import ROOT
+
+DATA_DIR = ROOT / "data"
 OHLC_DIR = DATA_DIR / "ohlc"
 
 log = logging.getLogger(__name__)
@@ -487,7 +489,7 @@ if __name__ == "__main__":
         format="%(asctime)s  %(levelname)-8s  %(message)s",
         handlers=[
             _logging.StreamHandler(sys.stdout),
-            _logging.FileHandler(_Path("logs/yf_client.log"), mode="a"),
+            _logging.FileHandler(ROOT / "logs" / "yf_client.log", mode="a"),
         ],
     )
 
@@ -513,7 +515,7 @@ if __name__ == "__main__":
                         help="Print plan without downloading")
     args = parser.parse_args()
 
-    _Path("logs").mkdir(exist_ok=True)
+    (ROOT / "logs").mkdir(parents=True, exist_ok=True)
 
     if args.mode == "full":
         run_ohlc(market=args.market, tickers=args.tickers, dry_run=args.dry_run)
