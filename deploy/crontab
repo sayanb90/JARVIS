@@ -1,0 +1,16 @@
+# JARVIS cron jobs for the `jarvis` user.  Install:  crontab deploy/crontab      (server clock must be UTC)
+# Times are UTC.  NSE session is 03:45-10:00; the live feed runs as the jarvis-feed service, not from cron.
+SHELL=/bin/bash
+PATH=/home/jarvis/JARVIS/.venv/bin:/usr/local/bin:/usr/bin:/bin
+JARVIS=/home/jarvis/JARVIS
+
+# Daily OHLC for India, US, UK and EU, after the last close (NYSE closes 21:00 UTC in winter)
+30 22 * * 1-5  cd $JARVIS && python scheduler.py --job ohlc-daily  >> logs/scheduler.log 2>&1
+# Fundamentals rotation (India; spends the FMP free-tier budget on the stalest stocks)
+0 12 * * 1-5   cd $JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
+# Nightly backup snapshot (JARVIS_BACKUP_DIR comes from .env)
+30 23 * * *    cd $JARVIS && python -m data_layer.backup run >> logs/backup.log 2>&1
+# Morning health report, before the session; mail or read logs/health.log
+15 3 * * 1-5   cd $JARVIS && python -m data_layer.health >> logs/health.log 2>&1
+# End-of-day health report, after the feed has compacted the day (10:05 UTC) and Yahoo's daily bar exists
+30 11 * * 1-5  cd $JARVIS && python -m data_layer.health --after-close >> logs/health.log 2>&1

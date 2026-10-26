@@ -32,6 +32,7 @@ from pathlib import Path
 import websockets
 
 from .. import tick_store
+from ..lake import ENV_FILE
 from ..ticks import SESSION_CLOSE_UTC, SESSION_OPEN_UTC, Bar, BarAggregator, Tick
 from . import decode
 from .instruments import build_key_map
@@ -99,10 +100,13 @@ class UpstoxFeed:
                  mode: str = "full", interval_s: int = 1, raw_ticks: bool = False,
                  lake_dir: Path | None = None, flush_s: float = 2.0, write_s: float = 15.0,
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
-                 dump_frames: int = 0, dump_dir: Path | None = None) -> None:
+                 dump_frames: int = 0, dump_dir: Path | None = None,
+                 token_provider=None, auth_retry_s: float | None = None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
+        # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
+        self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
         self.proc = FeedProcessor(key_map, interval_s, raw_ticks)
         self.label = interval_label(interval_s)
@@ -181,8 +185,20 @@ class UpstoxFeed:
             except websockets.exceptions.InvalidStatus as exc:
                 code = exc.response.status_code
                 if code in (401, 403):
-                    raise RuntimeError(f"Upstox rejected the token (HTTP {code}); it expires daily, "
-                                       "refresh UPSTOX_ACCESS_TOKEN") from exc
+                    if not self.auth_retry_s:
+                        raise RuntimeError(f"Upstox rejected the token (HTTP {code}); it expires daily, "
+                                           "refresh UPSTOX_ACCESS_TOKEN") from exc
+                    log.error("Upstox rejected the token (HTTP %s). Refresh it with python -m data_layer.upstox.auth; "
+                              "trying again in %.0fs", code, self.auth_retry_s)
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=self.auth_retry_s)
+                    except asyncio.TimeoutError:
+                        pass
+                    new = self.token_provider() if self.token_provider else self.token
+                    if new and new != self.token:
+                        log.info("picked up a new token")
+                        self.token = new
+                    continue
                 log.error("handshake failed: HTTP %s", code)
             except (OSError, websockets.exceptions.WebSocketException) as exc:
                 log.warning("connection lost: %r", exc)
@@ -250,6 +266,17 @@ async def run_forever(make_feed, once: bool = False) -> None:
             return
 
 
+def current_token() -> str:
+    """
+    The token to use right now.  Re-reads .env every call (overriding what the process started with), so refreshing
+    the token needs no restart.  UPSTOX_FEED_TOKEN (for example a long-lived extended token adopted by
+    `auth check --adopt`) wins over the daily access token.
+    """
+    from dotenv import load_dotenv
+    load_dotenv(ENV_FILE, override=True)
+    return os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN", "")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Upstox v3 live feed collector (India)")
     ap.add_argument("--once", action="store_true", help="run one session now instead of daemon mode")
@@ -262,19 +289,19 @@ def main() -> None:
     ap.add_argument("--url", default=FEED_URL)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    from dotenv import load_dotenv
-    load_dotenv()
-    # UPSTOX_FEED_TOKEN (e.g. a long-lived extended token adopted by `auth check --adopt`) wins
-    token = os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN", "")
-    if not token:
+    token = current_token()
+    if not token and a.once:
         raise SystemExit("no token: set UPSTOX_ACCESS_TOKEN (see python -m data_layer.upstox.auth)")
+    if not token:
+        log.warning("no Upstox token yet: the daemon will keep retrying; run python -m data_layer.upstox.auth")
     key_map, _ = build_key_map()
     if a.limit:
         key_map = dict(list(key_map.items())[: a.limit])
     if not key_map:
         raise SystemExit("no universe symbols with a usable ISIN")
-    make = lambda: UpstoxFeed(token, key_map, url=a.url, mode=a.mode, interval_s=a.interval,  # noqa: E731
-                              raw_ticks=a.raw_ticks, dump_frames=a.dump_frames)
+    make = lambda: UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, interval_s=a.interval,  # noqa: E731
+                              raw_ticks=a.raw_ticks, dump_frames=a.dump_frames, token_provider=current_token,
+                              auth_retry_s=None if a.once else 60.0)
     asyncio.run(run_forever(make, once=a.once))
 
 

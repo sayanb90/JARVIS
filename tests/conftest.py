@@ -97,3 +97,14 @@ def demo_lake(tmp_path_factory):
     out = tmp_path_factory.mktemp("demo_lake")
     write_demo(out, days=3)
     return out
+
+
+@pytest.fixture(autouse=True)
+def _isolated_env_file(tmp_path, monkeypatch):
+    """No test may read or write a developer's real .env: point every ENV_FILE at a path that does not exist."""
+    import data_layer.lake as lake
+    import data_layer.upstox.auth as auth
+    import data_layer.upstox.feed as feed
+    nowhere = tmp_path / "no-such.env"
+    for mod, attr in ((lake, "ENV_FILE"), (feed, "ENV_FILE"), (auth, "ENV_PATH")):
+        monkeypatch.setattr(mod, attr, nowhere)

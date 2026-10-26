@@ -227,7 +227,7 @@ def test_main_requires_a_token_and_prefers_feed_token(monkeypatch, tmp_path):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setattr(feed, "__name__", feed.__name__)
     monkeypatch.setattr(sys, "argv", ["feed", "--once"])
-    monkeypatch.chdir(tmp_path)                                  # no .env here
+    monkeypatch.setattr(feed, "ENV_FILE", tmp_path / ".env")     # no .env here
     with pytest.raises(SystemExit, match="no token"):
         feed.main()
     seen = {}
@@ -236,3 +236,73 @@ def test_main_requires_a_token_and_prefers_feed_token(monkeypatch, tmp_path):
     monkeypatch.setattr(feed, "run_forever", lambda make, once: seen.update(token=make().token) or asyncio.sleep(0))
     feed.main()
     assert seen["token"] == "LONG"
+
+
+# -- daemon-friendly token handling (runbook 0.9) --------------------------------------------------------------------
+def test_current_token_rereads_dotenv_every_time_and_prefers_feed_token(monkeypatch, tmp_path):
+    monkeypatch.setattr(feed, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "STARTED-WITH"); monkeypatch.delenv("UPSTOX_FEED_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("UPSTOX_ACCESS_TOKEN=MORNING-1\n")
+    assert feed.current_token() == "MORNING-1"                      # the file beats what the process started with
+    (tmp_path / ".env").write_text("UPSTOX_ACCESS_TOKEN=MORNING-2\n")
+    assert feed.current_token() == "MORNING-2"
+    (tmp_path / ".env").write_text("UPSTOX_ACCESS_TOKEN=MORNING-2\nUPSTOX_FEED_TOKEN=LONG\n")
+    assert feed.current_token() == "LONG"
+
+
+def test_daemon_starts_without_a_token_and_retries_while_once_refuses(monkeypatch, tmp_path):
+    for v in ("UPSTOX_ACCESS_TOKEN", "UPSTOX_FEED_TOKEN"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setattr(feed, "ENV_FILE", tmp_path / ".env")                       # no .env here
+    monkeypatch.setattr(feed, "build_key_map", lambda: ({KEY: "X.NS"}, []))
+    seen = {}
+
+    async def fake_run_forever(make, once):
+        f = make()
+        seen.update(token=f.token, retry=f.auth_retry_s, provider=f.token_provider, once=once)
+    monkeypatch.setattr(feed, "run_forever", fake_run_forever)
+    monkeypatch.setattr(sys, "argv", ["feed"])
+    feed.main()
+    assert seen == {"token": "", "retry": 60.0, "provider": feed.current_token, "once": False}
+    monkeypatch.setattr(sys, "argv", ["feed", "--once"])
+    with pytest.raises(SystemExit, match="no token"):
+        feed.main()
+
+
+def test_daemon_picks_up_a_refreshed_token_without_restarting(tmp_path):
+    from tests.bdd.fake_upstox import FakeUpstox, session_frames
+    keys = ["NSE_EQ|INE002A01018"]
+    server = FakeUpstox(session_frames(keys, step_s=60, seconds=600), reject_tokens={"EXPIRED"}, hold_s=0.5)
+    tokens = iter(["EXPIRED", "FRESH"])                               # the owner refreshes .env while the feed is waiting
+
+    async def main():
+        async with server.start() as srv:
+            f = UpstoxFeed("EXPIRED", {keys[0]: "A.NS"}, url=FakeUpstox.url(srv), lake_dir=tmp_path / "lake",
+                           clock=lambda: datetime(2026, 10, 23, 10, 6), token_provider=lambda: next(tokens), auth_retry_s=0.2,
+                           flush_s=0.05, write_s=0.05)
+            stop = asyncio.Event()
+
+            async def finish():
+                await server.all_sent.wait(); await asyncio.sleep(0.3); stop.set()
+            t = asyncio.create_task(finish())
+            await asyncio.wait_for(f.run_session(stop), timeout=15)
+            t.cancel()
+            return f
+    f = run(main())
+    assert f.token == "FRESH" and server.auth_headers == ["Bearer FRESH"]
+    from data_layer.query import Lake
+    assert len(Lake(tmp_path / "lake").sql("SELECT * FROM bars_1s")) == 10
+
+
+def test_daemon_waiting_for_a_token_stops_cleanly_when_asked(tmp_path):
+    from tests.bdd.fake_upstox import FakeUpstox
+    server = FakeUpstox([], deny_status=401)
+
+    async def main():
+        async with server.start() as srv:
+            f = UpstoxFeed("BAD", KMAP, url=FakeUpstox.url(srv), lake_dir=tmp_path / "lake", token_provider=lambda: "BAD",
+                           auth_retry_s=30.0)
+            stop = asyncio.Event()
+            asyncio.get_running_loop().call_later(0.4, stop.set)
+            await asyncio.wait_for(f.run_session(stop), timeout=5)    # must return promptly, not sit out the 30 s wait
+    run(main())

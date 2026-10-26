@@ -167,7 +167,7 @@ def main() -> None:
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(lake_mod.ENV_FILE)
     token = os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN", "")
     if not token:
         raise SystemExit("no token: run python -m data_layer.upstox.auth first")

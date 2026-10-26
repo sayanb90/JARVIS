@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 
 ROOT = Path(os.getenv("JARVIS_ROOT", Path(__file__).resolve().parent.parent))
 DATA_DIR = ROOT / "data"
+ENV_FILE = Path(os.getenv("JARVIS_ENV") or ROOT / ".env")     # the one place secrets and settings live (mode 600)
 LAKE_DIR = Path(os.getenv("JARVIS_LAKE", ROOT / "lake"))
 
 MARKETS = ("IN", "US", "UK", "EU")   # daily OHLC universe

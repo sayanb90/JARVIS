@@ -1,0 +1,25 @@
+# Live Upstox tick/L1 collector (1-second bars).  Install: sudo cp deploy/jarvis-feed.service /etc/systemd/system/
+# then: sudo systemctl daemon-reload && sudo systemctl enable --now jarvis-feed
+# The process sleeps until 03:40 UTC on each weekday, runs the session, compacts the day, and waits for the next one.
+# The access token expires daily: refresh it BEFORE 03:40 UTC (see runbook section 0.9); restart afterwards picks it up.
+[Unit]
+Description=JARVIS Upstox live feed collector
+After=network-online.target
+Wants=network-online.target
+# an expired token no longer makes the process exit (it waits and retries), so this only guards real crash loops
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+User=jarvis
+WorkingDirectory=/home/jarvis/JARVIS
+EnvironmentFile=/home/jarvis/JARVIS/.env
+ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m data_layer.upstox.feed
+# SIGTERM makes the collector save the bars received so far and compact the day before it exits
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

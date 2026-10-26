@@ -1,0 +1,18 @@
+# Intraday viewer (read-only).  Add WEBAPP_USER and WEBAPP_PASSWORD to .env before exposing it.
+# Install: sudo cp deploy/jarvis-viewer.service /etc/systemd/system/ && sudo systemctl enable --now jarvis-viewer
+[Unit]
+Description=JARVIS intraday viewer
+After=network-online.target
+
+[Service]
+User=jarvis
+WorkingDirectory=/home/jarvis/JARVIS
+EnvironmentFile=/home/jarvis/JARVIS/.env
+ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m webapp --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+# the viewer must never starve the collector: cap its memory
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target

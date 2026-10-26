@@ -31,12 +31,13 @@ import requests
 import websockets
 from dotenv import load_dotenv
 
+from ..lake import ENV_FILE
 from .feed import FEED_URL
 
 BASE = "https://api.upstox.com"
 DIALOG = f"{BASE}/v2/login/authorization/dialog"
 TOKEN_URL = f"{BASE}/v2/login/authorization/token"
-ENV_PATH = Path(os.getenv("JARVIS_ENV", ".env"))
+ENV_PATH = ENV_FILE
 
 
 def mask(tok: str | None) -> str:

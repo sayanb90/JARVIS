@@ -7,6 +7,144 @@ Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · 
 
 ---
 
+## 0. Start here: from a blank VPS to data flowing
+
+Follow this top to bottom. Every command is meant to be pasted as written; the sections it points to hold the detail and the pass/fail criteria. Nothing in it has been run on a real VPS yet: the commands are standard Ubuntu administration plus this repository's own tools (which are covered by automated tests), so expect to adjust small things and write them down in section 10.
+
+| Step | What | Time | Who |
+|---|---|---|---|
+| 0.1 | Gather accounts and inputs | 30 min | you |
+| 0.2 | Provision and harden the server | 30 min | you |
+| 0.3 | Install the code and run the tests | 15 min | you |
+| 0.4 | Configure `.env` | 10 min | you |
+| 0.5 | Build the stock universe | 15 min | you |
+| 0.6 | Smoke checks | 5 min | you |
+| 0.7 | **Test day** (section 14) | one session | you |
+| 0.8 | Go live: cron, services, backups, viewer | 45 min | you |
+| 0.9 | The daily routine (the token needs you every morning unless 14.3 shows otherwise) | 5 min a day | you |
+| 0.10 | Weekly and monthly care | | you |
+
+### 0.1 What you need before you start
+- **A VPS.** Ubuntu **24.04 LTS** (it ships Python 3.12; 22.04 ships 3.10, which is too old for this code). At least 2 vCPU, 4 GB RAM and a **100 GB SSD** (1-second bars are about 10-15 GB a year typical and up to about 130 GB worst case, section 13.5; leave room for backups if they share the machine, though they should not). A Mumbai-region server is not required (we work in 1-second bars) but keeps the connection to Upstox short.
+- **A second place for backups:** another disk or a mounted bucket. A backup on the same disk is not a backup.
+- **An Upstox account with an app** from the developer console: its API key, API secret and the redirect URL you set (for example `http://localhost:8000`). Without them no live data can flow (section 13.2).
+- **Access to this repository from the server:** a read-only deploy key (below) or a personal access token.
+- **The stock list:** the NSE index constituents CSV files for the indices you want (they carry company name, industry, symbol and **ISIN**). The ISIN is what the live feed subscribes with. Optional: an FMP API key (fundamentals; whether the free plan covers Indian stocks is unverified, O9). Optional: a domain name if you want the viewer on your phone over HTTPS.
+- **A password manager** for the secrets. `.env` is deliberately not backed up.
+
+### 0.2 Provision and harden (as root, once)
+Keep your first SSH session open until the last check passes, so a typo cannot lock you out.
+```bash
+timedatectl set-timezone UTC                       # every time in this runbook is UTC
+apt update && apt -y upgrade
+apt -y install python3 python3-venv python3-pip git chrony ufw fail2ban unattended-upgrades cron logrotate
+adduser --disabled-password --gecos "" jarvis
+install -d -m 700 -o jarvis -g jarvis /home/jarvis/.ssh
+cp ~/.ssh/authorized_keys /home/jarvis/.ssh/ && chown jarvis:jarvis /home/jarvis/.ssh/authorized_keys && chmod 600 /home/jarvis/.ssh/authorized_keys
+# let jarvis restart only its own services
+cat > /etc/sudoers.d/jarvis <<'EOF'
+jarvis ALL=(root) NOPASSWD: /usr/bin/systemctl restart jarvis-feed, /usr/bin/systemctl restart jarvis-viewer, /usr/bin/systemctl reset-failed jarvis-feed, /usr/bin/systemctl status jarvis-feed, /usr/bin/systemctl status jarvis-viewer
+EOF
+chmod 440 /etc/sudoers.d/jarvis
+# keys only, no root login
+# named 00- on purpose: for sshd the FIRST value wins, and cloud images ship 50-cloud-init.conf with PasswordAuthentication yes
+printf 'PasswordAuthentication no\nPermitRootLogin no\n' > /etc/ssh/sshd_config.d/00-jarvis.conf
+systemctl reload ssh
+sshd -T | grep -E '^(passwordauthentication|permitrootlogin)'     # both must say no
+# firewall: SSH only (add 80 and 443 later only if the viewer goes on the internet)
+ufw default deny incoming && ufw default allow outgoing && ufw allow OpenSSH && ufw --force enable
+systemctl enable --now chrony fail2ban
+```
+**Check from a second terminal before closing the first:** `ssh jarvis@<server>` works with your key, `timedatectl | grep "Time zone"` says UTC, `chronyc tracking` shows the clock offset is a few milliseconds. The collector rejects ticks stamped more than a minute ahead of the server clock, so a wrong clock silently loses data.
+
+### 0.3 Install the code (as `jarvis`)
+```bash
+# private repo: create a read-only deploy key, add the .pub under the repo's Settings > Deploy keys, then clone over SSH
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/jarvis_deploy && cat ~/.ssh/jarvis_deploy.pub
+GIT_SSH_COMMAND="ssh -i ~/.ssh/jarvis_deploy" git clone git@github.com:sayanb90/JARVIS.git ~/JARVIS
+cd ~/JARVIS && git config core.sshCommand "ssh -i ~/.ssh/jarvis_deploy"
+git checkout claude/us-stock-market-analysis-MZtcm          # until the PR is merged to master
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest -m "not browser"                          # expect: every test passes (about 2 minutes)
+```
+If any test fails here, stop and send me the output: something about the server differs from the machine this was built on.
+
+### 0.4 Configure `.env` (the one file for secrets and settings)
+```bash
+cp .env.example .env && chmod 600 .env && nano .env
+```
+Fill in `UPSTOX_API_KEY`, `UPSTOX_API_SECRET`, `UPSTOX_REDIRECT_URI` (exactly as in the developer console), `JARVIS_BACKUP_DIR` (the second place from 0.1), `WEBAPP_USER` and `WEBAPP_PASSWORD` (choose a long password), and `FMP_API_KEY` if you have one. Leave the `UPSTOX_*TOKEN` lines empty: the tools write them. Never commit this file (it is git-ignored).
+
+### 0.5 Build the stock universe
+`data/universe.csv` is the single list every feed reads. It ships with 10 sample stocks per market. For India, import the NSE constituents files:
+```bash
+# one command per file; they merge, so import Nifty 500 and any other index you want (e.g. a microcap index)
+python -m data_layer.universe import-nse ~/ind_nifty500list.csv
+python -m data_layer.universe check                       # lists anything the live feed or Yahoo cannot use
+```
+It reports rows with a missing or malformed ISIN and skips them. US, UK and EU rows are still the 10-name placeholders from section 11 (O11): replace them when you choose the indices. Start the test day with the whole list for daily prices but only `--limit 20` for the live feed, then widen (Upstox's subscription limits are unknown, Gate U1). A handful of NSE symbols are spelled differently on Yahoo; the first backfill's `verify ohlc` lists the ones with no data so you can fix them.
+
+### 0.6 Smoke checks (no network, no data yet)
+```bash
+python scheduler.py --job all --dry-run                   # shows ticker counts per market, writes nothing
+python -m data_layer.health                               # expect FAIL lines for "no daily OHLC": nothing is loaded yet
+```
+
+### 0.7 Test day
+Do section 14 now, before turning anything on permanently. It proves the 5-year daily backfill for all four markets and one trading day of Upstox data. Use the path that suits your time:
+- **During the session (best):** 14.1 to 14.5, including the live feed run.
+- **Only after the close:** 14.2 (daily prices), 14.3 (token) and 14.4b (pull the whole day from Upstox's candle API). This proves the token, formats, storage and checks, but not the live WebSocket; run the live part on another day before trusting the daemon.
+
+### 0.8 Go live (after the test day passes)
+**As `jarvis`:**
+```bash
+cd ~/JARVIS && . .venv/bin/activate
+# 1. Full daily history for the whole universe (skip if 14.2 already ran on the final universe)
+python -m data_layer.yf_client --mode full --market ALL && python -m data_layer.lake --load ohlc
+python -m data_layer.verify ohlc --years 5                # no FAIL lines; fix missing symbols in universe.csv and re-run
+
+# 2. Scheduled jobs (daily prices, fundamentals, nightly backup, health reports)
+crontab deploy/crontab && crontab -l
+```
+**As root (or your admin login: the restricted `jarvis` user cannot install system files):**
+```bash
+# 3. Log rotation
+cp /home/jarvis/JARVIS/deploy/logrotate-jarvis /etc/logrotate.d/jarvis && logrotate -d /etc/logrotate.d/jarvis
+
+# 4. The live collector and the viewer as services
+cp /home/jarvis/JARVIS/deploy/jarvis-feed.service /home/jarvis/JARVIS/deploy/jarvis-viewer.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now jarvis-feed jarvis-viewer
+systemctl status jarvis-feed jarvis-viewer --no-pager
+```
+**As `jarvis` again:**
+```bash
+# 5. First backup, then PROVE you can restore it (Gate 0)
+python -m data_layer.backup run && python -m data_layer.backup verify
+python -m data_layer.backup restore --snapshot $(date +%F) --to /tmp/restore-test && ls /tmp/restore-test && rm -rf /tmp/restore-test
+```
+Then: copy the backup folder off the machine on a schedule (`rclone sync "$JARVIS_BACKUP_DIR" remote:jarvis-backup`, or your provider's snapshots); and, if you want the viewer on your phone, put Caddy in front of it with the snippet in 16.3 (open ports 80 and 443 in `ufw` first). The feed service waits until 03:40 UTC on the next trading day by itself.
+
+**Do not skip the order.** The feed is the one thing that cannot be redone: every trading day it is not running is 1-second history lost for good. Everything else can be re-fetched.
+
+### 0.9 The daily routine
+| Time (IST) | UTC | What happens | What you do |
+|---|---|---|---|
+| 08:45 | 03:15 | Cron writes the morning health report to `logs/health.log` | Glance: `tail -30 ~/JARVIS/logs/health.log`. Any FAIL or WARN is explained in the line |
+| before 09:10 | before 03:40 | **Refresh the Upstox token** (it expires daily) | `python -m data_layer.upstox.auth login-url`, log in on your phone, then `python -m data_layer.upstox.auth exchange "<the URL you land on>"`. **No restart needed**: the collector re-reads `.env` and, if it was rejected, retries every minute until the new token works. Skip this step if section 14.3 showed the extended token is accepted and you adopted it |
+| 09:15-15:30 | 03:45-10:00 | The feed service collects and writes bars every 15 seconds | Nothing. To peek: `journalctl -u jarvis-feed -n 20 --no-pager` shows frames, ticks and bars written |
+| 15:35 | 10:05 | The feed compacts the day into one file | |
+| 17:00 | 11:30 | Cron writes the after-close health report | `python -m data_layer.health --after-close` (or read the log): bars for today, compacted, backup fresh |
+| 04:00 and 05:00 (next morning) | 22:30 and 23:30 | Cron loads daily prices for all four markets, then the nightly backup | Nothing |
+| any time | | The viewer | Open it, pick the date and a stock. Anything odd goes in section 10 |
+
+If the token expires and you forget: the collector keeps retrying and logs `Upstox rejected the token`; refresh it whenever you notice and it picks up from that moment. The seconds before are lost. If you want a safety net, put a recurring phone reminder at 08:55 IST.
+
+### 0.10 Weekly and monthly care
+- **Weekly:** `python -m data_layer.backup verify`; `df -h` and compare with the estimate in 13.5; `python -m data_layer.health --probe` (checks the token against Upstox); skim `logs/scheduler.log` for errors; `git pull` only if you are deliberately updating (then re-run `python -m pytest -m "not browser"` and restart both services).
+- **Monthly:** a real restore drill into a scratch directory (step 5 above); review `universe.csv` against index changes (re-import the NSE files); check the fundamentals coverage if you rely on FMP (`data/fund_meta.csv` dates).
+- **Not automated yet:** alerting (the health report is a file you read, not a message that finds you), the daily token refresh unless the extended token works, and index reconstitution. Say the word when you want the first of those built.
+
 ## 1. Scope and principles
 
 - Scope (ADR-2, amended by ADR-3): **daily OHLC for India, US, UK and EU; everything intraday, live ticks and fundamentals for India (NSE) only.** Universe lives in `data/universe.csv` (single source of truth for every feed); the `market` column is `IN`, `US`, `UK` or `EU`.
@@ -49,42 +187,31 @@ Fits comfortably (bars are India only, so these are the upper bound). Parquet fi
 
 | | Dev / cloud sandbox | VPS (prod) |
 |---|---|---|
-| Purpose | Build, unit-test Python | Run cron collectors, host backtester webapp |
-| `duckdb` / `pyarrow` (pip) | Yes | Yes |
-| Network egress to Yahoo / FMP | Via proxy | Direct |
+| Purpose | Build, run the automated tests | Run the collectors, the feed service, the viewer, backups |
+| OS | Anything with Python 3.11+ | Ubuntu 24.04 LTS (Python 3.12) |
+| Network egress to Yahoo / FMP / Upstox | Blocked or proxied (cannot test live) | Direct |
 | Holds real data | No | Yes |
+| Spec | | at least 2 vCPU, 4 GB RAM, 100 GB SSD, UTC clock synced by chrony; backups on a separate disk |
 
-VPS spec, provider and OS are **not yet decided** (open decision O1). Minimum I would plan for: 2 vCPU, 4 GB RAM, 50 GB SSD, Linux, UTC clock.
+VPS provider and region are still open (O1); section 0.1 lists what to pick.
 
 ## 4. Phase plan and go-live gates
 
 ### Phase 0 — VPS foundation
-- [ ] Provision VPS; set timezone to **UTC** (all cron times in this runbook are UTC)
-- [ ] Non-root `jarvis` user; SSH keys only; password login off; firewall allowing only 22 and 443
-- [ ] Install Python 3.11+, create venv, `pip install -r requirements.txt`
-- [ ] Clone repo; copy `.env.example` to `.env` and add `FMP_API_KEY`
-- [ ] Backups configured and a restore tested (section 7)
+Steps 0.1 to 0.6 in section 0 (provision, harden, install, configure, universe, smoke checks).
 
-**Gate 0:** `python -m pytest --cov` passes, `python -m data_layer.yf_client --dry-run` runs, a test backup restores.
+**Gate 0:** `python -m pytest -m "not browser"` passes on the server; the clock is UTC and synced; `python -m data_layer.universe check` is clean; **a backup has been restored into a scratch directory and read back** (0.8 step 5).
 
-### Phase 1 — Data foundation (start collecting immediately)
-Order matters: bars first because they cannot be backfilled.
-
-1. [ ] `python scheduler.py --job bars --dry-run` shows the expected ticker counts
-2. [ ] Run once for real, with the deepest history Yahoo allows: `python scheduler.py --job bars --market IN --backfill` (about 59 days of 5m). Daily runs after that
-3. [ ] Confirm CSVs exist under `data/bars/5m/in/YYYY-MM-DD.csv`
-4. [ ] Confirm the load worked: `python -c "from data_layer.query import Lake; print(Lake().sql('SELECT market, count(*) n FROM bars_5m GROUP BY 1'))"`
-5. [ ] Daily OHLC 5-year backfill for all four markets: `python -m data_layer.yf_client --mode full --market ALL`, then `python -m data_layer.lake --load ohlc`
-6. [ ] Fundamentals first pass: `python scheduler.py --job fundamentals` daily until `fund_meta.csv` covers the universe (about 4 days for 250 stocks)
-7. [ ] Install cron (section 5)
-8. [ ] Spot-check 3 NSE tickers against a second source (close price and volume, one day each)
+### Phase 1 — Data foundation
+Steps 0.7 and 0.8 in section 0: test day first (section 14), then the full daily backfill, cron, services and backups.
 
 **Gate 1 (data is trustworthy):**
-- [ ] Bars: every universe ticker has bars on the last trading day; bar count per ticker is about 75–78 for a full session
-- [ ] No duplicate `(ts, symbol)` rows after running the same job twice
-- [ ] First bar of the day is 03:45 UTC (09:15 IST), last bar is complete (ends 10:00 UTC)
-- [ ] 5 consecutive trading days of unattended cron runs with no failures in `logs/scheduler.log`
-- [ ] Scoring: `Lake().top_by_score("IN", 10)` returns sensible results against a known-good ticker
+- [ ] `verify ohlc` shows no FAIL for all four markets (section 14.2)
+- [ ] 1-second bars: `verify bars --interval 1s` shows no FAIL for a full live session, and `verify compare-rest` agrees with Upstox's minute candles (section 14.5)
+- [ ] No duplicate `(symbol, ts)` rows after the day is compacted
+- [ ] The collector survived a real disconnect or restart without losing the day (look for `reconnecting` in `journalctl -u jarvis-feed`)
+- [ ] 5 consecutive trading days where `python -m data_layer.health --after-close` shows no FAIL and nothing was fixed by hand
+- [ ] Scoring: `Lake().top_by_score("IN", 10)` returns sensible results against a known-good ticker (needs fundamentals, O9)
 
 ### Phase 2 — Backtester webapp on the VPS
 `backtester/` and `webapp/` are empty stubs today. Plan:
@@ -105,35 +232,41 @@ Planning only. See section 9. **Do not write collector code until the decisions 
 
 ## 5. Daily operations (all times UTC, trading weekdays)
 
-```cron
-# Daily OHLC, all four markets (after the last close, NYSE 21:00 UTC in winter)
-30 22 * * 1-5  cd /home/jarvis/JARVIS && python scheduler.py --job ohlc-daily   >> logs/scheduler.log 2>&1
-# Interim Yahoo bars, after the NSE close (retire when the Upstox feed runs)
-20 10 * * 1-5  cd /home/jarvis/JARVIS && python scheduler.py --job bars --market IN >> logs/scheduler.log 2>&1
-# Fundamentals rotation
-0 12 * * 1-5   cd /home/jarvis/JARVIS && python scheduler.py --job fundamentals  >> logs/scheduler.log 2>&1
-```
+The routine you follow is in **0.9**. This section is the reference for what runs by itself.
+
+| What | How | When (UTC) | File |
+|---|---|---|---|
+| Live feed to 1-second bars, compaction | systemd service `jarvis-feed` (a daemon, not cron) | waits until 03:40, runs to 10:05 | `deploy/jarvis-feed.service` |
+| Daily prices, four markets | cron `scheduler.py --job ohlc-daily` | 22:30 | `deploy/crontab` |
+| Fundamentals rotation (India) | cron `scheduler.py --job fundamentals` | 12:00 | `deploy/crontab` |
+| Nightly backup snapshot | cron `python -m data_layer.backup run` | 23:30 | `deploy/crontab` |
+| Health reports | cron `python -m data_layer.health` | 03:15 and 11:30 | `deploy/crontab` |
+| Viewer | systemd service `jarvis-viewer` | always | `deploy/jarvis-viewer.service` |
+
+The Yahoo 5-minute `bars` job still exists in `scheduler.py` as a stopgap cross-check but is **not** in the crontab: the intraday base is the 1-second feed (ADR-5).
 
 Notes:
-- NSE regular session is 03:45-10:00 UTC (09:15-15:30 IST). India has no daylight saving, so these times never shift. LSE and Euronext close about 16:30 UTC, NYSE at 20:00 or 21:00 UTC; the single 22:30 UTC run is after all of them.
-- Different holiday calendars: a market closed that day simply returns no rows.
-- The live feed process (section 13) is a long-running service started before 03:45 UTC, not a cron job.
-- A job on an NSE holiday should fetch nothing and exit cleanly; confirm this during Gate 1.
+- NSE regular session is 03:45-10:00 UTC (09:15-15:30 IST), no daylight saving. LSE and Euronext close about 16:30 UTC, NYSE at 20:00 or 21:00 UTC; the 22:30 daily-price run is after all of them.
+- Different holiday calendars: a market closed that day simply returns no rows. On an NSE holiday the feed connects, receives nothing, and the health report says so; that is expected.
 - The scheduler holds a lock file (`logs/scheduler.lock`). If a run was killed, delete a stale lock before re-running.
 
 ### Daily check (2 minutes)
-- [ ] `tail logs/scheduler.log`: all three jobs finished successfully
-- [ ] Row counts for yesterday are in the expected range (section 4, Gate 1)
+`python -m data_layer.health --after-close` prints one PASS, WARN or FAIL line per condition: disk space, universe and ISIN coverage, freshness of daily prices per market, latest bar day and instrument count, uncompacted days, whether the feed is writing during the session, the systemd service, the last scheduler run, token present, newest backup. Exit code 1 if anything FAILs. Anything marked FAIL or WARN names what to look at.
 
 ### Failure handling
 | Symptom | Likely cause | Action |
 |---|---|---|
-| Bars job returns 0 rows | Holiday, or Yahoo throttling/outage | Re-run later the same day; the 5-day overlap window repairs gaps |
-| Some tickers missing | Delisted, symbol changed, or one failed chunk | Check `logs/yf_client.log`; update `universe.csv` |
-| `scheduler.lock` exists | Previous run still running or killed | Check PID in the file; delete only if the process is gone |
-| Lake load fails | Disk full or bad CSV | Check disk, inspect the day-file; reload with `python -m data_layer.lake --load bars --since YYYY-MM-DD` |
-| FMP returns 429/403 | Daily budget exceeded | Wait for reset; lower `FMP_DAILY_BUDGET` |
-| Gap longer than the Yahoo window | Collector down too long | Unrecoverable from Yahoo; record the gap in section 10 |
+| `Upstox rejected the token` in the feed log | Token expired (daily) | Refresh it (0.9); the feed picks it up within a minute, no restart |
+| Feed service `failed` or `inactive` | Crash, or systemd gave up after repeated failures | `journalctl -u jarvis-feed -n 50`; fix the cause; `sudo systemctl reset-failed jarvis-feed && sudo systemctl restart jarvis-feed` |
+| Health says "live feed is NOT writing" in session | Disconnected, token rejected, NSE holiday, or no subscribable stocks | Read the log; check ISIN coverage in the health report |
+| `ahead of local clock` warnings | Server clock wrong, or timestamps not in milliseconds | `chronyc tracking`; if the clock is fine, report it (Gate U1) |
+| Daily-price job fails with "Yahoo returned no data" | Yahoo down or blocking | Re-run later; the job fails loudly on purpose so cron shows it |
+| Some tickers missing in `verify ohlc` | Delisted or spelled differently on Yahoo | Fix the symbol in `universe.csv`, re-run `yf_client --mode full --market <m>` |
+| `scheduler.lock` exists | Previous run still running or killed | Check the PID in the file; delete only if the process is gone |
+| Lake load fails | Disk full or bad CSV | `df -h`; inspect the file; reload with `python -m data_layer.lake --load <what>` |
+| Health: "the lake cannot be opened" | A damaged Parquet file | The message names it; restore that file from the newest backup snapshot |
+| FMP returns 429/403 | Daily budget exceeded, or free plan does not cover India | Wait for reset; lower `FMP_DAILY_BUDGET`; see O9 |
+| A gap in 1-second data | Collector was down | Unrecoverable (Upstox keeps no 1-second history); `python -m data_layer.upstox.candles --date <day>` can repair the **1-minute** table only. Record the gap in section 10 |
 
 ## 6. Loader commands
 
@@ -149,10 +282,17 @@ Reloads are idempotent: every load is an upsert on the table key, and each bar d
 
 ## 7. Backup and retention
 
-- Nightly: archive `lake/`, `data/universe.csv`, `data/fund_meta.csv` to off-VPS storage; keep 7 daily and 4 weekly
-- **A backup is not real until a restore has been tested** (Gate 0)
-- Bar CSVs under `data/bars/` are the rebuild source for `lake/bars/`; compress and archive files older than 90 days, do not delete them
-- Treat the intraday history as irreplaceable (section 2.1): it is the one dataset we cannot re-download
+```bash
+python -m data_layer.backup run                     # one dated snapshot in $JARVIS_BACKUP_DIR (cron does this nightly)
+python -m data_layer.backup list
+python -m data_layer.backup verify [--snapshot 2026-10-27]    # every file present and every Parquet file readable
+python -m data_layer.backup restore --snapshot 2026-10-27 --to /tmp/restore-test    # refuses to overwrite unless --force
+```
+- Snapshots are hard-linked: a file that did not change since the last snapshot costs no extra disk, so a daily snapshot adds only the new day's files. Keeps the newest 7 daily and the newest 4 Sunday snapshots.
+- Included: `lake/`, `data/universe.csv`, `data/fund_meta.csv`, `data/fundamentals`, `data/ohlc`, `data/bars`. **Not** included, on purpose: `.env` (secrets: keep them in your password manager) and logs.
+- Put the destination on a different disk, and copy it off the machine as well (`rclone sync` or `rsync -aH`, which keeps the hard links). The intraday history is the one dataset we cannot re-download (section 2.1): treat it as irreplaceable.
+- **A backup is not real until a restore has been tested** (Gate 0), and again monthly (0.10). `verify` catches a corrupt file; only a restore proves the procedure works.
+- To recover after a lost server: provision a new one (0.2 and 0.3), restore the newest snapshot into `~/JARVIS`, re-create `.env` from your password manager, run `python -m data_layer.health`, then start the services.
 
 ## 8. Known risks and limits
 
@@ -214,6 +354,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 |---|---|---|
 | 2026-10-25 | Added `data_layer/upstox/auth.py`: login URL, code exchange, `.env` token storage, and a feed probe that tests access vs extended token. Owner must first create the Upstox developer-console app | Waiting on app credentials |
 | 2026-10-25 | Upstox v3 feed adapter built (`data_layer/upstox/`): decode, instrument keys from ISIN, reconnecting WebSocket runner, daily scheduling, 8 tests incl. fake server. Protobuf module vendored from the official SDK (ADR-4) | Not yet run against Upstox |
+| 2026-10-26 | Operations pack: section 0 start-to-finish VPS guide, `deploy/` (systemd units, crontab, logrotate), `data_layer.backup`, `data_layer.health`, `data_layer.universe`; the live feed now re-reads the token and retries instead of exiting when it is rejected | Nothing here has run on a real VPS yet |
 | 2026-10-26 | Intraday viewer webapp built (`webapp/`, `analytics/microstructure.py`): date and instrument dropdowns, price, volume, book at best, spread, volatility, market overview, synthetic demo data. Covered by unit tests, Gherkin scenarios and a real-browser test | ADR-6, section 16 |
 | 2026-10-25 | Daily OHLC re-extended to India+US+UK+EU (5y, Yahoo); intraday, ticks and fundamentals stay India only; `--backfill` for deepest Yahoo intraday window; `currency` column added to universe (ADR-3). Earlier same day: scope narrowed to NSE only; US removed from universe, fetchers, scheduler, lake and tests. Upstox v2 WebSocket chosen for live tick/L1 (ADR-2); tick model, bar aggregator and segment storage built | Adapter blocked on proto/docs access (section 13) |
 | 2026-10-25 | Runbook created; intraday bars collector, `bars5m` schema and loader added | Not yet run on the VPS |
@@ -356,17 +497,8 @@ A VPS with 100 GB free disk is the minimum comfortable size for a year of 1-seco
 
 First check the NSE holiday calendar for the test date (likely Monday 2026-10-26). On a holiday the connection works but no ticks arrive, so move 14.3-14.5 to the next trading day.
 
-### 14.1 One-time setup (VPS)
-```bash
-timedatectl | grep "Time zone"        # must show UTC; fix: sudo timedatectl set-timezone UTC
-git clone <repo> JARVIS && cd JARVIS && git checkout claude/us-stock-market-analysis-MZtcm   # until merged to master
-python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
-cp .env.example .env && chmod 600 .env     # fill UPSTOX_API_KEY, UPSTOX_API_SECRET, UPSTOX_REDIRECT_URI
-python -m pip install -r requirements-dev.txt
-python -m pytest --cov                      # expect: all tests pass, coverage about 98%
-python scheduler.py --job all --dry-run    # expect 10 tickers per market in the log
-```
-Before this: the owner has created the app in the Upstox developer console (section 13.2). FMP is **not** needed for this test.
+### 14.1 Before you start
+Complete steps 0.1 to 0.6 of section 0 (server hardened, code installed and tested, `.env` filled in, universe built). For this test day you only need the Upstox app credentials in `.env`; FMP is **not** needed.
 
 ### 14.2 Test A: 5-year daily OHLC, four markets (no token needed)
 ```bash
@@ -474,7 +606,7 @@ Tick the Gate 1 and Gate U1 boxes in sections 4 and 13.3, record the extended-to
 
 ## 15. Automated tests
 
-Run everything (no network, no credentials, no real data touched): `pip install -r requirements-dev.txt && python -m pytest --cov`. CI runs the same on every push (Python 3.11 and 3.13) and fails below 90% coverage; current coverage is about 98%.
+Run everything (no network, no credentials, no real data touched): `pip install -r requirements-dev.txt && python -m pytest --cov`. For a quick loop skip the 40-second real-browser test: `python -m pytest -m "not browser"`. Do not pass an extra `-q`: it is already in `pytest.ini` and a second one hides the final pass/fail summary line. CI runs the same on every push (Python 3.11 and 3.13) and fails below 90% coverage; current coverage is about 98%.
 
 ### 15.1 Layout
 | Path | What it holds |
@@ -494,6 +626,7 @@ Run everything (no network, no credentials, no real data touched): `pip install 
 | `pillar_scoring` | Each of the 8 pillars costs exactly one point in isolation; strict boundaries; unknown or unpriced stocks score 0 |
 | `upstox_day_pull` | A whole session pulled at once after the close passes verification; live bars are kept and only gaps filled; overwrite mode; unknown instrument reported not fatal; expired token stops cleanly; intraday endpoint for today, historical for earlier days |
 | `webapp_viewer` | The dropdowns list dates newest first and every instrument with its bar count; choosing a date and instrument returns price, volume, book, spread and volatility series of equal length in IST; coarser widths keep the day's total volume; the overview ranks instruments; days without a book render without NaN; bad input is refused (422/404) before touching data; optional login protects everything; viewing never changes a file |
+| `ops` (unit tests) | Backups: snapshot contents, hard links for unchanged files, same-day replace, 7 daily + 4 Sunday retention, verify catches missing, resized and corrupt Parquet files, restore refuses to overwrite. Health report: every PASS/WARN/FAIL condition, a damaged lake reported instead of crashing, silent feed detected in session. Universe importer: BOM, bad ISINs, duplicates, merge and replace. `deploy/` files: crontab fields valid and pointing at real jobs and modules, nothing scheduled that collides with the feed, systemd units run real modules, runbook section 0 names only commands that exist |
 | `token_setup` | Login link, token exchange stored with mode 600 and never printed, extended-token adoption only when the feed accepts it |
 | `scheduler_ops` | All four markets loaded; dry run writes nothing; overlapping runs refused; US bars refused; lock released after failure; a total Yahoo outage fails the job |
 
