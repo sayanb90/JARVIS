@@ -83,10 +83,37 @@ class Lake:
         return self.sql("SELECT * FROM ohlc WHERE market = ? AND date BETWEEN CAST(? AS DATE) "
                         "AND CAST(? AS DATE) ORDER BY symbol, date", [market, start, end])
 
-    def bars(self, symbol: str, start: str, end: str, interval: str = "5m") -> pd.DataFrame:
+    def bars(self, symbol: str, start: str, end: str, interval: str = "1s") -> pd.DataFrame:
         """Intraday bars between two UTC timestamps/dates (inclusive of start, exclusive of end)."""
         return self.sql(f"SELECT * FROM bars_{interval} WHERE symbol = ? AND ts >= CAST(? AS TIMESTAMP) "
                         f"AND ts < CAST(? AS TIMESTAMP) ORDER BY ts", [symbol, start, end])
+
+    def rollup(self, width_s: int, symbol: str | None = None, start: str | None = None, end: str | None = None,
+               base: str = "1s") -> pd.DataFrame:
+        """
+        Coarser bars (`width_s` seconds: 60 = 1 minute, 300 = 5 minutes, ...) built from the base bars and
+        aligned to the 09:15 IST open (03:45 UTC), so they match bars built tick by tick at that width.
+        Open/close are the first/last base bar, volume is summed, VWAP is volume-weighted, L1 is the last seen.
+        """
+        if width_s <= 0:
+            raise ValueError("width_s must be positive")
+        where, params = ["1=1"], []
+        if symbol:
+            where.append("symbol = ?"); params.append(symbol)
+        if start:
+            where.append("ts >= CAST(? AS TIMESTAMP)"); params.append(start)
+        if end:
+            where.append("ts < CAST(? AS TIMESTAMP)"); params.append(end)
+        last = lambda c: f"arg_max({c}, ts) FILTER (WHERE {c} IS NOT NULL) AS {c}"  # noqa: E731
+        return self.sql(f"""
+            SELECT symbol, market, bucket AS ts,
+                   arg_min(open, ts) AS open, max(high) AS high, min(low) AS low, arg_max(close, ts) AS close,
+                   sum(volume) AS volume,
+                   sum(vwap * volume) FILTER (WHERE vwap IS NOT NULL) / nullif(sum(volume) FILTER (WHERE vwap IS NOT NULL), 0) AS vwap,
+                   sum(n_ticks) AS n_ticks, {last('bid')}, {last('ask')}, {last('bid_qty')}, {last('ask_qty')}
+            FROM (SELECT *, date_trunc('day', ts) + to_seconds(13500 + CAST(floor((epoch(ts - date_trunc('day', ts)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}) AS bucket
+                  FROM bars_{base} WHERE {' AND '.join(where)})
+            GROUP BY symbol, market, bucket ORDER BY symbol, bucket""", params)
 
     # -- fundamentals -------------------------------------------------------
     def fundamentals(self, symbol: str) -> dict[str, pd.DataFrame]:

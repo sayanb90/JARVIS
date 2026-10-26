@@ -63,7 +63,8 @@ def test_future_timestamp_warning_is_logged_once(caplog):
     assert p.dropped_future == 3 and caplog.text.count("ahead of local clock") == 1
 
 
-def test_run_forever_once_returns_after_one_session(tmp_path):
+def test_run_forever_once_returns_after_one_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(feed, "utcnow", lambda: datetime(2026, 10, 23, 12, 0))      # after the close: the session window is already over
     async def handler(ws):
         await ws.recv()
         await ws.send(stock_frame(ms(3, 45, 5), 100.0, 1))
@@ -74,7 +75,7 @@ def test_run_forever_once_returns_after_one_session(tmp_path):
             url = f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}"
             make = lambda: UpstoxFeed("T", KMAP, url=url, lake_dir=tmp_path / "lake", flush_s=0.05)  # noqa: E731
             await asyncio.wait_for(run_forever(make, once=True), timeout=10)
-    asyncio.run(main())                                  # must return, whatever the wall-clock time of day is
+    asyncio.run(main())                                  # must return promptly: the window has already closed
 
 
 def test_feed_main_builds_feed_from_cli_flags(monkeypatch, tmp_path):

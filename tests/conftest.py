@@ -73,3 +73,18 @@ def sched(world, monkeypatch):
     monkeypatch.setattr(s, "LOCK_FILE", world.root / "logs" / "scheduler.lock")
     yield s
     sys.modules.pop("scheduler", None)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _tests_never_touch_the_repo_data_dirs():
+    """Fail the run if any test wrote a lake/ folder or CSVs into the real repository."""
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    watched = [repo / "lake", repo / "db", repo / "data" / "bars"]
+    before = {p: p.exists() for p in watched}
+    csvs = set((repo / "data" / "ohlc").glob("*.csv")) | set((repo / "data" / "fundamentals").glob("*.csv"))
+    yield
+    for p in watched:
+        assert p.exists() == before[p], f"a test created or removed {p} in the real repo"
+    after = set((repo / "data" / "ohlc").glob("*.csv")) | set((repo / "data" / "fundamentals").glob("*.csv"))
+    assert after == csvs, f"a test wrote CSVs into the real repo: {sorted(after ^ csvs)}"

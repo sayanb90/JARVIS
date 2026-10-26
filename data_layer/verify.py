@@ -2,7 +2,8 @@
 Data checks with explicit PASS / WARN / FAIL lines, for go-live testing (runbook section 14).
 
   python -m data_layer.verify ohlc [--years 5]
-  python -m data_layer.verify bars --date 2026-10-26 [--interval 1m]
+  python -m data_layer.verify bars --date 2026-10-26 [--interval 1s]
+  python -m data_layer.verify compare-rest --date 2026-10-26      # live 1s bars rolled up vs Upstox 1-minute candles
 
 Exit code is 1 if any FAIL.  WARN means look at it, not necessarily wrong.
 """
@@ -11,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 import pandas as pd
 
@@ -70,12 +71,16 @@ def verify_ohlc(lake: Lake, years: int = 5, today: date | None = None) -> Report
     return r
 
 
-def verify_bars(lake: Lake, day: date, interval: str = "1m", expected_bars: int | None = None) -> Report:
+SESSION_SECONDS = 22_500          # 09:15-15:30 IST
+
+
+def verify_bars(lake: Lake, day: date, interval: str = "1s", expected_bars: int | None = None) -> Report:
     r = Report()
     view = f"bars_{interval}"
     if view not in lake.tables():
         r.line("FAIL", f"no {view} table in the lake")
         return r
+    fine = interval.endswith("s")                      # sub-minute bars: a quiet second simply has no row
     exp = expected_bars or {"1m": 375, "5m": 75}.get(interval, 0)
     df = lake.sql(f"SELECT * FROM {view} WHERE CAST(ts AS DATE) = CAST(? AS DATE)", [str(day)])
     uni = {u["symbol"] for u in read_universe(BARS_MARKETS[0])}
@@ -86,12 +91,22 @@ def verify_bars(lake: Lake, day: date, interval: str = "1m", expected_bars: int 
     r.line("FAIL" if df.duplicated(["symbol", "ts"]).any() else "PASS",
            f"duplicate (symbol, ts): {int(df.duplicated(['symbol', 'ts']).sum())} (run compact_day if >0 before the first compaction)")
     first, last = df.ts.min(), df.ts.max()
-    r.line("PASS" if (first.hour, first.minute) == (3, 45) else "WARN", f"first bar {first} UTC (expect 03:45 = 09:15 IST)")
-    r.line("PASS" if (last.hour, last.minute) >= (9, 55) else "WARN", f"last bar {last} UTC (expect about 09:59 = 15:29 IST)")
+    if fine:
+        r.line("PASS" if first.time() < time(3, 45, 30) else "WARN", f"first bar {first} UTC (expect within 30 s of 03:45 = 09:15 IST)")
+        r.line("PASS" if last.time() >= time(9, 59, 0) else "WARN", f"last bar {last} UTC (expect in the final minute, before 10:00 = 15:30 IST)")
+    else:
+        r.line("PASS" if (first.hour, first.minute) == (3, 45) else "WARN", f"first bar {first} UTC (expect 03:45 = 09:15 IST)")
+        r.line("PASS" if (last.hour, last.minute) >= (9, 55) else "WARN", f"last bar {last} UTC (expect about 09:59 = 15:29 IST)")
     sane = df[(df.low > df.open) | (df.low > df.close) | (df.high < df.open) | (df.high < df.close)]
     r.line("FAIL" if len(sane) else "PASS", f"bars where open/close fall outside low-high: {len(sane)}")
     per = df.groupby("symbol").size()
-    if exp:
+    if fine:
+        ordered = df.sort_values(["symbol", "ts"])
+        gap = ordered.groupby("symbol")["ts"].diff().dt.total_seconds()
+        long_quiet = sorted(ordered.loc[gap > 300, "symbol"].unique())
+        r.line("WARN" if long_quiet else "PASS", f"symbols silent for more than 5 minutes inside the session (illiquid or feed gaps): {long_quiet[:10] or 'none'}")
+        print(f"      active seconds per symbol: min {per.min()}, median {int(per.median())}, max {per.max()} of {SESSION_SECONDS}")
+    elif exp:
         thin = per[per < exp * 0.5]
         r.line("WARN" if len(thin) else "PASS", f"symbols with under 50% of {exp} bars (illiquid or feed gaps): {sorted(thin.index)[:10] or 'none'}")
     print(f"      bars per symbol: min {per.min()}, median {int(per.median())}, max {per.max()}")
@@ -113,15 +128,54 @@ def verify_bars(lake: Lake, day: date, interval: str = "1m", expected_bars: int 
     return r
 
 
+def verify_against_rest(lake: Lake, day: date, base: str = "1s") -> Report:
+    """
+    Independent check of the live feed: roll the base bars up to 1 minute and compare them with the
+    minute candles pulled from Upstox's REST API (bars_1m rows tagged src='rest').  Small differences are
+    expected (the feed sends snapshots, the candle API uses exchange trades), large or systematic ones are not.
+    """
+    r = Report()
+    tables = lake.tables()
+    if f"bars_{base}" not in tables or "bars_1m" not in tables:
+        r.line("FAIL", f"need bars_{base} (live) and bars_1m (run data_layer.upstox.candles for that day)")
+        return r
+    live = lake.rollup(60, start=str(day), end=str(day + timedelta(days=1)), base=base)
+    rest = lake.sql("SELECT symbol, ts, open, high, low, close, volume FROM bars_1m WHERE src = 'rest' "
+                    "AND CAST(ts AS DATE) = CAST(? AS DATE)", [str(day)])
+    print(f"\n== live {base} rolled up to 1m vs REST 1m candles, {day}: {len(live)} live minutes, {len(rest)} REST candles ==")
+    if live.empty or rest.empty:
+        r.line("FAIL", "one side has no rows for that day")
+        return r
+    j = rest.merge(live, on=["symbol", "ts"], suffixes=("_rest", "_live"))
+    cover = len(j) / len(rest)
+    r.line("PASS" if cover >= 0.95 else ("WARN" if cover >= 0.5 else "FAIL"),
+           f"REST minutes that also exist live: {cover:.1%} ({len(j)} of {len(rest)})")
+    if j.empty:
+        return r
+    cd = (j.close_live / j.close_rest - 1).abs()
+    ok_close = (cd <= 0.002).mean()
+    r.line("PASS" if ok_close >= 0.99 else "WARN", f"minutes whose close agrees within 0.2%: {ok_close:.1%} (worst {cd.max():.2%})")
+    hl = ((j.high_live - j.high_rest).abs() / j.high_rest <= 0.002).mean()
+    r.line("PASS" if hl >= 0.95 else "WARN", f"minutes whose high agrees within 0.2%: {hl:.1%}")
+    vr = (j.volume_live.sum() / j.volume_rest.sum()) if j.volume_rest.sum() else float("nan")
+    r.line("PASS" if 0.9 <= vr <= 1.1 else "WARN", f"total volume live / REST: {vr:.3f} (expect about 1; the first tick after connect is a baseline)")
+    per_sym = j.groupby("symbol").apply(lambda g: g.volume_live.sum() / max(g.volume_rest.sum(), 1))
+    off = sorted(per_sym[(per_sym < 0.8) | (per_sym > 1.2)].index)
+    r.line("WARN" if off else "PASS", f"symbols with volume more than 20% off: {off[:10] or 'none'}")
+    return r
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     o = sub.add_parser("ohlc"); o.add_argument("--years", type=int, default=5)
     b = sub.add_parser("bars"); b.add_argument("--date", type=date.fromisoformat, required=True)
-    b.add_argument("--interval", default="1m")
+    b.add_argument("--interval", default="1s")
+    c = sub.add_parser("compare-rest"); c.add_argument("--date", type=date.fromisoformat, required=True)
     a = ap.parse_args()
     lake = Lake()
-    rep = verify_ohlc(lake, a.years) if a.cmd == "ohlc" else verify_bars(lake, a.date, a.interval)
+    rep = (verify_ohlc(lake, a.years) if a.cmd == "ohlc" else
+           verify_against_rest(lake, a.date) if a.cmd == "compare-rest" else verify_bars(lake, a.date, a.interval))
     print(f"\n{'FAILED: ' + str(rep.fails) + ' check(s)' if rep.fails else 'no FAIL checks'}")
     sys.exit(1 if rep.fails else 0)
 

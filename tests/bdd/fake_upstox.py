@@ -22,16 +22,21 @@ def tick_frame(key: str, ltt_ms: int, ltp: float, vtt: int, bid: float | None = 
     return r.SerializeToString()
 
 
-def session_frames(keys: list[str], minutes: int = 375, day=(2026, 10, 23)) -> list[bytes]:
-    """Two ticks per instrument per minute from 09:15 IST, cumulative volume +10 per tick."""
+def session_price(i: int, n: int) -> float:
+    """Price of instrument #i at its n-th update (deterministic so tests can compute expectations)."""
+    return 100.0 * (i + 1) + n * 0.001
+
+
+def session_frames(keys: list[str], step_s: int = 5, seconds: int = 22_500, day=(2026, 10, 23)) -> list[bytes]:
+    """One update per instrument every `step_s` seconds from 09:15 IST, cumulative volume +10 per update."""
     out, vtt = [], {k: 1000 for k in keys}
-    for k in range(minutes):
-        base = datetime(*day, 3, 45) + timedelta(minutes=k)
-        for sec in (5, 35):
-            for i, key in enumerate(keys):
-                vtt[key] += 10
-                px = 100.0 * (i + 1) + k * 0.01 + sec * 0.0001
-                out.append(tick_frame(key, ms(base.hour, base.minute, sec, day), px, vtt[key], bid=px - 0.05))
+    base = datetime(*day, 3, 45)
+    for n, off in enumerate(range(0, seconds, step_s)):
+        t = base + timedelta(seconds=off)
+        for i, key in enumerate(keys):
+            vtt[key] += 10
+            px = session_price(i, n)
+            out.append(tick_frame(key, ms(t.hour, t.minute, t.second, day), px, vtt[key], bid=px - 0.05))
     return out
 
 

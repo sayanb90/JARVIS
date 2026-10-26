@@ -185,14 +185,14 @@ lake.sql("SELECT market, count(*) FROM ohlc GROUP BY 1")   # ad-hoc SQL
 
 Each stock gets a full refresh roughly once a week.
 
-**Intraday bars** (aggregated 5-minute bars, collected forward after each market close):
+**Interim Yahoo intraday bars** (5-minute, a stopgap cross-check only; the intraday base is the 1-second Upstox feed below):
 
 ```bash
 python scheduler.py --job bars --market IN --backfill   # first run: deepest Yahoo window (about 59d of 5m)
 python scheduler.py --job bars --market IN              # daily; India only, upserts into lake/bars/
 ```
 
-**Live tick / L1 (Upstox API v3):** `data_layer/upstox/` connects to the v3 WebSocket, decodes the Protobuf frames, aggregates ticks into 1-minute bars (with last bid/ask, VWAP, tick count) and stores them in `lake/bars/interval=1m/`.
+**Live tick / L1 (Upstox API v3):** `data_layer/upstox/` connects to the v3 WebSocket, decodes the Protobuf frames, aggregates ticks into **1-second bars** (OHLC, volume, VWAP, tick count, last bid/ask) and stores them in `lake/bars/interval=1s/`. Coarser bars are derived on demand: `Lake().rollup(60)` gives 1-minute bars, `rollup(300)` 5-minute, aligned to the 09:15 IST open.
 
 ```bash
 # one-time: create an Upstox app (developer console), put API key/secret/redirect URI in .env

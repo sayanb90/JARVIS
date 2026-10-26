@@ -10,7 +10,7 @@ Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · 
 ## 1. Scope and principles
 
 - Scope (ADR-2, amended by ADR-3): **daily OHLC for India, US, UK and EU; everything intraday, live ticks and fundamentals for India (NSE) only.** Universe lives in `data/universe.csv` (single source of truth for every feed); the `market` column is `IN`, `US`, `UK` or `EU`.
-- **Ingest ticks and L1 live, store aggregates.** The Upstox feed (section 13) delivers ticks and top-of-book; we fold them into 1-minute bars (with last bid/ask, VWAP, tick count) in-process. Raw tick storage is optional and off by default. Strategies are not sub-second.
+- **Ingest ticks and L1 live, store aggregates.** The Upstox feed (section 13) delivers ticks and top-of-book; we fold them into **1-second bars** (open, high, low, close, volume, VWAP, tick count, last bid/ask) in-process. 1 second is the base resolution (ADR-5): nothing coarser is stored as the intraday base, and coarser bars (1m, 5m, ...) are derived from it with `Lake.rollup()`. Raw tick storage is optional and off by default (data volume, section 13.5).
 - Free sources first (FMP free tier for fundamentals, Yahoo Finance for prices). Paid upgrades are gated on a concrete limitation, listed in section 9.
 - Storage: Parquet lake queried with DuckDB (ADR-1, section 12). Partitioned by year (daily) and by day (bars); no server process, no heap ceiling.
 - Prod runs on the VPS. Dev/cloud sandboxes can build and run the test suite; collectors run on the VPS.
@@ -22,7 +22,7 @@ Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · 
 | Fundamentals (income, balance, cash flow, ROIC/shares) | FMP free (250 calls/day) | Annual | Rotating by staleness, ~62 tickers/day | Last 5 fiscal years | `lake/fundamentals/*.parquet` | `[~]` |
 | Daily OHLC, 4 markets | Yahoo (`yfinance`) | 1 day | Every trading day after the last close (22:30 UTC) | 5 years backfill | `lake/ohlc/year=YYYY/` | `[~]` not run live (Yahoo blocked in the build sandbox) |
 | Intraday bars, interim, **India only** | Yahoo (`yfinance`) | 5 min | Once, after the NSE close | About 59 days via `--backfill`, then forward (see 2.1) | `lake/bars/interval=5m/date=YYYY-MM-DD/` | `[~]` retire once the Upstox feed is live |
-| **Live ticks + L1 (new)** | Upstox API **v3** WebSocket (Protobuf) | Tick / L1 snapshot, aggregated to 1 min | During market hours | Forward-only | `lake/bars/interval=1m/`, optional `lake/ticks/` | `[~]` built and tested against a fake server; not run against Upstox (section 13) |
+| **Live ticks + L1 (new)** | Upstox API **v3** WebSocket (Protobuf) | Tick / L1 snapshot, aggregated to **1 second** | During market hours | Forward-only | `lake/bars/interval=1s/`, optional `lake/ticks/` | `[~]` built and tested against a fake server; not run against Upstox (section 13) |
 | Index F&O intraday | TBD | TBD | TBD | TBD | TBD | `[ ]` see section 9 |
 
 ### 2.1 Constraint that shapes the whole intraday plan
@@ -183,7 +183,7 @@ Reloads are idempotent: every load is an upsert on the table key, and each bar d
 1. [ ] **Underlyings:** for example Nifty 50 and Bank Nifty on NSE. Pick the first one or two only
 2. [ ] **Instruments:** futures only, options only, or both; weekly expiries or monthly only
 3. [ ] **Data needed by the first strategy:** bars only, or bars plus OI/IV/greeks and chain snapshots? Define the strategy before buying data
-4. [ ] **Granularity:** 1-minute bars to start (consistent with "no raw tick"); revisit only if a strategy needs finer
+4. [ ] **Granularity:** 1-second bars, same as equities (ADR-5); raw ticks only if a strategy proves it needs them
 5. [ ] **History needed vs forward collection:** need years of history now (buy it) or accumulate forward (cheap, slow)?
 6. [ ] **Source:** evaluate at least two options per market against the criteria below
 7. [ ] **Budget:** set a monthly ceiling before evaluating vendors
@@ -229,7 +229,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 | O5 | First F&O underlying, and the first strategy that needs it | Phase 3 |
 | O6 | Monthly data budget ceiling | Phase 3 |
 | O7 | ~~Upstox v2 or v3~~ Closed: v3 (ADR-4) | — |
-| O8 | Keep raw ticks/L1, or bars only? (sizing in 13.4) | Section 13 |
+| O8 | Keep raw ticks/L1 as well as 1-second bars? Decide after the first live session shows the real update rate and disk use (13.5) | Section 13 |
 | O9 | Fundamentals source for NSE: does the FMP free tier cover Indian tickers? Unverified, must be tested before relying on it | Phase 1 |
 | O11 | Which UK and EU indices define the universe, and how many names (about 1,200 total was mentioned earlier)? | Phase 1 |
 | O10 | Token handling. Plan: test whether the v3 feed accepts the `extended_token` (`auth check`); if yes, adopt it; if no, build the mobile-approval webhook. Stored in `.env` (mode 600) | Section 13 |
@@ -246,7 +246,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 
 ### ADR-2: NSE only, Upstox WebSocket for live tick/L1 (2026-10-25)
 - **Context:** the product now targets Indian markets only. A live broker feed gives real ticks and top-of-book, which Yahoo cannot (Yahoo is delayed, unofficial and keeps only about 60 days of 5-minute history).
-- **Decision:** drop US/UK/EU. Ingest Upstox API market data over WebSocket (Protobuf, binary frames), aggregate to 1-minute bars in-process, persist bars (and optionally raw ticks) as append-only Parquet segments.
+- **Decision:** drop US/UK/EU. Ingest Upstox API market data over WebSocket (Protobuf, binary frames), aggregate to bars in-process (1 second, per ADR-5), persist bars (and optionally raw ticks) as append-only Parquet segments.
 - **Consequences:** history starts the day the feed first runs. Upstox's historical-candle API can backfill daily bars; user reports say 1-minute history is limited to a rolling window of a few months (unverified, section 13.3). Fundamentals still need a separate source (Upstox does not provide them).
 - **Kept:** Yahoo daily/intraday collectors stay as an interim and cross-check source until the Upstox path is verified.
 
@@ -259,6 +259,12 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 - **Decision:** use the v3 market data feed (`wss://api.upstox.com/v3/feed/market-data-feed`), not v2, which community posts report as heading for deprecation. Amends ADR-2.
 - **Source of truth for the protocol:** the official `upstox-python-sdk` 2.30.0 (MIT). The Upstox docs site was unreachable from the build sandbox, so endpoint, subscribe message, modes and Protobuf schema were read from the SDK's own source and generated module, which is vendored in `data_layer/upstox/proto/`.
 
+### ADR-5: 1-second base resolution for intraday (2026-10-26)
+- **Context:** the product is for building trading strategies, so a 1-minute intraday base is too coarse. An earlier default of 1 minute was never agreed with the owner.
+- **Decision:** the intraday base is **1 second**, nothing coarser. Raw ticks are not the default only because of data volume; they remain an opt-in.
+- **Consequences:** about 10-15 GB a year typical, up to about 130 GB worst case (13.5). 1-minute and 5-minute bars are derived with `Lake.rollup()`. Upstox's candle API (minimum 1 minute) and Yahoo (minimum 1 minute, short history) can no longer serve as the intraday source, only as cross-checks. Intraday history exists only from the first day the live collector runs, so it must run every session.
+- **Open:** how often the Upstox feed actually pushes per instrument (if it is a snapshot about once a second, 1-second bars lose almost nothing versus raw ticks). The first live session settles it.
+
 ## 13. Upstox live feed (tick + L1)
 
 **Status: `[~]` Built and unit-tested end to end against a local fake server that speaks the SDK's protocol. NOT yet run against the real Upstox service (needs a valid token on a trading day). That run is Gate U1.**
@@ -268,7 +274,8 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 - `data_layer/upstox/instruments.py`: universe symbol to instrument key, `NSE_EQ|<ISIN>`, from the ISIN column. Symbols without a valid ISIN are reported and skipped. Optional validation against a locally saved instrument master.
 - `data_layer/upstox/feed.py`: `FeedProcessor` (frame bytes to bars, drops last-trade-yesterday and future-timestamped ticks) and `UpstoxFeed` (WebSocket with bearer token, binary JSON subscribe in batches of 500, periodic flush and write, watchdog that reconnects after 120 s without frames, exponential backoff, fatal error on HTTP 401/403 with a "token expires daily" message). The daemon waits for each weekday session (03:40-10:05 UTC), then compacts the day. `--once` runs a single session now.
 - `data_layer/upstox/candles.py`: REST candle API client for whole-day pulls, gap repair and range backfill (section 14.4b). Fills gaps only unless `--overwrite`; tags bars `src='rest'`.
-- `data_layer/ticks.py`, `data_layer/tick_store.py`: aggregation and storage (section 13.4). Bars land in `lake/bars/interval=1m/` and are queryable as `bars_1m`.
+- `data_layer/ticks.py`, `data_layer/tick_store.py`: aggregation and storage. **Default bar width is 1 second** (`--interval 1`); bars land in `lake/bars/interval=1s/` and are queryable as `bars_1s`. A quiet second has no row (nothing is forward-filled). Updates that arrive after their second was closed are dropped and counted (`late=` in the 15-second log line).
+- `Lake.rollup(width_s)` (in `data_layer/query.py`): builds 1-minute, 5-minute or any coarser bars from the 1-second ones, aligned to the 09:15 IST open. It is tested to equal bars built tick by tick at that width.
 - Tests: `tests/test_upstox.py`.
 
 ### 13.2 Get a token, then run it (VPS)
@@ -307,11 +314,20 @@ RestartSec=10
 
 ### 13.4 Known limits
 - The aggregator builds volume from cumulative-volume deltas; the first tick after connect is a baseline, so volume traded before the collector connected is not attributed to any bar. Start before 03:45 UTC.
-- If the feed is down, ticks in the gap are unrecoverable from the live path. Upstox's historical-candle API (community reports: about six months of 1-minute data, unverified) can repair 1-minute bars; use `python -m data_layer.upstox.candles` (section 14.4b).
+- If the feed is down, ticks in the gap are unrecoverable from the live path. Upstox's candle API only goes down to **1 minute** (community reports: about six months of it, unverified), so it can repair or cross-check minute bars (`python -m data_layer.upstox.candles`, section 14.4b) but can **never** recreate 1-second data. Run the collector every session without gaps.
 - Index instruments carry no volume.
 
-### 13.5 Storage sizing for the optional raw tick/L1 store
-At an average of 1 update per second per symbol over the 6.25-hour session, 1,200 symbols produce about 27 million ticks a day, roughly 1-2 GB a day compressed with L1 fields, about 250-500 GB a year. That is why bars are the default and raw ticks are opt-in (O8). 1-minute bars for the same universe are about 450 k rows a day, a few MB.
+### 13.5 Storage sizing (estimates, to be replaced by the first week's `du -sh lake`)
+Assumptions, all unverified: 1,200 symbols, a 22,500-second session, about 12-20 bytes per row after ZSTD on time-sorted data.
+
+| Scenario | Rows per day | Per year (250 days) |
+|---|---|---|
+| 1-second bars, typical: top 200 stocks active 40% of seconds, the other 1,000 active 5% | about 2.9 million | about 9-15 GB |
+| 1-second bars, worst case: every symbol active every second | about 27 million | about 80-130 GB |
+| 1-minute bars from the same universe | about 450 thousand | about 1.5-2.5 GB |
+| Raw ticks (optional) | one row per feed update; if the feed pushes about one update per second per stock (unverified) this is the same size as the worst case above, and larger if it pushes every trade | likely 100+ GB |
+
+A VPS with 100 GB free disk is the minimum comfortable size for a year of 1-second bars. Raw ticks stay opt-in (`--raw-ticks`, O8) until the first week shows the real update rate and a strategy needs them.
 
 ## 14. VPS test day: 5-year OHLC (US, UK, EU, India) and one day of Upstox intraday (India)
 
@@ -403,29 +419,33 @@ Red flags in the log: `ahead of local clock` (timestamp unit or VPS clock wrong)
 Use this if you cannot be online during the session. Needs only a token (14.3 works at any hour; at night `auth check` will say "accepted, no frame", which is normal).
 ```bash
 python -m data_layer.upstox.candles --date 2026-10-26 --limit 20 --dump-raw 3     # one API call per instrument
-python -m data_layer.verify bars --date 2026-10-26 --interval 1m                   # as in 14.5
+python -m data_layer.verify bars --date 2026-10-26 --interval 1m                   # these REST bars are 1-minute
 ```
 - `--dump-raw 3` saves the first three raw responses to `logs/candles/`: bring them back, they settle the exact response format.
 - It only **fills gaps**: bars already collected live are kept (`--overwrite` replaces them). Bars are tagged `src = 'rest'` (live ones are `'live'`); VWAP and tick count are empty for REST bars.
 - For the present trading day the tool asks the intraday endpoint first and falls back to the historical one. If both come back empty right after the close, run it again the next morning before the open, or force `--source intraday`.
 - `--from 2026-09-01 --to 2026-10-23 --chunk-days 5` repairs or backfills a range (community posts say 1-minute history reaches back about six months; unverified, and per-call range limits are unknown, so the default is one day per call).
-- **Pass when:** `verify bars` shows no FAIL, 375 bars for liquid names (first 03:45, last 09:59 UTC), last-bar close within 0.5% of Yahoo's daily close.
+- **Pass when:** `verify bars --interval 1m` shows no FAIL, 375 minute bars for liquid names (first 03:45, last 09:59 UTC), last-bar close within 0.5% of Yahoo's daily close.
+- **REST is minute resolution only.** It tests the token, the response format, storage and verification, but it cannot test 1-second data. Its second job is an independent check of the live feed on a day you also ran `feed`: `python -m data_layer.verify compare-rest --date 2026-10-26` rolls the live 1-second bars up to minutes and compares them with these REST candles (coverage, close, high, total volume).
 - **Not proven by this path:** the WebSocket connection, tick decoding, and tick-to-bar aggregation. Do a live `feed --once` run in a market session before enabling the daemon.
 
 ### 14.5 Verify the intraday day (after about 11:00 UTC)
 ```bash
 python -m data_layer.yf_client --mode daily --market IN --days-back 3 && python -m data_layer.lake --load daily   # Yahoo daily bar to cross-check against
-python -m data_layer.verify bars --date 2026-10-26 --interval 1m      # use the real date
+python -m data_layer.verify bars --date 2026-10-26 --interval 1s      # use the real date
 du -sh lake/bars lake
 ```
 **Pass when:**
 - [ ] `verify bars` prints no `FAIL`
-- [ ] first bar 03:45 UTC, last bar about 09:59 UTC
-- [ ] liquid names (for example RELIANCE, HDFCBANK, INFY) have close to 375 one-minute bars; illiquid names may have fewer (that is a `WARN`, not a failure)
+- [ ] first bar within 30 seconds of 03:45 UTC, last bar in the final minute before 10:00 UTC
+- [ ] liquid names (for example RELIANCE, HDFCBANK, INFY) show thousands of active seconds; the report prints min/median/max active seconds out of 22,500, and symbols silent for more than 5 minutes inside the session are a `WARN` (illiquid or feed gaps), not a failure
+- [ ] the `late=` counter in the log stays near zero (a large value means updates arrive out of order)
+- [ ] if you also ran 14.4b the same day: `verify compare-rest` shows minutes agreeing (coverage at least 95%, closes within 0.2%, volume ratio 0.9-1.1)
 - [ ] last-bar close is within 0.5% of Yahoo's daily close for each symbol
 - [ ] median volume ratio (bars / Yahoo daily) is close to 1; far from 1 means a unit or volume-delta problem
-- [ ] no `seg-*.parquet` files left in `lake/bars/interval=1m/date=<day>/` (only `bars.parquet`)
-- [ ] 3 spot checks of a one-minute bar (open, high, low, close) against a charting screen
+- [ ] no `seg-*.parquet` files left in `lake/bars/interval=1s/date=<day>/` (only `bars.parquet`)
+- [ ] 3 spot checks of a one-minute roll-up (`Lake().rollup(60, 'RELIANCE.NS')`: open, high, low, close) against a charting screen
+- [ ] `du -sh lake/bars` after the session: record it here ______ (replaces the estimates in 13.5)
 
 ### 14.6 Results to bring back
 Paste or attach: the output of both `verify` commands; the first and last 15 lines of `logs/feed-test.log`; the `auth check` output (tokens are masked); `ls lake/ohlc`; `du -sh lake`; the `logs/frames/*.bin` files; the lines of the log containing `WARN` or `ahead of local clock`; and answers to: did the extended token work, how many instruments subscribed without error, any disconnects.
@@ -439,7 +459,7 @@ Paste or attach: the output of both `verify` commands; the first and last 15 lin
 | `check` shows `rejected HTTP 401` for both tokens | Token expired or app not authorised for market data | Redo 14.3; if it persists, report the exact message |
 | Connected, no frames all day | NSE holiday, subscribed keys wrong, or the instrument master uses different keys | Check the key warning in the log; confirm the ISINs in `universe.csv`; try `--mode ltpc` |
 | Ticks flow but `verify bars` finds no rows | All ticks dropped as last-trade-yesterday or in the future | Look at the `stale=` and `future=` counters in the 30 s log lines; check the VPS clock |
-| Feed killed, `seg-*` files remain | Crash or `kill -9` | `python -c "from datetime import date; from data_layer.tick_store import compact_day; print(compact_day('1m', date(2026,10,26)))"` |
+| Feed killed, `seg-*` files remain | Crash or `kill -9` | `python -c "from datetime import date; from data_layer.tick_store import compact_day; print(compact_day('1s', date(2026,10,26)))"` |
 | Volume ratio far from 1 | Cumulative-volume baseline or units | Report it; do not tune by hand |
 | Disk fills | Raw ticks enabled | Do not use `--raw-ticks` on the test day |
 
@@ -463,7 +483,7 @@ Run everything (no network, no credentials, no real data touched): `pip install 
 |---|---|
 | `ohlc_history` | 5-year daily history for IN/US/UK/EU; reruns never duplicate; a corrected Yahoo price replaces the stored one; a failed Yahoo batch or unknown symbol is caught by verification |
 | `intraday_yahoo` | Interim Yahoo bars: India only, UTC, forming bar excluded, no duplicates, deepest windows 59/6/729 days |
-| `live_feed` | A full 375-minute session becomes complete 1-minute bars with bid/ask; passes verification and agrees with Yahoo's daily bar; reconnects without data loss; 401/403 stop with a clear message; stale and future-stamped ticks rejected; Ctrl+C saves and compacts |
+| `live_feed` | A full session becomes 1-second bars (4,500 per stock at one update per 5 s) with bid/ask; several updates in one second make one bar; quiet seconds get no bar; 1-second bars rolled up to a minute match Upstox's minute candles; agrees with Yahoo's daily bar; reconnects without data loss; 401/403 stop with a clear message; stale and future-stamped updates rejected; Ctrl+C saves and compacts |
 | `fundamentals_rotation` | Stalest-first within the 250-call budget; a full cycle covers every stock; a failed fetch is retried first and never marked fresh; India only |
 | `pillar_scoring` | Each of the 8 pillars costs exactly one point in isolation; strict boundaries; unknown or unpriced stocks score 0 |
 | `upstox_day_pull` | A whole session pulled at once after the close passes verification; live bars are kept and only gaps filled; overwrite mode; unknown instrument reported not fatal; expired token stops cleanly; intraday endpoint for today, historical for earlier days |

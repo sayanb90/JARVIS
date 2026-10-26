@@ -4,7 +4,8 @@ Upstox v3 live market-data collector: WebSocket -> ticks -> bars -> Parquet.
   python -m data_layer.upstox.auth ...      # obtain a token (writes .env); expires daily (runbook O10)
   python -m data_layer.upstox.feed                 # daemon: waits for each NSE session
   python -m data_layer.upstox.feed --once          # run one session now (until close)
-  python -m data_layer.upstox.feed --limit 20 --raw-ticks
+  python -m data_layer.upstox.feed --limit 20 --raw-ticks     # also keep every tick (large)
+  python -m data_layer.upstox.feed --interval 1               # 1-second bars: the default base resolution
 
 Protocol (from the official SDK, upstox-python-sdk 2.30.0):
   wss://api.upstox.com/v3/feed/market-data-feed   header  Authorization: Bearer <token>
@@ -55,7 +56,7 @@ def interval_label(interval_s: int) -> str:
 class FeedProcessor:
     """Synchronous core: frame bytes in, bars/ticks out.  The async runner only moves data."""
 
-    def __init__(self, key_map: dict[str, str], interval_s: int = 60, raw_ticks: bool = False) -> None:
+    def __init__(self, key_map: dict[str, str], interval_s: int = 1, raw_ticks: bool = False) -> None:
         self.key_map = key_map
         self.agg = BarAggregator(interval_s)
         self.raw_ticks = raw_ticks
@@ -95,8 +96,8 @@ class FeedProcessor:
 
 class UpstoxFeed:
     def __init__(self, token: str, key_map: dict[str, str], *, url: str = FEED_URL,
-                 mode: str = "full", interval_s: int = 60, raw_ticks: bool = False,
-                 lake_dir: Path | None = None, flush_s: float = 5.0, write_s: float = 30.0,
+                 mode: str = "full", interval_s: int = 1, raw_ticks: bool = False,
+                 lake_dir: Path | None = None, flush_s: float = 2.0, write_s: float = 15.0,
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None) -> None:
         if mode not in MODES:
@@ -162,9 +163,9 @@ class UpstoxFeed:
             if (now - last_write).total_seconds() >= self.write_s:
                 n = self.persist()
                 last_write = now
-                log.info("frames=%d ticks=%d bars_written=%d stale=%d future=%d",
+                log.info("frames=%d ticks=%d bars_written=%d stale=%d future=%d late=%d",
                          self.proc.frames, self.proc.ticks, n,
-                         self.proc.dropped_stale, self.proc.dropped_future)
+                         self.proc.dropped_stale, self.proc.dropped_future, self.proc.agg.late_dropped)
             if (now - self._last_frame).total_seconds() > self.stale_s:
                 log.warning("no frames for %.0fs, reconnecting", (now - self._last_frame).total_seconds())
                 await ws.close()
@@ -252,7 +253,7 @@ async def run_forever(make_feed, once: bool = False) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Upstox v3 live feed collector (India)")
     ap.add_argument("--once", action="store_true", help="run one session now instead of daemon mode")
-    ap.add_argument("--interval", type=int, default=60, help="bar width in seconds (default 60)")
+    ap.add_argument("--interval", type=int, default=1, help="bar width in seconds (default 1; the intraday base resolution)")
     ap.add_argument("--mode", choices=MODES, default="full")
     ap.add_argument("--limit", type=int, default=None, help="subscribe only the first N universe symbols")
     ap.add_argument("--raw-ticks", action="store_true", help="also store every tick with L1 (large)")

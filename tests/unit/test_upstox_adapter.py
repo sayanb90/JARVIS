@@ -228,9 +228,9 @@ def test_sigint_saves_and_compacts(tmp_path):
 
     run(main())
     from data_layer.query import Lake
-    df = Lake(tmp_path / "lake").sql("SELECT * FROM bars_1m ORDER BY ts")
+    df = Lake(tmp_path / "lake").sql("SELECT * FROM bars_1s ORDER BY ts")
     assert df.close.tolist() == [100.0, 101.0]
-    assert not list((tmp_path / "lake/bars/interval=1m/date=2026-10-23").glob("seg-*"))   # compacted
+    assert not list((tmp_path / "lake/bars/interval=1s/date=2026-10-23").glob("seg-*"))   # compacted
 
 
 def test_dump_frames_saves_raw_bytes(tmp_path):

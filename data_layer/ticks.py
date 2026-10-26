@@ -69,17 +69,19 @@ class BarAggregator:
     - Bar volume = delta of the cumulative day volume between consecutive ticks.
       The first tick seen for a symbol on a day only sets the baseline, so volume
       traded before the collector connected is NOT attributed to any bar.
-    - Only buckets that saw ticks produce bars (no forward fill).
+    - Only buckets that saw ticks produce bars (no forward fill): with 1-second bars a quiet
+      stock simply has no row for a second in which nothing happened.
     - A bar is emitted when a later bucket's tick arrives for that symbol, or when
       `flush(now)` / `flush_all()` is called (needed for illiquid names).
     """
 
-    def __init__(self, interval_s: int = 60, market: str = "IN") -> None:
+    def __init__(self, interval_s: int = 1, market: str = "IN") -> None:
         if interval_s <= 0:
             raise ValueError("interval_s must be positive")
         self.interval = timedelta(seconds=interval_s)
         self.market = market
         self._open: dict[str, _Acc] = {}
+        self.late_dropped = 0                                   # ticks older than their symbol's open bucket
         self._last_vtt: dict[str, tuple[object, int]] = {}   # symbol -> (date, cumulative volume)
 
     def _bucket(self, ts: datetime) -> Optional[datetime]:
@@ -101,7 +103,8 @@ class BarAggregator:
         out: list[Bar] = []
         acc = self._open.get(t.symbol)
         if acc is not None and start < acc.start:
-            return []                                   # late tick for an already-closed bucket
+            self.late_dropped += 1                      # late tick for an already-closed bucket
+            return []
         if acc is not None and start > acc.start:
             out.append(self._to_bar(t.symbol, acc))
             acc = None

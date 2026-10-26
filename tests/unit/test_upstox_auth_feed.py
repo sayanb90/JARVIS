@@ -154,7 +154,7 @@ def test_reconnects_resubscribes_and_keeps_data_after_server_drop(tmp_path):
     run(main())
     assert len(connections) >= 2 and connections[0] == connections[1]       # resubscribed the same set
     from data_layer.query import Lake
-    closes = Lake(tmp_path / "lake").sql("SELECT close FROM bars_1m ORDER BY ts").close.tolist()
+    closes = Lake(tmp_path / "lake").sql("SELECT close FROM bars_1s ORDER BY ts").close.tolist()
     assert closes == [101.0, 102.0]                                         # data from both connections kept
 
 

@@ -31,7 +31,7 @@ import pandas as pd
 import requests
 
 from .. import tick_store
-from ..lake import LAKE_DIR
+from .. import lake as lake_mod
 from ..query import Lake
 from ..ticks import SESSION_CLOSE_UTC, SESSION_OPEN_UTC, Bar
 from .instruments import build_key_map
@@ -123,7 +123,7 @@ def pull(client: CandleClient, key_map: dict[str, str], day_from: date, day_to: 
          source: str = "auto", overwrite: bool = False, lake_dir: Path | None = None,
          dump_raw: int = 0, dump_dir: Path | None = None) -> dict:
     """Fetch, de-duplicate against existing bars, store and compact.  Returns a summary dict."""
-    lake_dir = lake_dir or LAKE_DIR
+    lake_dir = lake_dir or lake_mod.LAKE_DIR           # resolved at call time so tests/deployments can redirect it
     label = f"{interval}m"
     have = set() if overwrite else existing_keys(lake_dir, label, day_from, day_to)
     stats = {"instruments": len(key_map), "no_data": [], "bars_fetched": 0, "bars_written": 0, "skipped_existing": 0}

@@ -159,7 +159,7 @@ def test_verify_bars_full_session_passes_and_compares_with_yahoo(world, capsys):
     total_vol = sum(b.volume for b in bars)
     write_csv(world.data / "ohlc/ohlc_2026_in.csv", OHLC_H, [["2026.10.23", "A.NS", "IN", 1, 2, 0, last_close, total_vol]])
     world.lake.load_ohlc(("IN",))
-    rep = verify.verify_bars(world.query.Lake(), DAY)
+    rep = verify.verify_bars(world.query.Lake(), DAY, "1m")
     out = out_of(capsys)
     assert rep.fails == 0, out
     assert "[PASS] first bar 2026-10-23 03:45:00" in out and "[PASS] last-bar close vs Yahoo" in out
@@ -177,7 +177,7 @@ def test_verify_bars_detects_duplicates_bad_ohlc_gaps_and_close_mismatch(world, 
     world.tick_store.write_bars(bad, "1m")
     write_csv(world.data / "ohlc/ohlc_2026_in.csv", OHLC_H, [["2026.10.23", "A.NS", "IN", 1, 2, 0, 999.0, 5]])
     world.lake.load_ohlc(("IN",))
-    rep = verify.verify_bars(world.query.Lake(), DAY)
+    rep = verify.verify_bars(world.query.Lake(), DAY, "1m")
     out = out_of(capsys)
     assert rep.fails == 2
     assert "[FAIL] duplicate (symbol, ts): 5" in out
