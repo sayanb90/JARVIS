@@ -98,7 +98,7 @@ function cards(s) {
 function renderInstrument(d) {
   const s = d.series, S = d.summary;
   cards(S);
-  const fg = css('--fg'), grid = css('--grid'), up = css('--up'), down = css('--down'), acc = css('--accent'), muted = css('--muted');
+  const fg = css('--fg'), grid = css('--grid'), up = css('--up'), down = css('--down'), acc = css('--accent'), muted = css('--muted'), orange = css('--orange'), purple = css('--purple');
   const step = d.width <= 5 ? 'hv' : 'linear';
   // five stacked panels sharing one time axis; domains from the bottom up
   const gaps = 0.025, h = [0.30, 0.17, 0.18, 0.14, 0.14];
@@ -122,14 +122,14 @@ function renderInstrument(d) {
     { x: t, y: s.bid_qty_avg, name: `Bid size (${VOLWIN_LABEL[d.vol_window]} avg)`, type: 'scattergl', mode: 'lines', line: { color: up, width: 1.6 }, xaxis: 'x', yaxis: 'y4', visible: nb },
     { x: t, y: neg(s.ask_qty_avg), name: `Ask size (${VOLWIN_LABEL[d.vol_window]} avg)`, type: 'scattergl', mode: 'lines', line: { color: down, width: 1.6 }, xaxis: 'x', yaxis: 'y4', visible: nb },
     { x: t, y: s.imbalance_avg, name: `Imbalance (${VOLWIN_LABEL[d.vol_window]} avg)`, type: 'scattergl', mode: 'lines', line: { color: fg, width: 1.4 }, xaxis: 'x', yaxis: 'y5', visible: nb },
-    { x: t, y: s.spread_bps, name: 'Spread bps (raw)', type: 'scattergl', mode: 'lines', line: { color: '#d98e04', width: 0.5, shape: step }, opacity: 0.22, xaxis: 'x', yaxis: 'y6', visible: nb, showlegend: false },
-    { x: t, y: s.spread_bps_avg, name: `Spread bps (${VOLWIN_LABEL[d.vol_window]} avg)`, type: 'scattergl', mode: 'lines', line: { color: '#d98e04', width: 1.8 }, xaxis: 'x', yaxis: 'y6', visible: nb },
-    { x: t, y: s.vol_ann, name: `Realised vol (${VOLWIN_LABEL[d.vol_window]} window, annualised %)`, type: 'scattergl', mode: 'lines', line: { color: '#9b59b6', width: 1.5 }, xaxis: 'x', yaxis: 'y7' },
+    { x: t, y: s.spread_bps, name: 'Spread bps (raw)', type: 'scattergl', mode: 'lines', line: { color: orange, width: 0.5, shape: step }, opacity: 0.22, xaxis: 'x', yaxis: 'y6', visible: nb, showlegend: false },
+    { x: t, y: s.spread_bps_avg, name: `Spread bps (${VOLWIN_LABEL[d.vol_window]} avg)`, type: 'scattergl', mode: 'lines', line: { color: orange, width: 1.8 }, xaxis: 'x', yaxis: 'y6', visible: nb },
+    { x: t, y: s.vol_ann, name: `Realised vol (${VOLWIN_LABEL[d.vol_window]} window, annualised %)`, type: 'scattergl', mode: 'lines', line: { color: purple, width: 1.5 }, xaxis: 'x', yaxis: 'y7' },
   ];
   const ax = (domain, title, extra = {}) => Object.assign({ domain, title: { text: title, font: { size: 11 } }, gridcolor: grid, zerolinecolor: grid, linecolor: grid, tickfont: { size: 10 } }, extra);
   const layout = {
     height: window.innerWidth < 600 ? 900 : 1000, margin: { l: 62, r: 52, t: window.innerWidth >= 700 ? 70 : 10, b: 40 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-    font: { color: fg }, hovermode: 'x', showlegend: window.innerWidth >= 700, legend: { orientation: 'h', yanchor: 'bottom', y: 1.0, font: { size: 10 } }, barmode: 'relative', bargap: 0,
+    font: { color: fg, family: '-apple-system, BlinkMacSystemFont, Inter, Helvetica Neue, sans-serif' }, hoverlabel: { bgcolor: '#1d1d1f', bordercolor: 'rgba(255,255,255,.2)', font: { color: fg } }, hovermode: 'x', showlegend: window.innerWidth >= 700, legend: { orientation: 'h', yanchor: 'bottom', y: 1.0, font: { size: 10 } }, barmode: 'relative', bargap: 0,
     xaxis: { anchor: 'y7', domain: [0, 1], gridcolor: grid, linecolor: grid, tickfont: { size: 10 }, showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: muted, title: { text: 'Time (IST)', font: { size: 11 } } },
     yaxis: ax(doms[0], 'Price (₹)', { anchor: 'x' }),
     yaxis2: ax(doms[1], 'Volume / bar', { anchor: 'x' }),
@@ -176,15 +176,15 @@ function renderOverview() {
     rows.map((r) => `<tr data-s="${r.symbol}">` + COLS.map(([k, , f]) => `<td>${f(r[k])}</td>`).join('') + '</tr>').join('') + '</tbody>';
   $('table').querySelectorAll('th').forEach((th) => th.onclick = () => { const k = th.dataset.k; state.sort = [k, state.sort[0] === k ? -state.sort[1] : -1]; renderOverview(); });
   $('table').querySelectorAll('tbody tr').forEach((tr) => tr.onclick = () => { state.symbol = tr.dataset.s; $('symbol').value = state.symbol; setTab('instrument'); });
-  const fg = css('--fg'), grid = css('--grid'), acc = css('--accent');
+  const fg = css('--fg'), grid = css('--grid'), acc = css('--accent'), purple = css('--purple');
   const byVol = [...state.overview].sort((a, b) => b.realised_vol_pct - a.realised_vol_pct);
-  Plotly.react('chart-vol', [{ type: 'bar', x: byVol.map((r) => r.symbol), y: byVol.map((r) => r.realised_vol_pct), marker: { color: '#9b59b6' }, hovertemplate: '%{x}<br>%{y:.1f}%<extra></extra>' }],
-    { title: { text: 'Realised volatility by instrument (annualised %)', font: { size: 13 } }, margin: { l: 50, r: 10, t: 36, b: 90 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: fg }, yaxis: { gridcolor: grid }, xaxis: { tickangle: -45 } }, { responsive: true, displaylogo: false });
+  Plotly.react('chart-vol', [{ type: 'bar', x: byVol.map((r) => r.symbol), y: byVol.map((r) => r.realised_vol_pct), marker: { color: purple }, hovertemplate: '%{x}<br>%{y:.1f}%<extra></extra>' }],
+    { title: { text: 'Realised volatility by instrument (annualised %)', font: { size: 13 } }, margin: { l: 50, r: 10, t: 36, b: 90 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: fg, family: '-apple-system, BlinkMacSystemFont, Inter, Helvetica Neue, sans-serif' }, hoverlabel: { bgcolor: '#1d1d1f', bordercolor: 'rgba(255,255,255,.2)', font: { color: fg } }, yaxis: { gridcolor: grid }, xaxis: { tickangle: -45 } }, { responsive: true, displaylogo: false });
   const mx = Math.max(...state.overview.map((r) => r.volume), 1);
   Plotly.react('chart-scatter', [{ type: 'scatter', mode: 'markers+text', x: state.overview.map((r) => r.realised_vol_pct), y: state.overview.map((r) => r.avg_spread_bps),
     text: state.overview.map((r) => r.symbol.replace('.NS', '')), textposition: 'top center', textfont: { size: 9 },
     marker: { size: state.overview.map((r) => 10 + 30 * Math.sqrt(r.volume / mx)), color: acc, opacity: 0.6 }, hovertemplate: '%{text}<br>vol %{x:.1f}%<br>spread %{y:.2f} bps<extra></extra>' }],
-    { title: { text: 'Spread vs volatility (bubble = volume)', font: { size: 13 } }, margin: { l: 55, r: 10, t: 36, b: 45 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: fg },
+    { title: { text: 'Spread vs volatility (bubble = volume)', font: { size: 13 } }, margin: { l: 55, r: 10, t: 36, b: 45 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', font: { color: fg, family: '-apple-system, BlinkMacSystemFont, Inter, Helvetica Neue, sans-serif' }, hoverlabel: { bgcolor: '#1d1d1f', bordercolor: 'rgba(255,255,255,.2)', font: { color: fg } },
       xaxis: { title: { text: 'Realised vol (%)', font: { size: 11 } }, gridcolor: grid }, yaxis: { title: { text: 'Avg spread (bps)', font: { size: 11 } }, gridcolor: grid, rangemode: 'tozero' } }, { responsive: true, displaylogo: false });
 }
 
