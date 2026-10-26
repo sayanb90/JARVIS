@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS Intraday Viewer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="demo-banner" class="banner" hidden>SYNTHETIC DEMO DATA &mdash; not market data</div>
+<header>
+  <h1>JARVIS <span>intraday viewer</span></h1>
+  <nav role="tablist">
+    <button role="tab" id="tab-instrument" aria-selected="true">Instrument</button>
+    <button role="tab" id="tab-overview" aria-selected="false">Market overview</button>
+  </nav>
+</header>
+
+<section class="controls" aria-label="Selection">
+  <label>Date <select id="date"></select></label>
+  <label>Instrument <select id="symbol"></select></label>
+  <label>Bar width <select id="width"></select></label>
+  <label>Volatility window <select id="volwin"></select></label>
+  <span id="status" role="status" aria-live="polite"></span>
+</section>
+
+<main>
+  <div id="empty" class="empty" hidden>
+    <h2>No intraday data yet</h2>
+    <p>The viewer reads <code>lake/bars/interval=1s/</code>. Start the collector during a market session, or try the
+    synthetic demo: <code>python -m webapp.demo</code> then <code>python -m webapp --lake lake_demo</code>.</p>
+  </div>
+
+  <section id="view-instrument">
+    <div id="cards" class="cards"></div>
+    <div class="chart-row">
+      <div id="chart" class="chart" aria-label="Price, volume, book, spread and volatility over the day"></div>
+      <aside id="book" class="book" aria-label="Book snapshot at the cursor">
+        <h3>Book at cursor</h3>
+        <div id="book-body" class="muted">Hover the chart to see the best bid and ask at that second.</div>
+      </aside>
+    </div>
+    <p class="note" id="note"></p>
+  </section>
+
+  <section id="view-overview" hidden>
+    <div class="grid2">
+      <div id="chart-vol" class="chart small"></div>
+      <div id="chart-scatter" class="chart small"></div>
+    </div>
+    <div class="table-wrap"><table id="table"></table></div>
+    <p class="note">Realised volatility = sqrt(sum of squared 1-second log returns &times; 250), annualised. At 1-second sampling the bid-ask bounce inflates it relative to 1-minute estimates, so compare instruments with each other rather than with published figures.</p>
+  </section>
+</main>
+<script src="/vendor/plotly.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

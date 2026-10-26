@@ -1,5 +1,5 @@
 [run]
-source = data_layer, scheduler
+source = data_layer, scheduler, analytics, webapp
 omit = data_layer/upstox/proto/*
 
 [report]

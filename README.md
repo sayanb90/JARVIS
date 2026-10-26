@@ -254,3 +254,17 @@ python -m pytest -m bdd           # only the Gherkin scenarios in tests/features
 
 About 220 tests, about 98% coverage; CI fails below 90%. Layout, scenario list and the limits of what they prove are in section 15 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
+---
+
+## Intraday viewer
+
+A read-only web page over the lake: pick a date and an instrument and see price, volume, the best bid and ask with sizes, the spread and rolling volatility on one linked chart, plus a market-wide overview that ranks instruments.
+
+```bash
+python -m webapp.demo                         # synthetic data (clearly marked), to try it before real data exists
+python -m webapp --lake lake_demo             # open http://127.0.0.1:8000
+python -m webapp                              # on the real lake
+```
+
+Set `WEBAPP_USER` and `WEBAPP_PASSWORD` to require a login, and put a TLS reverse proxy in front for phone access. Details, definitions and limits: section 16 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+

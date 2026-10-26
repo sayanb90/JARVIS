@@ -214,6 +214,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 |---|---|---|
 | 2026-10-25 | Added `data_layer/upstox/auth.py`: login URL, code exchange, `.env` token storage, and a feed probe that tests access vs extended token. Owner must first create the Upstox developer-console app | Waiting on app credentials |
 | 2026-10-25 | Upstox v3 feed adapter built (`data_layer/upstox/`): decode, instrument keys from ISIN, reconnecting WebSocket runner, daily scheduling, 8 tests incl. fake server. Protobuf module vendored from the official SDK (ADR-4) | Not yet run against Upstox |
+| 2026-10-26 | Intraday viewer webapp built (`webapp/`, `analytics/microstructure.py`): date and instrument dropdowns, price, volume, book at best, spread, volatility, market overview, synthetic demo data. Covered by unit tests, Gherkin scenarios and a real-browser test | ADR-6, section 16 |
 | 2026-10-25 | Daily OHLC re-extended to India+US+UK+EU (5y, Yahoo); intraday, ticks and fundamentals stay India only; `--backfill` for deepest Yahoo intraday window; `currency` column added to universe (ADR-3). Earlier same day: scope narrowed to NSE only; US removed from universe, fetchers, scheduler, lake and tests. Upstox v2 WebSocket chosen for live tick/L1 (ADR-2); tick model, bar aggregator and segment storage built | Adapter blocked on proto/docs access (section 13) |
 | 2026-10-25 | Runbook created; intraday bars collector, `bars5m` schema and loader added | Not yet run on the VPS |
 | 2026-10-25 | `yf_client` universe now read from `data/universe.csv` (previously a hardcoded 20-ticker US fallback) | |
@@ -224,7 +225,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 |---|---|---|
 | O1 | VPS provider, OS and size? | Phase 0 |
 | O2 | ~~q licence~~ Closed by ADR-1 (no KDB+ dependency) | — |
-| O3 | Backtester webapp stack and who uses it (just you, or others)? | Phase 2 |
+| O3 | Webapp stack: **decided** for the viewer (FastAPI + Plotly, ADR-6). Still open: who uses it (just you, or others), and the backtester UI | Phase 2 |
 | O4 | Universe target: stay at about 250 stocks or move toward 1,000? (drives FMP tier and storage) | Phase 1 |
 | O5 | First F&O underlying, and the first strategy that needs it | Phase 3 |
 | O6 | Monthly data budget ceiling | Phase 3 |
@@ -264,6 +265,11 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 - **Decision:** the intraday base is **1 second**, nothing coarser. Raw ticks are not the default only because of data volume; they remain an opt-in.
 - **Consequences:** about 10-15 GB a year typical, up to about 130 GB worst case (13.5). 1-minute and 5-minute bars are derived with `Lake.rollup()`. Upstox's candle API (minimum 1 minute) and Yahoo (minimum 1 minute, short history) can no longer serve as the intraday source, only as cross-checks. Intraday history exists only from the first day the live collector runs, so it must run every session.
 - **Open:** how often the Upstox feed actually pushes per instrument (if it is a snapshot about once a second, 1-second bars lose almost nothing versus raw ticks). The first live session settles it.
+
+### ADR-6: FastAPI + Plotly for the intraday viewer (2026-10-26)
+- **Decision:** a small FastAPI app reads the Parquet lake read-only through DuckDB and serves a single static page; charts are Plotly, with the JavaScript taken from the pip `plotly` package and served locally (no CDN, so it works offline and on a locked-down VPS). Pure maths lives in `analytics/` so the backtester can reuse it.
+- **Why not a heavier stack:** one user, one VPS, data already in Parquet; no build step, no database server, nothing to keep running besides one process. A framework can replace it later without touching the maths or the lake.
+- **Consequences:** one day and one instrument per request (a liquid stock at 1-second bars is about 2.4 MB of JSON, about 0.6 MB compressed); no live refresh yet (reload to see new data).
 
 ## 13. Upstox live feed (tick + L1)
 
@@ -487,8 +493,12 @@ Run everything (no network, no credentials, no real data touched): `pip install 
 | `fundamentals_rotation` | Stalest-first within the 250-call budget; a full cycle covers every stock; a failed fetch is retried first and never marked fresh; India only |
 | `pillar_scoring` | Each of the 8 pillars costs exactly one point in isolation; strict boundaries; unknown or unpriced stocks score 0 |
 | `upstox_day_pull` | A whole session pulled at once after the close passes verification; live bars are kept and only gaps filled; overwrite mode; unknown instrument reported not fatal; expired token stops cleanly; intraday endpoint for today, historical for earlier days |
+| `webapp_viewer` | The dropdowns list dates newest first and every instrument with its bar count; choosing a date and instrument returns price, volume, book, spread and volatility series of equal length in IST; coarser widths keep the day's total volume; the overview ranks instruments; days without a book render without NaN; bad input is refused (422/404) before touching data; optional login protects everything; viewing never changes a file |
 | `token_setup` | Login link, token exchange stored with mode 600 and never printed, extended-token adoption only when the feed accepts it |
 | `scheduler_ops` | All four markets loaded; dry run writes nothing; overlapping runs refused; US bars refused; lock released after failure; a total Yahoo outage fails the job |
+
+### 15.2b Webapp tests
+`tests/unit/test_microstructure.py` (exact values for spread, imbalance, realised volatility, summaries), `tests/unit/test_webapp.py` (lake discovery, every endpoint, input validation, caching, compression, auth, read-only, demo generator) and `tests/unit/test_webapp_browser.py`, which starts the app and drives it in headless Chromium through `tests/browser/smoke.js`: dropdowns, stacked panels, hover card, width change, overview sorting and click-through, deep links, phone width without sideways scrolling, and no console errors. The browser test is skipped automatically where Node and Playwright are not installed (it is skipped in CI).
 
 ### 15.3 What the tests do NOT prove
 Real Yahoo, FMP and Upstox behaviour (field formats, limits, outages), real network timing, and the real Upstox token lifetime. Section 14 is the live check for those. The fake Upstox server encodes our reading of the protocol from the official SDK, so a mismatch with the live service would pass here and fail there; the raw frames saved by `--dump-frames` are the first thing to turn into fixtures.
@@ -501,4 +511,58 @@ New behaviour gets a unit test next to its module and, if it changes a user-visi
 - `auth.exchange_code` bound `requests.post` at import time, so it could not be stubbed and would have hit the real API from a test.
 - The collector ignored a stop signal while the feed was quiet.
 - Known and left as is: `ebit` is filled from FMP's `ebitda` (characterised by `test_ebit_is_currently_sourced_from_fmp_ebitda`; no pillar uses it).
+
+## 16. Intraday viewer (webapp)
+
+**Status: `[~]` built and tested (unit, Gherkin, real headless Chromium) on synthetic data; not yet looked at on real collected data.**
+
+### 16.1 What you see
+Pick a **date** and an **instrument** (and optionally a bar width from 1 second to 5 minutes and a volatility window), then:
+- summary cards: open, high, low, close, return, volume, VWAP, average and median spread, realised volatility, average book sizes, bar count, book coverage;
+- one chart with five panels on a shared time axis (IST, zoom and pan together): **price** with best bid, best ask and day VWAP; **volume** per bar with cumulative volume; **book size at the best price** (bid up, ask down, with a smoothed line) and **imbalance**; **spread in basis points** (raw faint, smoothed bold); **realised volatility** (rolling, annualised);
+- a **book at cursor** card: hover or tap any second to see best bid and ask with sizes, spread, mid, imbalance, close, volume and volatility at that moment;
+- a **Market overview** tab for the chosen date: sortable table of all instruments (volume, VWAP, return, spread, volatility, book sizes), a bar chart of volatility per instrument and a spread-versus-volatility bubble chart; click a row to open that instrument;
+- the URL fragment holds the selection, so a link to a view can be bookmarked or sent.
+
+### 16.2 Definitions (so the numbers can be checked)
+| Measure | Definition |
+|---|---|
+| spread / spread_bps | ask minus bid; spread divided by mid, times 10,000. Crossed, locked-at-zero or missing books give no value, never a wrong one |
+| imbalance | (bid size minus ask size) divided by their sum, in [-1, 1]; +1 means all the size is on the bid |
+| realised volatility | square root of (sum of squared log returns between consecutive bar closes, scaled to a 250-day year). Seconds with no bar add nothing (the price did not move). In the chart it is a trailing window, scaled by the time actually elapsed early in the session, and blank for the first minute |
+| smoothed lines | trailing time-window mean over the same window as the volatility |
+
+Caveat: at 1-second sampling the bid-ask bounce inflates realised volatility compared with 1-minute estimates. Compare instruments with each other, not with published volatility figures.
+
+### 16.3 Run it
+```bash
+python -m webapp                               # http://127.0.0.1:8000 on ./lake (or $WEBAPP_LAKE / $JARVIS_LAKE)
+python -m webapp.demo && python -m webapp --lake lake_demo    # synthetic data first, with a red "synthetic" banner
+```
+Access from your phone: keep the app on `127.0.0.1` and put a reverse proxy with TLS in front, and set a login in the app as well:
+```
+# /etc/caddy/Caddyfile  (Caddy obtains the certificate automatically)
+viewer.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+```ini
+# /etc/systemd/system/jarvis-viewer.service
+[Service]
+User=jarvis
+WorkingDirectory=/home/jarvis/JARVIS
+EnvironmentFile=/home/jarvis/JARVIS/.env          # add WEBAPP_USER and WEBAPP_PASSWORD here
+ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m webapp
+Restart=always
+```
+Without a proxy, an SSH tunnel works from a laptop: `ssh -L 8000:127.0.0.1:8000 jarvis@<vps>` then open `http://127.0.0.1:8000`.
+
+### 16.4 Security
+Read-only (it never writes to the lake; a test checks file times and sizes). Binds to `127.0.0.1` by default. If `WEBAPP_USER` and `WEBAPP_PASSWORD` are both set, every route including the static files and the chart library requires HTTP Basic auth (constant-time comparison); over plain HTTP the password is visible, so use TLS. Dates and instrument names are validated against strict patterns and passed as query parameters, never built into SQL; widths and windows must come from a fixed list.
+
+### 16.5 Known limits and next steps
+- No live refresh during the session (reload). Next: auto-refresh of the last few minutes.
+- One instrument and day per request; a multi-day view and an instrument-comparison view are not built.
+- Interval is the 1-second base only; days that exist only as REST minute bars (`src='rest'`) are not offered.
+- It has only been looked at on synthetic data. On the VPS after the first live session, check each panel against a charting screen (runbook 14.5) and record anything that looks wrong.
 

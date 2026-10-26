@@ -88,3 +88,12 @@ def _tests_never_touch_the_repo_data_dirs():
         assert p.exists() == before[p], f"a test created or removed {p} in the real repo"
     after = set((repo / "data" / "ohlc").glob("*.csv")) | set((repo / "data" / "fundamentals").glob("*.csv"))
     assert after == csvs, f"a test wrote CSVs into the real repo: {sorted(after ^ csvs)}"
+
+
+@pytest.fixture(scope="session")
+def demo_lake(tmp_path_factory):
+    """A synthetic 3-day, 10-stock 1-second lake (see webapp/demo.py), built once per test session."""
+    from webapp.demo import write_demo
+    out = tmp_path_factory.mktemp("demo_lake")
+    write_demo(out, days=3)
+    return out
