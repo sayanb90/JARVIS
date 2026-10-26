@@ -10,3 +10,4 @@ data/fund_meta.csv
 .coverage
 .pytest_cache/
 htmlcov/
+lake_demo/
