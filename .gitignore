@@ -11,3 +11,4 @@ data/fund_meta.csv
 .pytest_cache/
 htmlcov/
 lake_demo/
+deploy/local/
