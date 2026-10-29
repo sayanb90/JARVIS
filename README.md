@@ -10,7 +10,7 @@
 
 ---
 
-JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to both **Indian (Nifty 50 / NSE)** and **US (S&P 500)** equities, storing everything in a **KDB+/q** time-series database optimised for the 32-bit (4 GB) engine.
+JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to **NSE-listed Indian equities**, keeps 5 years of daily prices for **India, US, UK and EU**, and ingests live tick / L1 data for India from the Upstox API, storing everything in a **Parquet lake queried with DuckDB** (no database server, no memory ceiling, free).
 
 ---
 
@@ -21,19 +21,18 @@ JARVIS/
 ├── data_layer/
 │   ├── fmp_client.py     # FMP API client — annual fundamentals only
 │   ├── yf_client.py      # Yahoo Finance client — daily OHLC (free, no key)
-│   ├── schema.q          # KDB+ table definitions + 8-pillar scoring
-│   ├── kdb_loader.q      # CSV → KDB+ ingestion (splayed + partitioned)
-│   └── helpers.q         # KDB+ query helpers for analysis
+│   ├── lake.py           # CSV staging files → Parquet lake (idempotent upserts)
+│   └── query.py          # DuckDB query helpers + 8-pillar scoring
+├── tests/                # pytest: loader + query + scoring (no network)
 ├── data/
 │   ├── universe.csv      # Stock universe with all identifiers (see below)
 │   ├── fund_meta.csv     # Auto-generated: last fundamentals refresh per ticker
 │   ├── fundamentals/     # FMP output CSVs (income, balance, cashflow, ratios)
 │   └── ohlc/             # yfinance output CSVs (year-partitioned + daily)
-├── db/                   # KDB+ on-disk tables (created by kdb_loader.q)
-│   ├── fundamentals/     # Splayed: incomeStatement, balanceSheet, cashFlow,
-│   │   │                 #          ratios, pillarMetrics, fundMeta
-│   │   └── ...
-│   └── YYYY/ohlc/        # Date-partitioned OHLC (one dir per year)
+├── lake/                 # Parquet lake (created by lake.py, git-ignored)
+│   ├── fundamentals/     # one file per table, both markets
+│   ├── ohlc/year=YYYY/   # daily bars
+│   └── bars/interval=5m/date=YYYY-MM-DD/   # intraday bars (UTC day)
 ├── scheduler.py          # Cron-invokable orchestrator
 ├── logs/
 ├── .env.example
@@ -46,21 +45,18 @@ JARVIS/
 
 The universe is defined in `data/universe.csv`. Each row carries all common identifier types:
 
-| Column | Description | US example | India example |
-|---|---|---|---|
-| `symbol` | **Primary key** used throughout the codebase | `AAPL` | `RELIANCE.NS` |
-| `market` | `US` or `IN` | `US` | `IN` |
-| `exchange` | Listing exchange | `NASDAQ` | `NSE` |
-| `isin` | 12-char global identifier | `US0378331005` | `INE002A01018` |
-| `cusip` | 9-char US/Canada only | `037833100` | *(blank — not applicable)* |
-| `ric` | Reuters code | `AAPL.O` (NASDAQ) / `JPM.N` (NYSE) | `RELI.NS` |
-| `bbg_code` | Bloomberg ticker | `AAPL US Equity` | `RIL IN Equity` |
-| `sector` | GICS sector | `Information Technology` | `Energy` |
+| Column | Description | Example |
+|---|---|---|
+| `symbol` | **Primary key** used throughout the codebase (Yahoo `.NS` style) | `RELIANCE.NS` |
+| `market` | `IN`, `US`, `UK` or `EU` | `IN` |
+| `currency` | Quote currency (`INR`, `USD`, `GBp` = pence, `EUR`) | `INR` |
+| `exchange` | Listing exchange | `NSE` |
+| `isin` | 12-char identifier; also the basis of Upstox equity instrument keys (`NSE_EQ\|<ISIN>`) | `INE002A01018` |
+| `ric` | Reuters code | `RELI.NS` |
+| `bbg_code` | Bloomberg ticker | `RIL IN Equity` |
+| `sector` | Sector | `Energy` |
 
-**How symbols differ between markets:**
-- **US stocks** use plain exchange tickers (`AAPL`, `MSFT`, `BRK-B`). These are the same across FMP and yfinance.
-- **Indian stocks** use Yahoo Finance's `.NS` suffix for NSE-listed securities (`RELIANCE.NS`, `INFY.NS`). This is also the format FMP uses, and is equivalent to the Reuters RIC convention Yahoo adopted.
-- Both are stored in the `symbol` column in KDB+. The `market` column (`\`IN` or `\`US`) distinguishes them.
+`cusip` is blank for Indian securities. Symbols use Yahoo's `.NS` suffix, which FMP also accepts.
 
 To expand the universe, add rows to `data/universe.csv`. The scheduler will automatically pick up new stocks and prioritise them (they have no `last_updated` date and sort to the top of the refresh queue).
 
@@ -113,61 +109,54 @@ pip install -r requirements.txt
 
 ### 2. Populate the universe
 
-Edit `data/universe.csv` to add your stocks. The 20 rows shipped with the repo (10 US, 10 India) are working examples.
+Edit `data/universe.csv` to add your stocks. The 10 NSE rows shipped with the repo are working examples.
 
 ### 3. Initial OHLC backfill (free, ~30 seconds for 250 stocks)
 
 ```bash
 # Fetch 5 years of OHLC via Yahoo Finance — no API key needed
-python -m data_layer.yf_client --mode full --market ALL
+python -m data_layer.yf_client --mode full --market ALL    # India, US, UK, EU (daily, 5 years)
 ```
 
 ### 4. Initial fundamentals load (FMP — uses API quota)
 
 ```bash
 # Dry run first to see the call plan
-python -m data_layer.fmp_client --market ALL --dry-run
+python -m data_layer.fmp_client --market IN --dry-run
 
 # Full run for all stocks in universe.csv
-python -m data_layer.fmp_client --market ALL
+python -m data_layer.fmp_client --market IN
 
 # Or batch to stay within 250-call free tier (62 tickers × 4 calls = 248)
-python -m data_layer.fmp_client --market ALL --slice 0 61
-python -m data_layer.fmp_client --market ALL --slice 62 123
+python -m data_layer.fmp_client --market IN --slice 0 61
+python -m data_layer.fmp_client --market IN --slice 62 123
 # ... etc.
 ```
 
-### 5. Load into KDB+
+### 5. Load into the lake
 
 ```bash
-q data_layer/kdb_loader.q                     # full load (all tables)
-q data_layer/kdb_loader.q -load fundamentals  # fundamentals only
-q data_layer/kdb_loader.q -load ohlc          # OHLC only
-q data_layer/kdb_loader.q -mode daily         # append daily OHLC increment
+python -m data_layer.lake --load all            # fundamentals + full-history OHLC
+python -m data_layer.lake --load fundamentals   # upsert fundamentals, pillar metrics, fund_meta
+python -m data_layer.lake --load ohlc           # full-history year files
+python -m data_layer.lake --load daily          # incremental daily OHLC
+python -m data_layer.lake --load bars --since 2026-10-20
 ```
 
-### 6. Query with helpers
+Loads are upserts keyed on (symbol, date) or (symbol, ts), so re-running is safe and fundamentals accumulate across the rotating refresh.
 
-```q
-\l data_layer/helpers.q
+### 6. Query
 
-// Score all US stocks against latest price
-topByScore[`US; 10]
+```python
+from data_layer.query import Lake
+lake = Lake()
 
-// Compare top scorers across both markets
-compareMarkets[5]
-
-// Latest fundamentals for a ticker
-getLatestFundamentals[`AAPL]
-getLatestFundamentals[`RELIANCE.NS]
-
-// Revenue growth history
-revenueGrowth[`TCS.NS]
-
-// Market summary
-marketSummary[]
+lake.top_by_score("IN", 10)                    # 8-pillar screen vs latest close
+lake.score_all()                               # whole universe
+lake.ohlc("INFY.NS", "2024-01-01", "2024-12-31")
+lake.bars("RELIANCE.NS", "2026-10-23", "2026-10-24")  # 5m bars, UTC
+lake.sql("SELECT market, count(*) FROM ohlc GROUP BY 1")   # ad-hoc SQL
 ```
-
 ---
 
 ## Scheduler (daily automation)
@@ -196,12 +185,36 @@ marketSummary[]
 
 Each stock gets a full refresh roughly once a week.
 
+**Interim Yahoo intraday bars** (5-minute, a stopgap cross-check only; the intraday base is the 1-second Upstox feed below):
+
+```bash
+python scheduler.py --job bars --market IN --backfill   # first run: deepest Yahoo window (about 59d of 5m)
+python scheduler.py --job bars --market IN              # daily; India only, upserts into lake/bars/
+```
+
+**Live tick / L1 (Upstox API v3):** `data_layer/upstox/` connects to the v3 WebSocket, decodes the Protobuf frames, aggregates ticks into **1-second bars** (OHLC, volume, VWAP, tick count, last bid/ask) and stores them in `lake/bars/interval=1s/`. Coarser bars are derived on demand: `Lake().rollup(60)` gives 1-minute bars, `rollup(300)` 5-minute, aligned to the 09:15 IST open.
+
+```bash
+# one-time: create an Upstox app (developer console), put API key/secret/redirect URI in .env
+python -m data_layer.upstox.auth login-url             # log in on your phone, then:
+python -m data_layer.upstox.auth exchange "<redirected URL>"
+python -m data_layer.upstox.auth check                 # does the feed accept the long-lived extended token?
+python -m data_layer.upstox.feed --once --limit 20     # one session now, 20 symbols
+python -m data_layer.upstox.feed                       # daemon (waits for each NSE session)
+```
+
+Missed the session? Pull a whole past or present day from the candle API: `python -m data_layer.upstox.candles --date 2026-10-26` (fills gaps only).
+
+Tested against a local fake server; not yet run against Upstox itself (runbook section 13, Gate U1).
+
+Go-live steps, daily ops, backups and the futures/options planning entry are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
 **Manual runs:**
 
 ```bash
-python scheduler.py --job ohlc-daily                # OHLC only
+python scheduler.py --job ohlc-daily                # daily OHLC, all four markets
 python scheduler.py --job fundamentals              # fundamentals only
-python scheduler.py --job all                       # both
+python scheduler.py --job all                       # ohlc + fundamentals
 python scheduler.py --job all --dry-run             # print plan only
 python scheduler.py --job fundamentals --budget 200 # custom call budget
 ```
@@ -213,27 +226,51 @@ python scheduler.py --job fundamentals --budget 200 # custom call budget
 | `FMP_API_KEY` | — | Required for fundamentals |
 | `FMP_DAILY_BUDGET` | `248` | FMP calls to spend per scheduler run |
 | `FMP_RATE_LIMIT_DELAY` | `0.5` | Seconds between FMP calls (free tier) |
-| `Q_BINARY` | `q` | Path to the q executable |
+| `JARVIS_LAKE` | `<root>/lake` | Parquet lake directory |
 
 ---
 
-## KDB+ Database Layout
+## Lake Layout
 
 ```
-db/
-├── fundamentals/           ← splayed on-disk tables (lazy mmap)
-│   ├── incomeStatement/
-│   ├── balanceSheet/
-│   ├── cashFlow/
-│   ├── ratios/
-│   ├── pillarMetrics/
-│   └── fundMeta/           ← last fundamentals refresh date per ticker
-└── YYYY/ohlc/              ← date-partitioned OHLC
-    ├── 2021/ohlc/
-    ├── 2022/ohlc/
-    └── ...
+lake/
+├── fundamentals/           ← income_statement, balance_sheet, cash_flow,
+│                              ratios, pillar_metrics, fund_meta (.parquet)
+├── ohlc/year=YYYY/ohlc.parquet
+└── bars/interval=5m/date=YYYY-MM-DD/bars.parquet
 ```
 
-All tables carry a `market` column (`\`IN` or `\`US`) so both universes coexist in the same tables. Fundamentals are keyed on `[date; symbol]`; `pillarMetrics` and `fundMeta` are keyed on `[symbol]`.
+All tables carry a `market` column (`IN`, `US`, `UK`, `EU` for daily OHLC; India only for bars and fundamentals). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in `docs/RUNBOOK.md`.
 
-Only partitions that are actively queried are mmap'd into RAM, keeping heap usage well within the 4 GB 32-bit engine limit. Run `memReport[]` after loading to verify.
+---
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest --cov            # unit tests + Gherkin scenarios, no network or credentials needed
+python -m pytest -m bdd           # only the Gherkin scenarios in tests/features
+```
+
+About 220 tests, about 98% coverage; CI fails below 90%. Layout, scenario list and the limits of what they prove are in section 15 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+---
+
+## Setting up the server
+
+Section 0 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md) takes you from a blank VPS to data flowing: hardening, install, `.env`, building the stock universe (`python -m data_layer.universe import-nse <NSE csv>`), the test day, going live with the files in `deploy/` (systemd services, cron, log rotation), backups (`python -m data_layer.backup`), and the daily routine including the morning token refresh. `python -m data_layer.health` is the two-minute daily check.
+
+---
+
+## Intraday viewer
+
+A read-only web page over the lake: pick a date and an instrument and see price, volume, the best bid and ask with sizes, the spread and rolling volatility on one linked chart, plus a market-wide overview that ranks instruments.
+
+```bash
+python -m webapp.demo                         # synthetic data (clearly marked), to try it before real data exists
+python -m webapp --lake lake_demo             # open http://127.0.0.1:8000
+python -m webapp                              # on the real lake
+```
+
+Set `WEBAPP_USER` and `WEBAPP_PASSWORD` to require a login, and put a TLS reverse proxy in front for phone access. Details, definitions and limits: section 16 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+

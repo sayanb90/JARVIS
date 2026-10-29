@@ -1,0 +1,9 @@
+[run]
+source = data_layer, scheduler, analytics, webapp
+omit = data_layer/upstox/proto/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError

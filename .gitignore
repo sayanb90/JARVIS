@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+logs/
+lake/
+data/bars/
+data/ohlc/*.csv
+data/fundamentals/*.csv
+data/fund_meta.csv
+.coverage
+.pytest_cache/
+htmlcov/
+lake_demo/
