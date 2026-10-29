@@ -1,7 +1,10 @@
 # Live Upstox tick/L1 collector (1-second bars).  Install: sudo cp deploy/jarvis-feed.service /etc/systemd/system/
 # then: sudo systemctl daemon-reload && sudo systemctl enable --now jarvis-feed
 # The process sleeps until 03:40 UTC on each weekday, runs the session, compacts the day, and waits for the next one.
-# The access token expires daily: refresh it BEFORE 03:40 UTC (see runbook section 0.9); restart afterwards picks it up.
+# UPSTOX_FEED_TOKEN should be the Analytics Token (1-year validity, confirmed working via `auth check`,
+# section 13.2) so no daily refresh is needed. If it ever gets rejected (401/403 in the logs), renew it
+# at the developer console, or fall back to the daily access-token login (runbook section 0.9); no
+# restart needed either way, the collector re-reads .env and retries.
 [Unit]
 Description=JARVIS Upstox live feed collector
 After=network-online.target
