@@ -35,7 +35,7 @@ from .. import tick_store
 from ..lake import ENV_FILE
 from ..ticks import SESSION_CLOSE_UTC, SESSION_OPEN_UTC, Bar, BarAggregator, Tick
 from . import decode
-from .instruments import build_key_map
+from .instruments import segment_key_map
 
 log = logging.getLogger(__name__)
 
@@ -282,6 +282,9 @@ def main() -> None:
     ap.add_argument("--once", action="store_true", help="run one session now instead of daemon mode")
     ap.add_argument("--interval", type=int, default=1, help="bar width in seconds (default 1; the intraday base resolution)")
     ap.add_argument("--mode", choices=MODES, default="full")
+    ap.add_argument("--segment", choices=["eq", "fo"], default="eq",
+                    help="eq: the NSE equity universe; fo: the futures and options chosen by fo_instruments select")
+    ap.add_argument("--fo-file", default=None, help="contract list for --segment fo (default data/fo_universe.csv)")
     ap.add_argument("--limit", type=int, default=None, help="subscribe only the first N universe symbols")
     ap.add_argument("--raw-ticks", action="store_true", help="also store every tick with L1 (large)")
     ap.add_argument("--dump-frames", type=int, default=0, metavar="N",
@@ -294,11 +297,12 @@ def main() -> None:
         raise SystemExit("no token: set UPSTOX_ACCESS_TOKEN (see python -m data_layer.upstox.auth)")
     if not token:
         log.warning("no Upstox token yet: the daemon will keep retrying; run python -m data_layer.upstox.auth")
-    key_map, _ = build_key_map()
+    key_map = segment_key_map(a.segment, a.fo_file)
     if a.limit:
         key_map = dict(list(key_map.items())[: a.limit])
     if not key_map:
-        raise SystemExit("no universe symbols with a usable ISIN")
+        raise SystemExit("no instruments to subscribe: " + ("run fo_instruments import and select" if a.segment == "fo"
+                                                           else "no universe symbols with a usable ISIN"))
     make = lambda: UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, interval_s=a.interval,  # noqa: E731
                               raw_ticks=a.raw_ticks, dump_frames=a.dump_frames, token_provider=current_token,
                               auth_retry_s=None if a.once else 60.0)

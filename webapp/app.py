@@ -121,6 +121,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             "symbol": symbol, "date": date, "width": width, "vol_window": vol_window,
             "summary": day_summary(df),
             "has_book": bool(df[["bid", "ask"]].notna().all(axis=1).any()),
+            "has_oi": bool("oi" in df.columns and df["oi"].notna().any()),
             "series": series_payload(df, max(vol_window, width * 2))}))
 
     @app.get("/api/overview")

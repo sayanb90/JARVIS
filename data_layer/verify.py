@@ -4,6 +4,7 @@ Data checks with explicit PASS / WARN / FAIL lines, for go-live testing (runbook
   python -m data_layer.verify ohlc [--years 5]
   python -m data_layer.verify bars --date 2026-10-26 [--interval 1s]
   python -m data_layer.verify compare-rest --date 2026-10-26      # live 1s bars rolled up vs Upstox 1-minute candles
+  python -m data_layer.verify fo --date 2026-10-26                # futures and options bars: open interest, books, coverage
 
 Exit code is 1 if any FAIL.  WARN means look at it, not necessarily wrong.
 """
@@ -72,6 +73,58 @@ def verify_ohlc(lake: Lake, years: int = 5, today: date | None = None) -> Report
 
 
 SESSION_SECONDS = 22_500          # 09:15-15:30 IST
+
+
+def verify_fo(lake: Lake, day: date, contracts: pd.DataFrame | None = None, interval: str = "1s") -> Report:
+    """
+    Checks for futures and options bars on `day`.  `contracts` is the selected-contract table (data/fo_universe.csv);
+    without it every symbol that carries open interest is treated as a derivative.
+    """
+    r = Report()
+    view = f"bars_{interval}"
+    if view not in lake.tables():
+        r.line("FAIL", f"no {view} table in the lake")
+        return r
+    df = lake.sql(f"SELECT * FROM {view} WHERE CAST(ts AS DATE) = CAST(? AS DATE)", [str(day)])
+    if df.empty:
+        r.line("FAIL", f"no bars at all for {day}")
+        return r
+    if contracts is not None:
+        df = df[df.symbol.isin(set(contracts["symbol"]))]
+    elif "oi" in df.columns:
+        df = df[df.groupby("symbol")["oi"].transform(lambda x: x.notna().any())]
+    print(f"\n== futures/options bars {interval} {day}: {len(df)} rows, {df.symbol.nunique()} contracts ==")
+    r.line("FAIL" if df.empty else "PASS", f"derivative bars present for {day}")
+    if df.empty:
+        return r
+    r.line("FAIL" if df.duplicated(["symbol", "ts"]).any() else "PASS",
+           f"duplicate (symbol, ts): {int(df.duplicated(['symbol', 'ts']).sum())}")
+    if contracts is not None:
+        absent = sorted(set(contracts["symbol"]) - set(df.symbol))
+        r.line("WARN" if absent else "PASS",
+               f"selected contracts with no bars (far strikes that never traded are normal): {len(absent)}"
+               + (f", e.g. {absent[:5]}" if absent else ""))
+    if "oi" not in df.columns or df["oi"].isna().all():
+        r.line("FAIL", "no open interest on any bar: the feed mode may not carry it, or the field is not decoded")
+        return r
+    cover = df.groupby("symbol")["oi"].apply(lambda x: x.notna().mean())
+    low = sorted(cover[cover < 0.9].index)
+    r.line("WARN" if low else "PASS", f"contracts with open interest on under 90% of their bars: {low[:8] or 'none'}")
+    print(f"      open interest coverage per contract: min {cover.min():.0%}, median {cover.median():.0%}")
+    neg = df[df["oi"] < 0]
+    r.line("FAIL" if len(neg) else "PASS", f"negative open interest rows: {len(neg)}")
+    fut = df.sort_values("ts").groupby("symbol").agg(first=("oi", "first"), last=("oi", "last"))
+    flat = sorted(fut[fut["first"] == fut["last"]].index)
+    r.line("WARN" if len(flat) > len(fut) * 0.9 else "PASS",
+           f"contracts whose open interest never changed all day: {len(flat)} of {len(fut)} "
+           "(on liquid contracts it should move; most flat means OI is not being refreshed)")
+    book = df[["bid", "ask"]].notna().all(axis=1)
+    r.line("WARN" if book.mean() < 0.5 else "PASS", f"bars with a book snapshot: {book.mean():.0%}")
+    crossed = df[(df.ask < df.bid) & book]
+    r.line("WARN" if len(crossed) else "PASS", f"crossed books: {len(crossed)}")
+    sane = df[(df.low > df.open) | (df.low > df.close) | (df.high < df.open) | (df.high < df.close)]
+    r.line("FAIL" if len(sane) else "PASS", f"bars where open/close fall outside low-high: {len(sane)}")
+    return r
 
 
 def verify_bars(lake: Lake, day: date, interval: str = "1s", expected_bars: int | None = None) -> Report:
@@ -172,10 +225,17 @@ def main() -> None:
     b = sub.add_parser("bars"); b.add_argument("--date", type=date.fromisoformat, required=True)
     b.add_argument("--interval", default="1s")
     c = sub.add_parser("compare-rest"); c.add_argument("--date", type=date.fromisoformat, required=True)
+    f = sub.add_parser("fo"); f.add_argument("--date", type=date.fromisoformat, required=True)
+    f.add_argument("--interval", default="1s")
+    f.add_argument("--all", action="store_true", help="every symbol with open interest, not only data/fo_universe.csv")
     a = ap.parse_args()
     lake = Lake()
-    rep = (verify_ohlc(lake, a.years) if a.cmd == "ohlc" else
-           verify_against_rest(lake, a.date) if a.cmd == "compare-rest" else verify_bars(lake, a.date, a.interval))
+    if a.cmd == "fo":
+        from .upstox.fo_instruments import read_universe as read_fo
+        rep = verify_fo(lake, a.date, None if a.all else read_fo(day=a.date), a.interval)
+    else:
+        rep = (verify_ohlc(lake, a.years) if a.cmd == "ohlc" else
+               verify_against_rest(lake, a.date) if a.cmd == "compare-rest" else verify_bars(lake, a.date, a.interval))
     print(f"\n{'FAILED: ' + str(rep.fails) + ' check(s)' if rep.fails else 'no FAIL checks'}")
     sys.exit(1 if rep.fails else 0)
 

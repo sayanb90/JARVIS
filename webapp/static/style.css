@@ -1,5 +1,5 @@
 /* JARVIS viewer: black canvas, hairlines, large type, pill controls (apple.com-inspired). Always dark. */
-:root{color-scheme:dark;--bg:#000;--panel:#161617;--panel2:#1d1d1f;--fg:#f5f5f7;--muted:#86868b;--line:rgba(255,255,255,.12);--accent:#2997ff;--up:#30d158;--down:#ff453a;--orange:#ff9f0a;--purple:#bf5af2;--grid:rgba(255,255,255,.07);--r:18px}
+:root{color-scheme:dark;--bg:#000;--panel:#161617;--panel2:#1d1d1f;--fg:#f5f5f7;--muted:#86868b;--line:rgba(255,255,255,.12);--accent:#2997ff;--up:#30d158;--down:#ff453a;--orange:#ff9f0a;--purple:#bf5af2;--teal:#64d2ff;--grid:rgba(255,255,255,.07);--r:18px}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.47 -apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}

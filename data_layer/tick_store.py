@@ -47,7 +47,7 @@ def write_bars(bars: Iterable[Bar], interval: str, lake_dir: Path | None = None)
     df["volume"] = df["volume"].astype("int64")
     for c in ("vwap", "bid", "ask"):                    # stable column types so live and REST segments union cleanly
         df[c] = df[c].astype("float64")
-    for c in ("n_ticks", "bid_qty", "ask_qty"):
+    for c in ("n_ticks", "bid_qty", "ask_qty", "oi"):
         df[c] = df[c].astype("Int64")
     for day, part in df.groupby(df["ts"].dt.date):
         _write_segment((lake_dir or LAKE_DIR) / "bars" / f"interval={interval}" / f"date={day}", part)

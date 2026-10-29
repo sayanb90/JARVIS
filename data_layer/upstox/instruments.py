@@ -48,3 +48,11 @@ def build_key_map(rows: list[dict] | None = None, master: Path | str | None = No
         log.warning("%d universe symbols have no usable Upstox key: %s",
                     len(skipped), ", ".join(skipped[:10]) + ("..." if len(skipped) > 10 else ""))
     return keys, skipped
+
+
+def segment_key_map(segment: str = "eq", fo_file: Path | str | None = None) -> dict[str, str]:
+    """{instrument_key: symbol} for the collectors: the equity universe ("eq") or the selected contracts ("fo")."""
+    if segment == "fo":
+        from .fo_instruments import fo_key_map
+        return fo_key_map(Path(fo_file) if fo_file else None)
+    return build_key_map()[0]
