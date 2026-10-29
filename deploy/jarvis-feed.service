@@ -17,7 +17,9 @@ StartLimitBurst=10
 User=jarvis
 WorkingDirectory=/home/jarvis/JARVIS
 EnvironmentFile=/home/jarvis/JARVIS/.env
-ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m data_layer.upstox.feed
+# --limit 5: Gate U1 cautious start (first live session). Widen once a full session comes back clean
+# (section 13.3) -- drop --limit for the whole universe, or raise it gradually.
+ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m data_layer.upstox.feed --limit 5
 # SIGTERM makes the collector save the bars received so far and compact the day before it exits
 KillSignal=SIGTERM
 TimeoutStopSec=60
