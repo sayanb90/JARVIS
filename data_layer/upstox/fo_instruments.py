@@ -6,11 +6,14 @@ NSE futures and options: instrument master, contract selection, key maps.
   python -m data_layer.upstox.fo_instruments list --underlying NIFTY --type FUT
   python -m data_layer.upstox.fo_instruments select --underlying NIFTY BANKNIFTY RELIANCE \\
         --futures 2 --option-expiries 1 --strikes 10 [--spot NIFTY=24500]
+  python -m data_layer.upstox.fo_instruments select --watchlist data/fo_watchlist.csv   # tracked subscription list
 
 Flow: `import` parses Upstox's NSE instrument file into lake/instruments/fo.parquet (one row per contract,
 first_seen / last_seen kept so expired contracts stay resolvable for old bars).  `select` picks the contracts
 to collect (nearest futures expiries, option strikes around the money) and writes data/fo_universe.csv, which
-`feed --segment fo` and `candles --segment fo` read.
+`feed --segment fo` and `candles --segment fo` read.  Pass `--underlying` directly for a one-off pull, or
+`--watchlist` (default data/fo_watchlist.csv, checked into git) to drive it from a per-underlying subscription
+list -- each row can have its own futures/option-expiry/strike window, and `strikes` may be "all".
 
 Lake symbol for a contract is Upstox's trading symbol with spaces turned into underscores, for example
 NIFTY_25000_CE_28_NOV_24 or RELIANCE_FUT_28_NOV_24.  It is unique per contract and stays valid after expiry.
@@ -224,6 +227,55 @@ def select_contracts(table: pd.DataFrame, underlyings: list[str], day: date, fut
     return out[UNIVERSE_COLUMNS], notes
 
 
+WATCHLIST_COLUMNS = ["underlying", "futures", "option_expiries", "strikes", "no_options"]
+
+
+def watchlist_path() -> Path:
+    return lake_mod.DATA_DIR / "fo_watchlist.csv"
+
+
+def read_watchlist(path: Path | None = None) -> list[dict]:
+    """The tracked subscription list for the derivatives pipeline (data/fo_watchlist.csv, checked into git
+    unlike the generated fo_universe.csv): one row per underlying with its own expiry/strike window, so
+    different underlyings can have different windows in one `select` run.  `strikes` may be an integer
+    (steps either side of the at-the-money strike) or "all" for the whole chain."""
+    p = path or watchlist_path()
+    df = pd.read_csv(p)
+    rows = []
+    for _, r in df.iterrows():
+        strikes_raw = str(r.get("strikes", 10)).strip().lower()
+        strikes = 10**6 if strikes_raw == "all" else int(strikes_raw)
+        rows.append({
+            "underlying": str(r["underlying"]).strip(),
+            "futures": int(r["futures"]) if pd.notna(r.get("futures")) else 2,
+            "option_expiries": int(r["option_expiries"]) if pd.notna(r.get("option_expiries")) else 1,
+            "strikes": strikes,
+            "no_options": bool(r["no_options"]) if pd.notna(r.get("no_options")) else False,
+        })
+    return rows
+
+
+def select_from_watchlist(table: pd.DataFrame, rows: list[dict], day: date,
+                          spot: dict[str, float] | None = None) -> tuple[pd.DataFrame, dict]:
+    """Run `select_contracts` once per watchlist row (each may have its own futures/option-expiry/strike
+    window) and combine the results into one contract table, same shape as `select_contracts` returns."""
+    spot = spot or {}
+    picked, notes = [], {"missing": [], "no_spot": []}
+    for row in rows:
+        types = ("FUT",) if row["no_options"] else FO_TYPES
+        sel, n = select_contracts(table, [row["underlying"]], day, row["futures"], row["option_expiries"],
+                                  row["strikes"], spot, types)
+        if not sel.empty:
+            picked.append(sel)
+        notes["missing"] += n["missing"]
+        notes["no_spot"] += n["no_spot"]
+    if not picked:
+        return pd.DataFrame(columns=UNIVERSE_COLUMNS), notes
+    out = pd.concat(picked, ignore_index=True).drop_duplicates("instrument_key")
+    out = out.sort_values(["underlying", "instrument_type", "expiry", "strike"]).reset_index(drop=True)
+    return out, notes
+
+
 def universe_path() -> Path:
     return lake_mod.DATA_DIR / "fo_universe.csv"
 
@@ -298,7 +350,11 @@ def main(argv: list[str] | None = None) -> None:
     pl.add_argument("--day", type=date.fromisoformat, default=None, help="only contracts alive on this day")
     pl.add_argument("-n", type=int, default=40)
     ps = sub.add_parser("select", help="choose contracts to collect and write data/fo_universe.csv")
-    ps.add_argument("--underlying", nargs="+", required=True)
+    ps.add_argument("--underlying", nargs="+", default=None,
+                    help="omit to drive selection from --watchlist instead")
+    ps.add_argument("--watchlist", type=Path, default=None,
+                    help="CSV of underlying,futures,option_expiries,strikes[,no_options] -- strikes may be "
+                         "'all'; used when --underlying is omitted (default data/fo_watchlist.csv)")
     ps.add_argument("--futures", type=int, default=2, help="nearest N futures expiries")
     ps.add_argument("--option-expiries", type=int, default=1, help="nearest N option expiries")
     ps.add_argument("--strikes", type=int, default=10, help="strikes each side of at-the-money")
@@ -348,9 +404,18 @@ def main(argv: list[str] | None = None) -> None:
         t = load_table()
         if t.empty:
             raise SystemExit("no instrument table: run import first")
-        spot = {**spot_from_lake(t, a.underlying, day), **_parse_spot(a.spot)}
-        sel, notes = select_contracts(t, a.underlying, day, a.futures, a.option_expiries, a.strikes, spot,
-                                      ("FUT",) if a.no_options else FO_TYPES)
+        if a.underlying:
+            spot = {**spot_from_lake(t, a.underlying, day), **_parse_spot(a.spot)}
+            sel, notes = select_contracts(t, a.underlying, day, a.futures, a.option_expiries, a.strikes, spot,
+                                          ("FUT",) if a.no_options else FO_TYPES)
+        else:
+            wl_path = a.watchlist or watchlist_path()
+            if not wl_path.exists():
+                raise SystemExit(f"give --underlying ... or --watchlist <csv> (default {wl_path} not found)")
+            rows = read_watchlist(wl_path)
+            underlyings = [r["underlying"] for r in rows]
+            spot = {**spot_from_lake(t, underlyings, day), **_parse_spot(a.spot)}
+            sel, notes = select_from_watchlist(t, rows, day, spot)
         if sel.empty:
             raise SystemExit(f"nothing selected; not found: {notes['missing']}")
         p = write_universe(sel, a.out)

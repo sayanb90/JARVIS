@@ -1,0 +1,3 @@
+underlying,futures,option_expiries,strikes,no_options
+NIFTY,1,1,all,false
+BANKNIFTY,1,1,all,false

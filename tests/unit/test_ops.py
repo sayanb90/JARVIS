@@ -323,11 +323,15 @@ def test_crontab_lines_are_valid_and_point_at_real_commands():
 
 
 def test_crontab_runs_nothing_during_the_session_that_could_collide_with_the_feed():
+    # "segment fo" is the one deliberate exception: the fo feed is its own connection, meant to run
+    # alongside the equity feed during the session (runbook 17), confirmed live on 2026-10-30 that both
+    # run together without conflict.
     for ln in cron_lines():
         h, m = ln.split()[1], ln.split()[0]
         if h.isdigit() and m.isdigit():
             minutes = int(h) * 60 + int(m)
-            assert not (3 * 60 + 40 <= minutes < 10 * 60 + 5) or "health" in ln, f"job inside the feed window: {ln}"
+            assert not (3 * 60 + 40 <= minutes < 10 * 60 + 5) or "health" in ln or "segment fo" in ln, \
+                f"job inside the feed window: {ln}"
 
 
 @pytest.mark.parametrize("unit,module", [("jarvis-feed.service", "data_layer.upstox.feed"), ("jarvis-viewer.service", "webapp")])
