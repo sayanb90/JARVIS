@@ -149,6 +149,105 @@ class Lake:
         df = df.drop_duplicates("ts", keep="last").drop(columns="filename").reset_index(drop=True)   # newest segment wins
         return self.rollup(width_s, symbol, frame=df) if width_s > 1 and not df.empty else df
 
+    # -- futures and options (runbook section 17) ---------------------------
+    def fo_underlyings(self, day: str, interval: str = "1s") -> list[str]:
+        """Underlyings with derivative bars on `day` (joins that day's bar symbols against the
+        instrument table written by `fo_instruments import`); [] if nothing was ever imported."""
+        fo_path = self.dir / "instruments" / "fo.parquet"
+        if not fo_path.exists():
+            return []
+        syms = self.bar_symbols(day, interval)
+        if syms.empty:
+            return []
+        inst = pd.read_parquet(fo_path, columns=["symbol", "underlying"])
+        return sorted(inst[inst["symbol"].isin(syms["symbol"])]["underlying"].unique().tolist())
+
+    def _fo_day_stats(self, day: str, symbols: list[str], interval: str = "1s") -> pd.DataFrame:
+        """Per-contract stats for `day`: bars, volume, last close, and open interest first/last/change
+        (None when the lake has no `oi` column at all, e.g. before any derivative bars were collected)."""
+        cols = ["symbol", "bars", "volume", "close", "oi_last", "oi_first", "oi_change"]
+        folder = self.dir / "bars" / f"interval={interval}" / f"date={day}"
+        if not symbols or not any(folder.glob("*.parquet")):
+            return pd.DataFrame(columns=cols)
+        pattern = f"{folder}/*.parquet"
+        have = {r[0] for r in self.con.execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{pattern}', union_by_name=true)").fetchall()}
+        oi_sql = (", arg_max(oi, ts) FILTER (WHERE oi IS NOT NULL) AS oi_last, "
+                 "arg_min(oi, ts) FILTER (WHERE oi IS NOT NULL) AS oi_first") if "oi" in have \
+            else ", NULL AS oi_last, NULL AS oi_first"
+        self.con.register("_fo_wanted", pd.DataFrame({"symbol": symbols}))
+        try:
+            df = self.sql(f"""
+                WITH raw AS (
+                  SELECT * FROM read_parquet('{pattern}', union_by_name=true, filename=true)
+                  WHERE symbol IN (SELECT symbol FROM _fo_wanted)
+                  QUALIFY row_number() OVER (PARTITION BY symbol, ts ORDER BY filename DESC) = 1)
+                SELECT symbol, count(*)::BIGINT AS bars, coalesce(sum(volume), 0)::BIGINT AS volume,
+                       arg_max(close, ts) AS close{oi_sql}
+                FROM raw GROUP BY symbol""")
+        finally:
+            self.con.unregister("_fo_wanted")
+        df["oi_change"] = df["oi_last"] - df["oi_first"] if "oi" in have else None
+        return df
+
+    def fo_chain(self, day: str, underlying: str, expiry: str | None = None,
+                interval: str = "1s") -> dict:
+        """
+        Futures + option chain snapshot for one underlying on `day`.  `expiry` picks which option
+        expiry's chain to return; defaults to the nearest one with bars that day.  Spot is a proxy:
+        the nearest future's last close (no index LTP is collected).  {} if nothing to show.
+        """
+        fo_path = self.dir / "instruments" / "fo.parquet"
+        if not fo_path.exists():
+            return {}
+        inst = pd.read_parquet(fo_path)
+        inst = inst[inst["underlying"] == underlying]
+        syms = self.bar_symbols(day, interval)
+        if syms.empty or inst.empty:
+            return {}
+        inst = inst[inst["symbol"].isin(syms["symbol"])]
+        if inst.empty:
+            return {}
+        stats = self._fo_day_stats(day, inst["symbol"].tolist(), interval)
+        inst = inst.merge(stats, on="symbol", how="left")
+
+        fut = inst[inst["instrument_type"] == "FUT"].sort_values("expiry")
+        opts = inst[inst["instrument_type"].isin(["CE", "PE"])]
+        expiries = sorted(opts["expiry"].astype(str).unique().tolist())
+        if expiry not in expiries:
+            expiry = expiries[0] if expiries else None
+
+        def num(v):
+            return None if pd.isna(v) else (int(v) if float(v).is_integer() else float(v))
+
+        fut_rows = [{"symbol": r.symbol, "expiry": str(r.expiry), "close": num(r.close),
+                    "oi": num(r.oi_last), "oi_change": num(r.oi_change), "volume": num(r.volume),
+                    "bars": num(r.bars)} for r in fut.itertuples()]
+        spot = fut_rows[0]["close"] if fut_rows else None
+
+        chain, pcr, atm, total_call_oi, total_put_oi = [], None, None, 0, 0
+        if expiry:
+            exp_opts = opts[opts["expiry"].astype(str) == expiry]
+            ce = exp_opts[exp_opts["instrument_type"] == "CE"].set_index("strike")
+            pe = exp_opts[exp_opts["instrument_type"] == "PE"].set_index("strike")
+            strikes = sorted(set(ce.index) | set(pe.index))
+            atm = min(strikes, key=lambda k: abs(k - spot)) if spot and strikes else None
+            side = lambda row: {"symbol": row.symbol, "close": num(row.close), "oi": num(row.oi_last),  # noqa: E731
+                                "oi_change": num(row.oi_change), "volume": num(row.volume)} if row is not None else {}
+            for k in strikes:
+                c = ce.loc[k] if k in ce.index else None
+                p = pe.loc[k] if k in pe.index else None
+                chain.append({"strike": num(k), **{f"ce_{kk}": vv for kk, vv in side(c).items()},
+                              **{f"pe_{kk}": vv for kk, vv in side(p).items()}})
+            total_call_oi = int(ce["oi_last"].dropna().sum())
+            total_put_oi = int(pe["oi_last"].dropna().sum())
+            pcr = round(total_put_oi / total_call_oi, 3) if total_call_oi else None
+
+        return {"underlying": underlying, "date": day, "expiry": expiry, "expiries": expiries,
+                "spot": spot, "atm_strike": num(atm) if atm is not None else None,
+                "futures": fut_rows, "chain": chain, "pcr": pcr,
+                "total_call_oi": total_call_oi or None, "total_put_oi": total_put_oi or None}
+
     def day_overview(self, day: str, interval: str = "1s") -> pd.DataFrame:
         """
         One row per instrument for `day`: bars, volume, vwap, open/high/low/close, return %, average and

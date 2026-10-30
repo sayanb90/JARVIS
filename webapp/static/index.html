@@ -13,6 +13,7 @@
   <nav role="tablist">
     <button role="tab" id="tab-instrument" aria-selected="true">Instrument</button>
     <button role="tab" id="tab-overview" aria-selected="false">Market overview</button>
+    <button role="tab" id="tab-fo" aria-selected="false">F&amp;O</button>
   </nav>
 </header>
 
@@ -23,6 +24,8 @@
   <label>Instrument <select id="symbol"></select></label>
   <label>Bar width <select id="width"></select></label>
   <label>Volatility window <select id="volwin"></select></label>
+  <label>Underlying <select id="underlying"></select></label>
+  <label>Expiry <select id="expiry"></select></label>
   <span id="status" role="status" aria-live="polite"></span>
 </section>
 
@@ -52,6 +55,27 @@
     </div>
     <div class="table-wrap"><table id="table"></table></div>
     <p class="note">Realised volatility = sqrt(sum of squared 1-second log returns &times; 250), annualised. At 1-second sampling the bid-ask bounce inflates it relative to 1-minute estimates, so compare instruments with each other rather than with published figures.</p>
+  </section>
+
+  <section id="view-fo" hidden>
+    <div id="fo-empty" class="empty" hidden>
+      <h2>No futures or options yet</h2>
+      <p>Run <code>fo_instruments import</code> and <code>select</code>, then collect bars with <code>feed --segment fo</code> (runbook section 17) &mdash; or try the demo:
+      <code>python -m webapp.demo --with-derivatives</code> then <code>python -m webapp --lake lake_demo</code>.</p>
+    </div>
+    <div id="fo-body" hidden>
+      <div id="fo-cards" class="cards"></div>
+      <div class="chart-row">
+        <div id="chart-oi" class="chart" aria-label="Open interest by strike, calls vs. puts"></div>
+        <aside class="book" aria-label="Futures">
+          <h3>Futures</h3>
+          <div class="table-wrap"><table id="fo-futures"></table></div>
+        </aside>
+      </div>
+      <h3 class="section-h">Option chain &mdash; <span id="fo-chain-title"></span></h3>
+      <div class="table-wrap"><table id="fo-chain"></table></div>
+      <p class="note">Spot is a proxy (last close of the nearest future); no index LTP is collected. ATM row is highlighted. Click a price to open that contract in the Instrument tab.</p>
+    </div>
   </section>
 </main>
 <script src="/vendor/plotly.min.js"></script>

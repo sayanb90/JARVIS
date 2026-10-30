@@ -9,6 +9,8 @@ API (JSON):
   GET /api/symbols?date=YYYY-MM-DD                 instruments with bars that day
   GET /api/day?date=&symbol=&width=1&vol_window=300   summary + chart series for one instrument
   GET /api/overview?date=                          one row per instrument: volume, spread, volatility, ...
+  GET /api/fo/meta?date=                           underlyings with derivative bars that day
+  GET /api/fo/chain?date=&underlying=&expiry=      futures + option chain snapshot (section 17)
 
 The app never writes to the lake.  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
 for remote access, and/or set WEBAPP_USER and WEBAPP_PASSWORD to require HTTP Basic auth.
@@ -36,6 +38,7 @@ STATIC = Path(__file__).parent / "static"
 WIDTHS = (1, 5, 15, 30, 60, 300)                 # bar widths in seconds offered in the UI
 VOL_WINDOWS = (60, 300, 900, 1800)
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9&._-]{1,32}$")
+UNDERLYING_RE = re.compile(r"^[A-Za-z0-9&]{1,20}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -136,6 +139,23 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             overview_cache.clear()          # keep only the latest day in memory
             overview_cache[key] = _json_safe(lake().day_overview(date, interval).to_dict("records"))
         return overview_cache[key]
+
+    @app.get("/api/fo/meta")
+    def fo_meta(date: str):
+        _check_date(date)
+        return {"underlyings": lake().fo_underlyings(date, interval)}
+
+    @app.get("/api/fo/chain")
+    def fo_chain(date: str, underlying: str, expiry: str | None = None):
+        _check_date(date)
+        if not UNDERLYING_RE.match(underlying):
+            raise HTTPException(422, "invalid underlying")
+        if expiry is not None and not DATE_RE.match(expiry):
+            raise HTTPException(422, "expiry must be YYYY-MM-DD")
+        data = lake().fo_chain(date, underlying, expiry, interval)
+        if not data:
+            raise HTTPException(404, f"no derivatives for {underlying} on {date}")
+        return JSONResponse(_json_safe(data))
 
     @app.get("/vendor/plotly.min.js", include_in_schema=False)
     def plotly_js():
