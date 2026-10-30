@@ -34,7 +34,7 @@ from .. import tick_store
 from .. import lake as lake_mod
 from ..query import Lake
 from ..ticks import SESSION_CLOSE_UTC, SESSION_OPEN_UTC, Bar
-from .instruments import build_key_map
+from .instruments import segment_key_map
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +69,11 @@ def candles_to_bars(candles: list, symbol: str, interval: int = 1) -> list[Bar]:
             continue
         if not (SESSION_OPEN_UTC <= ts.time() < SESSION_CLOSE_UTC):
             continue
-        out.append(Bar(ts, symbol, "IN", o, h, lo, cl, v, None, None, None, None, None, None, src="rest"))
+        try:                                           # 7th field is open interest (zero for cash equities)
+            oi = int(float(c[6])) if len(c) > 6 and c[6] else None
+        except (TypeError, ValueError):
+            oi = None
+        out.append(Bar(ts, symbol, "IN", o, h, lo, cl, v, None, None, None, None, None, None, src="rest", oi=oi))
     return out
 
 
@@ -161,6 +165,8 @@ def main() -> None:
     ap.add_argument("--chunk-days", type=int, default=1, help="days per API call when using --from/--to")
     ap.add_argument("--interval", type=int, default=1, help="candle width in minutes")
     ap.add_argument("--source", choices=["auto", "intraday", "historical"], default="auto")
+    ap.add_argument("--segment", choices=["eq", "fo"], default="eq", help="eq: equity universe; fo: selected contracts")
+    ap.add_argument("--fo-file", default=None, help="contract list for --segment fo (default data/fo_universe.csv)")
     ap.add_argument("--limit", type=int, default=None, help="first N universe symbols only")
     ap.add_argument("--overwrite", action="store_true", help="replace existing bars instead of only filling gaps")
     ap.add_argument("--dump-raw", type=int, default=0, metavar="N", help="save the first N raw responses to logs/candles/")
@@ -177,11 +183,12 @@ def main() -> None:
         d0, d1 = a.d_from, a.d_to
     else:
         raise SystemExit("give --date, or both --from and --to")
-    key_map, _ = build_key_map()
+    key_map = segment_key_map(a.segment, a.fo_file)
     if a.limit:
         key_map = dict(list(key_map.items())[: a.limit])
     if not key_map:
-        raise SystemExit("no universe symbols with a usable ISIN")
+        raise SystemExit("no instruments to pull: " + ("run fo_instruments import and select" if a.segment == "fo"
+                                                       else "no universe symbols with a usable ISIN"))
     client = CandleClient(token)
     cur = d0
     total = {"bars_fetched": 0, "bars_written": 0, "skipped_existing": 0, "no_data": set()}

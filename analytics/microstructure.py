@@ -84,6 +84,16 @@ def day_realised_vol(df: pd.DataFrame) -> float:
     return float(np.sqrt((r ** 2).sum() * TRADING_DAYS))
 
 
+def _oi_summary(d: pd.DataFrame) -> dict:
+    """Open interest at the first and last bar that carries it (futures and options only; empty for cash equities)."""
+    if "oi" not in d.columns:
+        return {}
+    oi = pd.to_numeric(d["oi"], errors="coerce").dropna()
+    if oi.empty:
+        return {}
+    return {"oi_last": int(oi.iloc[-1]), "oi_first": int(oi.iloc[0]), "oi_change": int(oi.iloc[-1] - oi.iloc[0])}
+
+
 def day_summary(df: pd.DataFrame) -> dict:
     """One-row summary of a day for one instrument (values are plain floats/ints/None, JSON-safe)."""
     if df.empty:
@@ -118,6 +128,7 @@ def day_summary(df: pd.DataFrame) -> dict:
         "book_coverage_pct": num(book.mean() * 100),
         "crossed_books": int(crossed),
         "realised_vol_pct": None if np.isnan(rv) else rv * 100,
+        **_oi_summary(d),
     }
 
 
@@ -136,6 +147,9 @@ def series_payload(df: pd.DataFrame, vol_window_s: int = 300) -> dict:
     cols = ["open", "high", "low", "close", "volume", "cum_volume", "vwap", "n_ticks", "bid", "ask",
             "bid_qty", "ask_qty", "mid", "spread", "spread_bps", "imbalance", "vol_ann",
             "bid_qty_avg", "ask_qty_avg", "imbalance_avg", "spread_bps_avg"]
+    if "oi" in d.columns and pd.to_numeric(d["oi"], errors="coerce").notna().any():
+        d["oi"] = pd.to_numeric(d["oi"], errors="coerce").ffill()           # OI only changes occasionally; carry it forward
+        cols.append("oi")
     payload = {"ts": to_ist_strings(d["ts"])}
     for c in cols:
         col = d[c].astype("float64").round(6)

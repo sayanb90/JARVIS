@@ -11,3 +11,5 @@ data/fund_meta.csv
 .pytest_cache/
 htmlcov/
 lake_demo/
+data/fo_universe.csv
+data/NSE.json*

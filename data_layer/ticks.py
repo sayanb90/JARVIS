@@ -50,15 +50,16 @@ class Bar:
     bid_qty: Optional[int]
     ask_qty: Optional[int]
     src: str = "live"               # "live" (built from ticks) or "rest" (Upstox candle API)
+    oi: Optional[int] = None        # open interest at the last tick in the bar (futures and options only)
 
 
 class _Acc:
-    __slots__ = ("start", "o", "h", "l", "c", "vol", "pv", "n", "bid", "ask", "bq", "aq")
+    __slots__ = ("start", "o", "h", "l", "c", "vol", "pv", "n", "bid", "ask", "bq", "aq", "oi")
 
     def __init__(self, start: datetime, px: float) -> None:
         self.start, self.o, self.h, self.l, self.c = start, px, px, px, px
         self.vol = self.pv = self.n = 0
-        self.bid = self.ask = self.bq = self.aq = None
+        self.bid = self.ask = self.bq = self.aq = self.oi = None
 
 
 class BarAggregator:
@@ -94,7 +95,7 @@ class BarAggregator:
 
     def _to_bar(self, symbol: str, a: _Acc) -> Bar:
         return Bar(a.start, symbol, self.market, a.o, a.h, a.l, a.c, a.vol,
-                   (a.pv / a.vol) if a.vol else a.c, a.n, a.bid, a.ask, a.bq, a.aq)
+                   (a.pv / a.vol) if a.vol else a.c, a.n, a.bid, a.ask, a.bq, a.aq, oi=a.oi)
 
     def add(self, t: Tick) -> list[Bar]:
         start = self._bucket(t.ts)
@@ -124,6 +125,8 @@ class BarAggregator:
         acc.n += 1
         if t.bid is not None or t.ask is not None:
             acc.bid, acc.ask, acc.bq, acc.aq = t.bid, t.ask, t.bid_qty, t.ask_qty
+        if t.oi is not None:
+            acc.oi = t.oi
         return out
 
     def flush(self, now: datetime) -> list[Bar]:
