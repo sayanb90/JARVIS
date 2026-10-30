@@ -267,7 +267,7 @@ About 220 tests, about 98% coverage; CI fails below 90%. Layout, scenario list a
 
 ## Setting up the server
 
-Section 0 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md) takes you from a blank VPS to data flowing: hardening, install, `.env`, building the stock universe (`python -m data_layer.universe import-nse <NSE csv>`), the test day, going live with the files in `deploy/` (systemd services, cron, log rotation), backups (`python -m data_layer.backup`), and the daily routine including the morning token refresh. `python -m data_layer.health` is the two-minute daily check.
+Section 0 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md) takes you from a blank VPS to data flowing: hardening, install, `.env`, building the stock universe (`python -m data_layer.universe import-nse <NSE csv>`), the test day, going live with the files in `deploy/` (systemd services, cron, log rotation), backups (`python -m data_layer.backup`), and the daily routine (the morning token refresh is skippable once the Analytics Token is adopted, section 13.2). `python -m data_layer.health` is the two-minute daily check.
 
 ---
 
