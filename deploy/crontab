@@ -1,5 +1,6 @@
 # JARVIS cron jobs for the `jarvis` user.  Install:  crontab deploy/crontab      (server clock must be UTC)
-# Times are UTC.  NSE session is 03:45-10:00; the live feed runs as the jarvis-feed service, not from cron.
+# Times are UTC.  NSE session is 03:45-10:00; the equity live feed runs as the jarvis-feed service, not from
+# cron.  The futures/options feed (below) runs once a day from cron instead, by design -- see section 17.
 SHELL=/bin/bash
 PATH=/home/jarvis/JARVIS/.venv/bin:/usr/local/bin:/usr/bin:/bin
 JARVIS=/home/jarvis/JARVIS
@@ -18,3 +19,11 @@ JARVIS=/home/jarvis/JARVIS
 15 3 * * 1-5   cd $JARVIS && python -m data_layer.health >> logs/health.log 2>&1
 # End-of-day health report, after the feed has compacted the day (10:05 UTC) and Yahoo's daily bar exists
 30 11 * * 1-5  cd $JARVIS && python -m data_layer.health --after-close >> logs/health.log 2>&1
+
+# Futures and options (NSE_FO; runbook section 17): refresh the instrument master and roll the tracked
+# watchlist (data/fo_watchlist.csv) to today's nearest expiry before the session opens.
+25 3 * * 1-5   cd $JARVIS && python -m data_layer.upstox.fo_instruments import --download >> logs/fo-select.log 2>&1 && python -m data_layer.upstox.fo_instruments select --watchlist data/fo_watchlist.csv >> logs/fo-select.log 2>&1
+# Run one full fo session (same 03:40 UTC start as the equity service). --once exits once that day's
+# session closes and is compacted, so cron runs it fresh every weekday -- this is how the roll above
+# takes effect, since a long-lived process would keep the contract list it started with (section 17.6).
+40 3 * * 1-5   cd $JARVIS && python -m data_layer.upstox.feed --once --segment fo >> logs/fo-feed.log 2>&1

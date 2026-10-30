@@ -279,3 +279,62 @@ def test_segment_key_map_selects_the_universe(world, table):
     assert list(segment_key_map("fo", path).values()) == list(monkey.symbol)
     world.set_universe({"IN": ["RELIANCE.NS"]})
     assert all(k.startswith("NSE_EQ|") for k in segment_key_map("eq"))
+
+
+# -- watchlist: the tracked per-underlying subscription list ---------------------
+def test_read_watchlist_parses_all_strikes_and_applies_defaults(tmp_path):
+    p = tmp_path / "wl.csv"
+    p.write_text("underlying,futures,option_expiries,strikes,no_options\n"
+                 "NIFTY,1,1,all,false\n"
+                 "RELIANCE,,,3,true\n")
+    rows = fo.read_watchlist(p)
+    assert rows[0] == {"underlying": "NIFTY", "futures": 1, "option_expiries": 1, "strikes": 10**6, "no_options": False}
+    assert rows[1] == {"underlying": "RELIANCE", "futures": 2, "option_expiries": 1, "strikes": 3, "no_options": True}
+
+
+def test_select_from_watchlist_gives_each_underlying_its_own_window(table):
+    rows = [{"underlying": "NIFTY", "futures": 1, "option_expiries": 1, "strikes": 10**6, "no_options": False},
+            {"underlying": "RELIANCE", "futures": 1, "option_expiries": 0, "strikes": 0, "no_options": True},
+            {"underlying": "NOSUCH", "futures": 1, "option_expiries": 1, "strikes": 1, "no_options": False}]
+    sel, notes = fo.select_from_watchlist(table, rows, DAY, spot={})
+    nifty_opts = sel[(sel.underlying == "NIFTY") & (sel.instrument_type != "FUT")]
+    assert sorted(nifty_opts.strike.unique()) == list(range(24000, 25001, 100))         # whole ladder, "all" honoured
+    reliance = sel[sel.underlying == "RELIANCE"]
+    assert set(reliance.instrument_type) == {"FUT"} and len(reliance) == 1              # no_options respected
+    assert notes["missing"] == ["NOSUCH"] and notes["no_spot"] == ["NIFTY"]
+    assert list(sel.columns) == fo.UNIVERSE_COLUMNS
+
+
+def test_select_from_watchlist_empty_rows_is_a_frame():
+    sel, notes = fo.select_from_watchlist(pd.DataFrame(columns=fo.COLUMNS), [], DAY)
+    assert sel.empty and list(sel.columns) == fo.UNIVERSE_COLUMNS and notes == {"missing": [], "no_spot": []}
+
+
+def test_cli_select_from_watchlist_default_path_and_explicit_path(world, tmp_path, capsys):
+    f = tmp_path / "m.json"
+    f.write_text(json.dumps(master_records()))
+    fo.main(["import", "--file", str(f)])
+    capsys.readouterr()
+    wl = world.data / "fo_watchlist.csv"
+    wl.write_text("underlying,futures,option_expiries,strikes,no_options\n"
+                 "NIFTY,1,1,all,false\n"
+                 "RELIANCE,1,0,0,true\n")
+    fo.main(["select", "--day", "2026-10-23"])                                         # no --underlying -> default watchlist
+    out = capsys.readouterr().out
+    sel = pd.read_csv(world.data / "fo_universe.csv")
+    assert set(sel.underlying) == {"NIFTY", "RELIANCE"} and "no spot given for ['NIFTY']" in out
+    assert len(sel[(sel.underlying == "NIFTY") & (sel.instrument_type == "CE")]) == 11  # whole ladder
+    assert set(sel[sel.underlying == "RELIANCE"].instrument_type) == {"FUT"}
+
+    other = tmp_path / "other_wl.csv"
+    other.write_text("underlying,futures,option_expiries,strikes,no_options\nRELIANCE,1,0,0,true\n")
+    fo.main(["select", "--watchlist", str(other), "--day", "2026-10-23"])
+    assert set(pd.read_csv(world.data / "fo_universe.csv").underlying) == {"RELIANCE"}
+
+
+def test_cli_select_with_no_underlying_and_no_watchlist_file_errors(world, tmp_path):
+    f = tmp_path / "m.json"
+    f.write_text(json.dumps(master_records()))
+    fo.main(["import", "--file", str(f)])
+    with pytest.raises(SystemExit, match="not found"):
+        fo.main(["select", "--day", "2026-10-23"])

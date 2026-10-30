@@ -618,7 +618,8 @@ Tick the Gate 1 and Gate U1 boxes in sections 4 and 13.3, record the extended-to
 |---|---|---|
 | Instrument table | `data_layer/upstox/fo_instruments.py`, `lake/instruments/fo.parquet` | Parses Upstox's NSE instrument file into one row per contract: key, symbol, underlying, FUT/CE/PE, expiry, strike, lot size, tick size, weekly flag, `first_seen`, `last_seen`. Contracts that vanish from later files (expired) are **kept**, so old bars stay resolvable |
 | Contract symbol | same | Upstox's trading symbol with spaces as underscores, for example `NIFTY_24500_CE_27_OCT_26`, `NIFTY_FUT_27_OCT_26`. Unique per contract, valid after expiry |
-| Selection | `fo_instruments select` | Nearest N futures expiries; for the nearest option expiries, K strikes either side of at-the-money. Writes `data/fo_universe.csv` |
+| Selection | `fo_instruments select` | Nearest N futures expiries; for the nearest option expiries, K strikes either side of at-the-money (K large enough, or `strikes: all` in the watchlist, pulls the whole chain). Writes `data/fo_universe.csv` |
+| Subscription watchlist | `data/fo_watchlist.csv` (tracked in git, unlike the generated `fo_universe.csv`) | One row per underlying with its own futures/option-expiry/strike window; `fo_instruments select --watchlist ...` (default path, so plain `select` with no `--underlying` uses it) runs the selection per row and combines the results. This is the "what do we subscribe to" config for the derivatives pipeline |
 | Live feed | `feed --segment fo` | Same WebSocket, same 1-second bars. Bars gain `oi` (open interest at the last tick in the bar) |
 | After-close pull | `candles --segment fo` | REST minute candles; the 7th field of each candle is read as open interest |
 | Storage | `lake/bars/interval=1s/...` | The same tree and files as equities; `oi` is a nullable column, so old files and equity rows are unaffected |
@@ -629,15 +630,16 @@ Tick the Gate 1 and Gate U1 boxes in sections 4 and 13.3, record the extended-to
 - **Same pipeline, one extra column.** Derivatives use the equity tables with an `oi` column; no second collector or tree (the earlier sketch in 9.4 assumed a separate `lake_fno/`; revisit only if volume forces it, see 17.6).
 - **Instrument table is history-preserving.** A contract stays in the table after it leaves the exchange file.
 - **Selection is explicit and small.** You choose underlyings and window width; nothing subscribes to a whole chain by default. `data/fo_universe.csv` is a working file (git-ignored); selected contracts that have expired are skipped with a warning.
+- **Watchlist-driven selection for the live pipeline.** `data/fo_watchlist.csv` is the tracked list of what to subscribe to (one row per underlying, its own futures/option-expiry/strike window, `strikes: all` for the whole chain); cron re-runs `select` from it each morning before the session so the nearest-expiry roll happens automatically (17.4, 17.6). A one-off `--underlying ...` pull still works exactly as before and ignores the watchlist.
 - **At-the-money level.** `select` takes `--spot NIFTY=24500`. Without it, it uses the last close of the nearest future if bars exist in the lake, else the middle of the strike ladder (printed as a warning: only a rough proxy).
 - **Session.** NSE F&O trades 09:15-15:30 IST like cash equities, so the existing session window and bar bucketing apply unchanged. Commodity or currency derivatives are out of scope.
 
 ### 17.3 Unverified assumptions (all from SDK and community material; the Upstox docs site is not reachable from the build sandbox)
-1. Instrument file URL `https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz` and its field names: `segment` = `NSE_FO`, `instrument_type` FUT/CE/PE, `instrument_key`, `trading_symbol`, `underlying_symbol`, `expiry` (epoch ms), `strike_price`, `lot_size`, `tick_size`, `weekly`. Run `peek` to compare.
-2. Futures and options frames carry open interest in `marketFF.oi` (full mode) or `firstLevelWithGreeks.oi` (option_greeks mode); an OI of zero is stored as empty.
-3. For derivatives, cumulative `vtt` is in the same unit the exchange reports (check whether that is contracts or quantity = contracts x lot size; bar volume and VWAP inherit it).
-4. REST candles carry open interest as the 7th element.
-5. Subscription limits per connection and per plan are unknown. Basic allows 2 WebSocket connections, Plus 5 (the plan table); the number of instrument keys per connection is not shown there.
+1. ~~Instrument file URL ... field names unverified~~ **Confirmed 2026-10-30** against a live `import --download` + `peek --underlying NIFTY`: `segment` NSE_FO, `instrument_type` FUT/CE/PE, `instrument_key` `NSE_FO|<token>`, `trading_symbol`, `underlying_symbol`, `expiry` (epoch ms), `strike_price`, `lot_size`, `tick_size`, `weekly` all present and named exactly as assumed.
+2. Futures and options frames carry open interest in `marketFF.oi` (full mode) or `firstLevelWithGreeks.oi` (option_greeks mode); an OI of zero is stored as empty. **Partially confirmed 2026-10-30**: live `oi` populated on 100% of bars for contracts that traded; a zero/empty case was not observed in the short test window.
+3. For derivatives, cumulative `vtt` is in the same unit the exchange reports (contracts vs. quantity = contracts x lot size) is still open; not isolated in the 2026-10-30 test.
+4. ~~REST candles carry open interest as the 7th element~~ **Confirmed 2026-10-30**: dumped raw candle rows end `..., volume, oi]`, e.g. `[..., 0, 21240]`.
+5. ~~Subscription limits per connection and per plan are unknown~~ **Confirmed 2026-10-30**: 518 NSE_FO instruments (NIFTY + BANKNIFTY, nearest expiry, every strike) subscribed on one connection with no rejection; `verify fo` showed clean bars and 100%-median open-interest coverage. Still unknown: the actual ceiling above 518, and whether it differs on a different plan tier.
 
 ### 17.4 Commands
 ```bash
@@ -646,7 +648,9 @@ python -m data_layer.upstox.fo_instruments peek --file data/NSE.json.gz --underl
 python -m data_layer.upstox.fo_instruments list --underlying NIFTY --type FUT
 python -m data_layer.upstox.fo_instruments select --underlying NIFTY BANKNIFTY RELIANCE \
         --futures 2 --option-expiries 1 --strikes 5 --spot NIFTY=24500 BANKNIFTY=52000
-python -m data_layer.upstox.feed --once --segment fo --limit 20 --dump-frames 5     # during the session
+python -m data_layer.upstox.fo_instruments select --watchlist data/fo_watchlist.csv   # tracked list; default when --underlying is omitted
+python -m data_layer.upstox.feed --once --segment fo --limit 20 --dump-frames 5     # during the session (smoke test)
+python -m data_layer.upstox.feed --once --segment fo                                # the real selection, no --limit
 python -m data_layer.upstox.candles --segment fo --date 2026-10-30 --limit 10 --dump-raw 3   # after the close
 python -m data_layer.verify fo --date 2026-10-30                          # live 1s bars; add --interval 1m for REST bars
 ```
@@ -662,20 +666,22 @@ Use real spot levels from the Upstox app. Prices in the examples are placeholder
 7. **Look at it:** `python -m webapp --lake lake` and open a future: open interest should move through the day.
 
 **Pass when:**
-- [ ] `import` finds NSE_FO contracts and `peek` shows the field names in 17.3
-- [ ] `select` writes `data/fo_universe.csv` with futures and options
-- [ ] the feed subscribes the contracts without error and writes bars (log shows `bars_written` rising)
-- [ ] `verify fo` prints no FAIL: open interest present on most bars of liquid contracts and not constant all day
-- [ ] bar volume for a liquid future is plausible against the app (state units: contracts or quantity)
-- [ ] REST candles have a seventh field and `verify fo --interval 1m` passes
-- [ ] record: instruments per subscribe that worked ______, tick rate of the nearest NIFTY future ______, `du -sh lake` growth ______
+- [x] `import` finds NSE_FO contracts and `peek` shows the field names in 17.3 -- 33,541 contracts, 224 underlyings; fields matched exactly
+- [x] `select` writes `data/fo_universe.csv` with futures and options -- 518 contracts (NIFTY + BANKNIFTY, nearest expiry, every strike, via the watchlist)
+- [x] the feed subscribes the contracts without error and writes bars (log shows `bars_written` rising) -- all 518 subscribed on one connection, no rejection
+- [x] `verify fo` prints no FAIL: open interest present on most bars of liquid contracts and not constant all day -- no FAIL; 354 of 518 contracts traded (164 far strikes never did, expected), open-interest coverage min/median 100%
+- [ ] bar volume for a liquid future is plausible against the app -- not checked against the Upstox app itself; `n_ticks`/`oi` looked sane (see below) but this box has no human next to the app to cross-check
+- [x] REST candles have a seventh field and `verify fo --interval 1m` passes -- confirmed, no FAIL
+- [x] record: instruments per subscribe that worked **518** (no rejection at that count), tick rate of the nearest NIFTY future **~1.3 ticks/s** (60 ticks over a ~48s sample), `du -sh lake` growth **5.9M** (short test window only -- re-measure after a full session)
 
-**Bring back:** the `import` output, `peek` output, `logs/fo-test.log` head and tail, the `verify fo` output, `logs/frames/*.bin`, `logs/candles/*.json`.
+**2026-10-30 test notes:** SENSEX was explicitly scoped out of this round -- it trades on BSE (segment BFO), and this pipeline only downloads/parses NSE's instrument file (`MASTER_URL`, `SEGMENT = "NSE_FO"` in `fo_instruments.py`). Adding it means a second instrument-file source with its own unverified field names; tracked as a follow-up, not started.
 
 ### 17.6 Limits and next steps
 - No history: collection is forward only. The plan table shows OHLC for expired contracts as a Plus feature of the developer API; not built, endpoint and depth unknown (open decision O13).
-- Not built: implied volatility and greeks computed locally, option-chain snapshots, roll logic that picks the next contract automatically each day (re-run `select`; the nearest-expiry rule does the roll), a chain view in the viewer, instruments for other segments.
-- Volume: one index with a few expiries and 11 strikes each way is a few hundred contracts; at 1-second bars that is the equity volume again. Measure after the first session before widening (`du -sh lake`).
+- **BSE/BFO (SENSEX and other BSE-listed derivatives) is not supported at all.** `fo_instruments.py` only downloads and parses NSE's instrument file; there is no BSE instrument source, no BFO segment handling, and no field-name verification for it (the Upstox docs site has been unreachable from every build so far, so even NSE's field names needed a live `peek` to confirm -- 17.3 item 1). Scoped out of the 2026-10-30 round; treat as new work, not a tweak.
+- Roll logic **is now semi-automated**: `data/fo_watchlist.csv` (tracked in git) plus `fo_instruments select --watchlist ...` (the default when `--underlying` is omitted) re-select the nearest expiry/full chain on demand, and the crontab entries in `deploy/crontab` run that refresh and then one `feed --once --segment fo` session every weekday morning, so the roll happens without a human re-typing the `select` command. What is still manual: widening the watchlist to new underlyings, and noticing if a refresh silently finds nothing (no alerting wired up yet -- `logs/fo-select.log` and `logs/fo-feed.log` are the only record).
+- Not built: implied volatility and greeks computed locally, option-chain snapshots, a chain view in the viewer, instruments for other segments.
+- Volume: NIFTY + BANKNIFTY at the nearest expiry with every strike was 518 selected contracts (354 that actually traded in the short test). At 1-second bars that is roughly the equity universe's volume again, now running on a separate daily cron invocation rather than the long-lived equity service -- measure `du -sh lake` growth after a full session before adding more underlyings or expiries.
 - The viewer's overview tab and `day_overview` do not yet include open interest.
 
 ## 15. Automated tests
