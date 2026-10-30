@@ -173,7 +173,10 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(STATIC / "index.html")
+        # no-cache (not no-store): the browser must revalidate via ETag/Last-Modified every time rather than
+        # guess freshness heuristically, since this page and app.js change often -- a stale copy otherwise
+        # survives reloads and silently keeps running old JS against a new API.
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/static/{name}", include_in_schema=False)
     def static_file(name: str):
@@ -181,7 +184,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         f = STATIC / name
         if "/" in name or "\\" in name or not f.is_file() or f.parent.resolve() != STATIC.resolve():
             raise HTTPException(404)
-        return FileResponse(f)
+        return FileResponse(f, headers={"Cache-Control": "no-cache"})
 
     return app
 

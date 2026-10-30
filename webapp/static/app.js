@@ -6,7 +6,7 @@ const fmtInt = (x) => (x == null ? '–' : Math.round(x).toLocaleString('en-IN')
 const WIDTH_LABEL = { 1: '1 second', 5: '5 seconds', 15: '15 seconds', 30: '30 seconds', 60: '1 minute', 300: '5 minutes' };
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
 
-const state = { meta: null, day: null, symbol: null, width: 1, volwin: 300, tab: 'instrument', data: null, overview: [], sort: ['volume', -1], underlying: null, expiry: null, foData: null };
+const state = { meta: null, day: null, symbol: null, width: 1, volwin: 300, tab: 'instrument', data: null, overview: [], sort: ['volume', -1], underlying: null, expiry: null, foData: null, foContract: null, foContractData: null };
 let reqId = 0;
 
 async function api(path, params) {
@@ -82,31 +82,19 @@ function setTab(tab, reload = true) {
   $('view-instrument').hidden = tab !== 'instrument';
   $('view-overview').hidden = tab !== 'overview';
   $('view-fo').hidden = tab !== 'fo';
-  for (const id of ['symbol', 'width', 'volwin']) $(id).closest('label').style.display = tab === 'instrument' ? '' : 'none';
-  for (const id of ['underlying', 'expiry']) $(id).closest('label').style.display = tab === 'fo' ? '' : 'none';
+  $('symbol').closest('label').style.display = tab === 'instrument' ? '' : 'none';
+  for (const id of ['width', 'volwin']) $(id).closest('label').style.display = (tab === 'instrument' || tab === 'fo') ? '' : 'none';
+  for (const id of ['underlying', 'expiry', 'fo-contract']) $(id).closest('label').style.display = tab === 'fo' ? '' : 'none';
   if (reload) {
     if (tab === 'fo') loadFoUnderlyings().catch((e) => setStatus(e.message, true));
     else refresh();
   }
 }
 
-function jumpToSymbol(sym) {
-  if (!sym) return;
-  state.symbol = sym;
-  setTab('instrument', false);
-  // /api/symbols is equities-only now (F&O has its own tab), so an F&O contract would not survive a
-  // loadSymbols() refresh: add it to the dropdown directly instead, same as a normal equity jump.
-  if (!$('symbol').querySelector(`option[value="${sym}"]`)) {
-    const opt = document.createElement('option');
-    opt.value = sym; opt.textContent = sym + ' (F&O)';
-    $('symbol').prepend(opt);
-  }
-  $('symbol').value = sym;
-  refresh();
-}
+/* ---------- instrument view (reused by the Equities tab and the F&O contract subsection) ---------- */
+const EQUITY_IDS = { cards: 'cards', chart: 'chart', bookBody: 'book-body', note: 'note' };
 
-/* ---------- instrument view ---------- */
-function cards(s) {
+function cards(s, targetId = 'cards') {
   const sign = (v) => (v == null ? '' : v >= 0 ? 'pos' : 'neg');
   const items = [
     ['Open', fmt(s.open)], ['High', fmt(s.high)], ['Low', fmt(s.low)], ['Close', fmt(s.close)],
@@ -117,12 +105,12 @@ function cards(s) {
     ['Bars', fmtInt(s.bars)], ['Book coverage', fmt(s.book_coverage_pct, 0) + '%'],
   ];
   if (s.oi_last != null) items.push(['Open interest', fmtInt(s.oi_last)], ['OI change', `<span class="${sign(s.oi_change)}">${s.oi_change >= 0 ? '+' : ''}${fmtInt(s.oi_change)}</span>`]);
-  $('cards').innerHTML = items.map(([k, v]) => `<div class="card"><b>${k}</b><span>${v}</span></div>`).join('');
+  $(targetId).innerHTML = items.map(([k, v]) => `<div class="card"><b>${k}</b><span>${v}</span></div>`).join('');
 }
 
-function renderInstrument(d) {
+function renderInstrument(d, ids = EQUITY_IDS) {
   const s = d.series, S = d.summary;
-  cards(S);
+  cards(S, ids.cards);
   const fg = css('--fg'), grid = css('--grid'), up = css('--up'), down = css('--down'), acc = css('--accent'), muted = css('--muted'), orange = css('--orange'), purple = css('--purple'), teal = css('--teal');
   const step = d.width <= 5 ? 'hv' : 'linear';
   // five stacked panels sharing one time axis; domains from the bottom up
@@ -167,20 +155,20 @@ function renderInstrument(d) {
     yaxis8: { overlaying: 'y', side: 'right', showgrid: false, title: { text: 'Open interest', font: { size: 11 }, standoff: 8 }, tickfont: { size: 10 }, anchor: 'x', visible: !!(d.has_oi && s.oi) },
   };
   // y4's overlay (imbalance) must be declared after its base axis; Plotly handles it, but cumulative uses y2's domain
-  Plotly.react('chart', tr, layout, { responsive: true, displaylogo: false, scrollZoom: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
-  const el = $('chart');
+  Plotly.react(ids.chart, tr, layout, { responsive: true, displaylogo: false, scrollZoom: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
+  const el = $(ids.chart);
   el.removeAllListeners && el.removeAllListeners('plotly_hover');
-  el.on('plotly_hover', (ev) => bookAt(ev.points[0].pointIndex));
-  $('note').textContent = d.has_book ? '' : 'This day has no book data (bars from the REST candle API carry no bid/ask), so the book, spread and imbalance panels are empty.';
-  bookAt(Math.floor(t.length / 2));
+  el.on('plotly_hover', (ev) => bookAt(d, ev.points[0].pointIndex, ids));
+  $(ids.note).textContent = d.has_book ? '' : 'This day has no book data (bars from the REST candle API carry no bid/ask), so the book, spread and imbalance panels are empty.';
+  bookAt(d, Math.floor(t.length / 2), ids);
 }
 
-function bookAt(i) {
-  const d = state.data; if (!d) return;
+function bookAt(d, i, ids = EQUITY_IDS) {
+  if (!d) return;
   const s = d.series;
   if (i == null || s.ts[i] == null) return;
   const row = (cls, label, px, q) => `<tr class="${cls}"><td>${label}</td><td>${px == null ? '–' : fmt(px)}</td><td>${q == null ? '–' : fmtInt(q)}</td></tr>`;
-  $('book-body').innerHTML = `<div class="muted" style="margin-bottom:6px">${s.ts[i]} IST</div>
+  $(ids.bookBody).innerHTML = `<div class="muted" style="margin-bottom:6px">${s.ts[i]} IST</div>
     <table class="ladder"><tr class="muted"><td></td><td>Price</td><td>Size</td></tr>
     ${row('ask', 'Ask', s.ask[i], s.ask_qty[i])}${row('bid', 'Bid', s.bid[i], s.bid_qty[i])}</table>
     <div style="margin-top:8px">Spread <b>${s.spread[i] == null ? '–' : fmt(s.spread[i])}</b> (${fmt(s.spread_bps[i], 2)} bps)<br>
@@ -258,7 +246,7 @@ function renderFoFutures(d) {
   $('fo-futures').innerHTML = '<thead><tr><th>Expiry</th><th>LTP</th><th>OI</th><th>OI chg</th><th>Volume</th></tr></thead><tbody>' +
     d.futures.map((r) => `<tr data-s="${r.symbol}"><td>${r.expiry}</td><td>${fmt(r.close)}</td><td>${fmtInt(r.oi)}</td><td>${chg(r.oi_change)}</td><td>${fmtInt(r.volume)}</td></tr>`).join('') +
     '</tbody>';
-  $('fo-futures').querySelectorAll('tbody tr').forEach((tr) => tr.onclick = () => jumpToSymbol(tr.dataset.s));
+  $('fo-futures').querySelectorAll('tbody tr').forEach((tr) => tr.onclick = () => selectFoContract(tr.dataset.s));
 }
 
 function renderFoChain(d) {
@@ -275,7 +263,7 @@ function renderFoChain(d) {
   $('fo-chain').innerHTML = `<thead><tr><th colspan="4">Calls</th><th></th><th colspan="4">Puts</th></tr>
     <tr><th>OI</th><th>OI chg</th><th>Vol</th><th>LTP</th><th>Strike</th><th>LTP</th><th>Vol</th><th>OI chg</th><th>OI</th></tr></thead>
     <tbody>${rows}</tbody>`;
-  $('fo-chain').querySelectorAll('td[data-s]').forEach((td) => td.onclick = () => jumpToSymbol(td.dataset.s));
+  $('fo-chain').querySelectorAll('td[data-s]').forEach((td) => td.onclick = () => selectFoContract(td.dataset.s));
 }
 
 function renderFoOiChart(d) {
@@ -300,9 +288,54 @@ function renderFoOiChart(d) {
 }
 
 function renderFo(d) {
-  if (!d || (!d.futures.length && !d.chain.length)) { $('fo-empty').hidden = false; $('fo-body').hidden = true; return; }
+  if (!d || (!d.futures.length && !d.chain.length)) {
+    $('fo-empty').hidden = false; $('fo-body').hidden = true;
+    fillSelect($('fo-contract'), []); state.foContract = null; renderFoContractEmpty();
+    return;
+  }
   $('fo-empty').hidden = true; $('fo-body').hidden = false;
   foCards(d); renderFoFutures(d); renderFoChain(d); renderFoOiChart(d);
+  fillFoContractSelect(d);
+}
+
+/* ---------- F&O contract detail: the same instrument chart as Equities, for one future/option ---------- */
+const FO_CONTRACT_IDS = { cards: 'fo-contract-cards', chart: 'fo-contract-chart', bookBody: 'fo-contract-book-body', note: 'fo-contract-note' };
+
+function fillFoContractSelect(d) {
+  const items = [];
+  d.futures.forEach((f) => items.push([f.symbol, `${f.symbol} (FUT)`]));
+  d.chain.forEach((r) => {
+    if (r.ce_symbol) items.push([r.ce_symbol, `${r.strike} CE`]);
+    if (r.pe_symbol) items.push([r.pe_symbol, `${r.strike} PE`]);
+  });
+  const sel = items.find(([v]) => v === state.foContract) ? state.foContract : (items[0] ? items[0][0] : null);
+  fillSelect($('fo-contract'), items, sel);
+  selectFoContract(sel);
+}
+
+function renderFoContractEmpty() {
+  $('fo-contract-empty').hidden = false; $('fo-contract-body').hidden = true;
+}
+
+function selectFoContract(sym) {
+  if (!sym) { state.foContract = null; renderFoContractEmpty(); return; }
+  state.foContract = sym;
+  $('fo-contract').value = sym;
+  loadFoContract(sym);
+}
+
+async function loadFoContract(sym) {
+  if (!sym) return;
+  const id = ++reqId;
+  setStatus('Loading ' + sym + '…');
+  try {
+    const d = await api('/api/day', { date: state.day, symbol: sym, width: state.width, vol_window: state.volwin });
+    if (id !== reqId) return;
+    state.foContractData = d;
+    $('fo-contract-empty').hidden = true; $('fo-contract-body').hidden = false;
+    renderInstrument(d, FO_CONTRACT_IDS);
+    setStatus(`${sym} · ${state.day} · ${fmtInt(d.series.ts.length)} bars of ${WIDTH_LABEL[d.width]} (times in IST)`);
+  } catch (e) { if (id === reqId) setStatus(e.message, true); }
 }
 
 /* ---------- wiring ---------- */
@@ -311,10 +344,11 @@ $('date').onchange = (e) => {
   (state.tab === 'fo' ? loadFoUnderlyings() : loadSymbols()).catch((x) => setStatus(x.message, true));
 };
 $('symbol').onchange = (e) => { state.symbol = e.target.value; refresh(); };
-$('width').onchange = (e) => { state.width = +e.target.value; refresh(); };
-$('volwin').onchange = (e) => { state.volwin = +e.target.value; refresh(); };
+$('width').onchange = (e) => { state.width = +e.target.value; state.tab === 'fo' ? loadFoContract(state.foContract) : refresh(); };
+$('volwin').onchange = (e) => { state.volwin = +e.target.value; state.tab === 'fo' ? loadFoContract(state.foContract) : refresh(); };
 $('underlying').onchange = (e) => { state.underlying = e.target.value; state.expiry = null; refreshFo().catch((x) => setStatus(x.message, true)); };
 $('expiry').onchange = (e) => { state.expiry = e.target.value; refreshFo().catch((x) => setStatus(x.message, true)); };
+$('fo-contract').onchange = (e) => selectFoContract(e.target.value);
 $('tab-instrument').onclick = () => setTab('instrument');
 $('tab-overview').onclick = () => setTab('overview');
 $('tab-fo').onclick = () => setTab('fo');
