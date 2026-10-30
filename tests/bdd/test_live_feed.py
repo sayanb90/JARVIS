@@ -133,7 +133,7 @@ def collect(ctx, token, through_run_day=False, sigint_when_sent=False):
                 else:
                     await asyncio.wait_for(feed.run_session(stop), timeout=20)
                     from data_layer import tick_store
-                    tick_store.compact_day(feed.label, DAY, ctx.w.lakedir)
+                    tick_store.compact_ticks_day(DAY, ctx.w.lakedir)
             except RuntimeError as exc:
                 ctx.error = str(exc)
             finally:
@@ -190,8 +190,10 @@ def _bar_count(ctx, sym, n, first, last):
 
 @then("the bars were stored at one-second resolution")
 def _one_second(ctx):
-    assert ctx.feed.label == "1s" and (ctx.w.lakedir / "bars/interval=1s").exists()
-    assert not (ctx.w.lakedir / "bars/interval=1m").exists()
+    # SCRUM-77: the live feed stores raw ticks, not pre-aggregated bars; one-second resolution is
+    # what the query layer derives from them (verified by the other bar-shape assertions in this file).
+    assert (ctx.w.lakedir / "ticks").exists()
+    assert not (ctx.w.lakedir / "bars").exists()
 
 
 @then(parsers.parse("{sym} has exactly 1 bar at {hms} built from 3 updates with the first as open and the last as close"))
@@ -263,5 +265,5 @@ def _none(ctx):
 
 @then("the stored bars are compacted into one file for the day")
 def _compacted(ctx):
-    folder = ctx.w.lakedir / "bars/interval=1s/date=2026-10-23"
-    assert [p.name for p in folder.iterdir()] == ["bars.parquet"]
+    folder = ctx.w.lakedir / "ticks/date=2026-10-23"
+    assert [p.name for p in folder.iterdir()] == ["ticks.parquet"]

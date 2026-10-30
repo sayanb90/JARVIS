@@ -8,9 +8,6 @@ import pytest
 
 from data_layer import tick_store, verify
 from data_layer.ticks import BarAggregator, Tick
-from data_layer.upstox.feed import FeedProcessor, UpstoxFeed
-
-from tests.unit.test_upstox_adapter import KMAP
 
 OPEN = datetime(2026, 10, 26, 3, 45, 0)
 DAY = date(2026, 10, 26)
@@ -29,11 +26,12 @@ def random_ticks(seed, minutes=30, sym="A.NS", start=OPEN):
 
 
 # -- defaults ------------------------------------------------------------------------------------
-def test_everything_defaults_to_one_second(tmp_path):
+def test_bar_aggregator_defaults_to_one_second():
+    # SCRUM-77: FeedProcessor/UpstoxFeed no longer aggregate bars at all (they persist raw ticks
+    # unconditionally, at whatever resolution Upstox sends), so there is no "default interval" left
+    # to assert on them. BarAggregator itself is still a real utility (used below, and conceptually
+    # mirrored by Lake._ticks_bars_sql for on-read aggregation) and still defaults to one second.
     assert BarAggregator().interval == timedelta(seconds=1)
-    assert FeedProcessor(KMAP).agg.interval == timedelta(seconds=1)
-    f = UpstoxFeed("T", KMAP, lake_dir=tmp_path)
-    assert f.label == "1s" and f.proc.agg.interval == timedelta(seconds=1)
 
 
 # -- aggregation at 1 s ----------------------------------------------------------------------------
@@ -72,6 +70,24 @@ def test_session_boundaries_hold_at_one_second():
     assert ag.flush_all() == []
     ag.add(Tick(datetime(2026, 10, 26, 9, 59, 59, 999000), "A.NS", 1.0, 3))
     assert [b.ts for b in ag.flush_all()] == [datetime(2026, 10, 26, 9, 59, 59)]
+
+
+def test_ticks_derived_bars_match_bar_aggregator_exactly(world):
+    """SCRUM-77: the live feed now persists raw ticks and Lake._ticks_bars_sql builds bars from them
+    on read, instead of BarAggregator building them in-process. The two must agree exactly."""
+    ticks = random_ticks(4, minutes=20)
+    ag, direct = BarAggregator(1), []
+    for t in ticks:
+        direct += ag.add(t)
+    direct += ag.flush_all()
+    tick_store.write_ticks(ticks, world.lakedir)
+    tick_store.compact_ticks_day(DAY, world.lakedir)
+    derived = world.query.Lake().sql("SELECT * FROM bars_1s ORDER BY ts")
+    expected = pd.DataFrame([asdict(b) for b in direct]).sort_values("ts").reset_index(drop=True)
+    assert len(derived) == len(expected)
+    for c in ("open", "high", "low", "close", "volume", "n_ticks", "bid", "ask", "bid_qty", "ask_qty"):
+        assert (derived[c].astype(float) - expected[c].astype(float)).abs().max() == 0, c
+    assert (derived["vwap"] - expected["vwap"]).abs().max() < 1e-9
 
 
 # -- roll-up equivalence -----------------------------------------------------------------------------

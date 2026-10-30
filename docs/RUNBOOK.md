@@ -148,7 +148,7 @@ If the token expires and you forget: the collector keeps retrying and logs `Upst
 ## 1. Scope and principles
 
 - Scope (ADR-2, amended by ADR-3): **daily OHLC for India, US, UK and EU; everything intraday, live ticks and fundamentals for India (NSE) only.** Universe lives in `data/universe.csv` (single source of truth for every feed); the `market` column is `IN`, `US`, `UK` or `EU`.
-- **Ingest ticks and L1 live, store aggregates.** The Upstox feed (section 13) delivers ticks and top-of-book; we fold them into **1-second bars** (open, high, low, close, volume, VWAP, tick count, last bid/ask) in-process. 1 second is the base resolution (ADR-5): nothing coarser is stored as the intraday base, and coarser bars (1m, 5m, ...) are derived from it with `Lake.rollup()`. Raw tick storage is optional and off by default (data volume, section 13.5).
+- **Ingest ticks and L1 live, store the raw ticks.** The Upstox feed (section 13) delivers ticks and top-of-book; every one is persisted as-is (**SCRUM-77**, superseding ADR-5's 1-second bar aggregation — the first live session showed real sub-second update rates, so bucketing to 1 second was discarding exchange-level detail we cannot re-fetch). Bars of any width (1s, 1m, 5m, ...) are derived from raw ticks on read by `data_layer.query.Lake` (`Lake._ticks_bars_sql`), so nothing downstream (viewer, `verify`, `health`) had to change its interface. The one pre-migration day (2026-10-30) that only has legacy 1-second bars is still readable via a fallback path.
 - Free sources first (FMP free tier for fundamentals, Yahoo Finance for prices). Paid upgrades are gated on a concrete limitation, listed in section 9.
 - Storage: Parquet lake queried with DuckDB (ADR-1, section 12). Partitioned by year (daily) and by day (bars); no server process, no heap ceiling.
 - Prod runs on the VPS. Dev/cloud sandboxes can build and run the test suite; collectors run on the VPS.
@@ -160,7 +160,7 @@ If the token expires and you forget: the collector keeps retrying and logs `Upst
 | Fundamentals (income, balance, cash flow, ROIC/shares) | FMP free (250 calls/day) | Annual | Rotating by staleness, ~62 tickers/day | Last 5 fiscal years | `lake/fundamentals/*.parquet` | `[~]` |
 | Daily OHLC, 4 markets | Yahoo (`yfinance`) | 1 day | Every trading day after the last close (22:30 UTC) | 5 years backfill | `lake/ohlc/year=YYYY/` | `[~]` not run live (Yahoo blocked in the build sandbox) |
 | Intraday bars, interim, **India only** | Yahoo (`yfinance`) | 5 min | Once, after the NSE close | About 59 days via `--backfill`, then forward (see 2.1) | `lake/bars/interval=5m/date=YYYY-MM-DD/` | `[~]` retire once the Upstox feed is live |
-| **Live ticks + L1 (new)** | Upstox API **v3** WebSocket (Protobuf) | Tick / L1 snapshot, aggregated to **1 second** | During market hours | Forward-only | `lake/bars/interval=1s/`, optional `lake/ticks/` | `[~]` built and tested against a fake server; not run against Upstox (section 13) |
+| **Live ticks + L1** | Upstox API **v3** WebSocket (Protobuf) | Raw tick / L1 push, full precision (SCRUM-77) | During market hours | Forward-only | `lake/ticks/`; `lake/bars/interval=1s/` kept only for the one pre-migration day | `[~]` built and tested against a fake server; not run against Upstox (section 13) |
 | NSE futures and options intraday | Upstox v3 (NSE_FO) | 1-second bars + open interest | live feed and REST candles | forward collection | `lake/bars`, contract table in `lake/instruments` | `[ ]` built, not yet run live: section 17 |
 
 ### 2.1 Constraint that shapes the whole intraday plan
@@ -236,7 +236,7 @@ The routine you follow is in **0.9**. This section is the reference for what run
 
 | What | How | When (UTC) | File |
 |---|---|---|---|
-| Live feed to 1-second bars, compaction | systemd service `jarvis-feed` (a daemon, not cron) | waits until 03:40, runs to 10:05 | `deploy/jarvis-feed.service` |
+| Live feed to raw ticks, compaction | systemd service `jarvis-feed` (a daemon, not cron) | waits until 03:40, runs to 10:05 | `deploy/jarvis-feed.service` |
 | Daily prices, four markets | cron `scheduler.py --job ohlc-daily` | 22:30 | `deploy/crontab` |
 | Fundamentals rotation (India) | cron `scheduler.py --job fundamentals` | 12:00 | `deploy/crontab` |
 | Nightly backup snapshot | cron `python -m data_layer.backup run` | 23:30 | `deploy/crontab` |
@@ -357,6 +357,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 | 2026-10-25 | Upstox v3 feed adapter built (`data_layer/upstox/`): decode, instrument keys from ISIN, reconnecting WebSocket runner, daily scheduling, 8 tests incl. fake server. Protobuf module vendored from the official SDK (ADR-4) | Not yet run against Upstox |
 | 2026-10-30 | Viewer redesign (SCRUM-76): sections with sub-tabs, one legend per chart, market heat map, derivatives summary/chain/OI/contract tabs, phone and tablet layouts, demo option chains | Section 16.1 |
 | 2026-10-30 | Futures and options support (SCRUM-71): contract table, selection, `feed/candles --segment fo`, open interest on bars, `verify fo`, viewer open interest, demo derivatives; 46 new tests incl. `futures_ingestion` scenarios. Section 17, ADR-7 | Not yet run against Upstox |
+| 2026-10-30 | Live feed relaxed to full raw-tick precision (SCRUM-77): the first live session showed genuine sub-second update rates (54% of 1-second bars folded in >1 tick), so 1-second aggregation in the live feed was dropped in favour of storing every tick. `data_layer.query.Lake` now derives bars of any width from ticks on read (`Lake._ticks_bars_sql`); viewer, `verify` and `health` interfaces unchanged. One historical day (2026-10-30 itself) keeps its legacy 1-second bars via a fallback path. Opened SCRUM-78 (widen F&O to 4 weekly expiries) as a follow-up, not yet started | Section 2.2, 13.5, 16 |
 | 2026-10-26 | Operations pack: section 0 start-to-finish VPS guide, `deploy/` (systemd units, crontab, logrotate), `data_layer.backup`, `data_layer.health`, `data_layer.universe`; the live feed now re-reads the token and retries instead of exiting when it is rejected | Nothing here has run on a real VPS yet |
 | 2026-10-26 | Intraday viewer webapp built (`webapp/`, `analytics/microstructure.py`): date and instrument dropdowns, price, volume, book at best, spread, volatility, market overview, synthetic demo data. Covered by unit tests, Gherkin scenarios and a real-browser test | ADR-6, section 16 |
 | 2026-10-25 | Daily OHLC re-extended to India+US+UK+EU (5y, Yahoo); intraday, ticks and fundamentals stay India only; `--backfill` for deepest Yahoo intraday window; `currency` column added to universe (ADR-3). Earlier same day: scope narrowed to NSE only; US removed from universe, fetchers, scheduler, lake and tests. Upstox v2 WebSocket chosen for live tick/L1 (ADR-2); tick model, bar aggregator and segment storage built | Adapter blocked on proto/docs access (section 13) |
@@ -429,7 +430,7 @@ Futures and options come from the same Upstox v3 feed and REST candles as equiti
 - `data_layer/upstox/instruments.py`: universe symbol to instrument key, `NSE_EQ|<ISIN>`, from the ISIN column. Symbols without a valid ISIN are reported and skipped. Optional validation against a locally saved instrument master.
 - `data_layer/upstox/feed.py`: `FeedProcessor` (frame bytes to bars, drops last-trade-yesterday and future-timestamped ticks) and `UpstoxFeed` (WebSocket with bearer token, binary JSON subscribe in batches of 500, periodic flush and write, watchdog that reconnects after 120 s without frames, exponential backoff, fatal error on HTTP 401/403 with a "token expires daily" message). The daemon waits for each weekday session (03:40-10:05 UTC), then compacts the day. `--once` runs a single session now.
 - `data_layer/upstox/candles.py`: REST candle API client for whole-day pulls, gap repair and range backfill (section 14.4b). Fills gaps only unless `--overwrite`; tags bars `src='rest'`.
-- `data_layer/ticks.py`, `data_layer/tick_store.py`: aggregation and storage. **Default bar width is 1 second** (`--interval 1`); bars land in `lake/bars/interval=1s/` and are queryable as `bars_1s`. A quiet second has no row (nothing is forward-filled). Updates that arrive after their second was closed are dropped and counted (`late=` in the 15-second log line).
+- `data_layer/ticks.py`, `data_layer/tick_store.py`: tick model and storage. The live feed persists every tick as-is (SCRUM-77); `tick_store.compact_ticks_day` merges a day's segments into `lake/ticks/date=.../ticks.parquet`. `BarAggregator` (same file) is no longer used by the live feed but still backs the REST-candle path's minute bars. `data_layer/query.py`'s `Lake._ticks_bars_sql` derives bars of any width from ticks on read, queryable as `bars_1s` exactly as before; a quiet second still has no row (nothing is forward-filled).
 - `Lake.rollup(width_s)` (in `data_layer/query.py`): builds 1-minute, 5-minute or any coarser bars from the 1-second ones, aligned to the 09:15 IST open. It is tested to equal bars built tick by tick at that width.
 - Tests: `tests/test_upstox.py`.
 
@@ -472,17 +473,32 @@ RestartSec=10
 - If the feed is down, ticks in the gap are unrecoverable from the live path. Upstox's candle API only goes down to **1 minute** (community reports: about six months of it, unverified), so it can repair or cross-check minute bars (`python -m data_layer.upstox.candles`, section 14.4b) but can **never** recreate 1-second data. Run the collector every session without gaps.
 - Index instruments carry no volume.
 
-### 13.5 Storage sizing (estimates, to be replaced by the first week's `du -sh lake`)
-Assumptions, all unverified: 1,200 symbols, a 22,500-second session, about 12-20 bytes per row after ZSTD on time-sorted data.
+### 13.5 Storage sizing (measured 2026-10-30, superseding the estimates below; SCRUM-77)
+
+O8 is now resolved: the first live session (854 symbols: 500 equities + 354 subscribed F&O) showed the feed
+genuinely pushes sub-second updates (54% of 1-second bars folded in more than one tick, mean 1.84/bar, up to
+18 in one symbol-second) — not a once-a-second snapshot. **The live feed now stores raw ticks only** (no more
+1-second bar aggregation in `data_layer/upstox/feed.py`); `data_layer/query.py` derives bars of any width from
+ticks on read, so the viewer and `verify`/`health` tooling are unaffected. Measured by reconstructing that
+day's real tick stream and writing it through the actual ZSTD/Parquet path:
+
+| Dataset | Size/day (current universe) | Per year (250 trading days) |
+|---|---|---|
+| Raw ticks (now the only live-feed output) | about 90 MB (realistic per-tick bid/ask variability) | about 22 GB |
+| 1-second bars (legacy; one historical day only, 2026-10-30, kept for continuity) | about 39 MB | about 10 GB equivalent if still produced |
+| 1-minute+ bars from the REST candle API (unaffected, separate pipeline) | a few KB | negligible |
+
+Equities, not F&O, drive this: 99.8% of ticks (3,860,976 of 3,868,926) came from the 500 equities; the 354
+F&O contracts contributed only ~7,950. A VPS with 100 GB free disk comfortably covers several years at the
+current universe; the lever that matters is the equity universe size, not F&O contract count (see SCRUM-78).
+
+The original pre-launch estimates (unverified, now superseded) were:
 
 | Scenario | Rows per day | Per year (250 days) |
 |---|---|---|
 | 1-second bars, typical: top 200 stocks active 40% of seconds, the other 1,000 active 5% | about 2.9 million | about 9-15 GB |
 | 1-second bars, worst case: every symbol active every second | about 27 million | about 80-130 GB |
 | 1-minute bars from the same universe | about 450 thousand | about 1.5-2.5 GB |
-| Raw ticks (optional) | one row per feed update; if the feed pushes about one update per second per stock (unverified) this is the same size as the worst case above, and larger if it pushes every trade | likely 100+ GB |
-
-A VPS with 100 GB free disk is the minimum comfortable size for a year of 1-second bars. Raw ticks stay opt-in (`--raw-ticks`, O8) until the first week shows the real update rate and a strategy needs them.
 
 ## 14. VPS test day: 5-year OHLC (US, UK, EU, India) and one day of Upstox intraday (India)
 
@@ -589,7 +605,7 @@ du -sh lake/bars lake
 - [ ] if you also ran 14.4b the same day: `verify compare-rest` shows minutes agreeing (coverage at least 95%, closes within 0.2%, volume ratio 0.9-1.1)
 - [ ] last-bar close is within 0.5% of Yahoo's daily close for each symbol
 - [ ] median volume ratio (bars / Yahoo daily) is close to 1; far from 1 means a unit or volume-delta problem
-- [ ] no `seg-*.parquet` files left in `lake/bars/interval=1s/date=<day>/` (only `bars.parquet`)
+- [ ] no `seg-*.parquet` files left in `lake/ticks/date=<day>/` (only `ticks.parquet`, since SCRUM-77)
 - [ ] 3 spot checks of a one-minute roll-up (`Lake().rollup(60, 'RELIANCE.NS')`: open, high, low, close) against a charting screen
 - [ ] `du -sh lake/bars` after the session: record it here ______ (replaces the estimates in 13.5)
 

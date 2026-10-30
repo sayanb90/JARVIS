@@ -64,6 +64,28 @@ def write_ticks(ticks: Iterable[Tick], lake_dir: Path | None = None) -> int:
     return len(df)
 
 
+def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
+    """Merge a day's raw-tick segments into one ticks.parquet.  Returns row count.
+
+    Unlike bars, a tick is a point event written exactly once (no repeated flushes of the same
+    bucket to dedupe), so this only concatenates and sorts; it does not drop any row.
+    """
+    folder = (lake_dir or LAKE_DIR) / "ticks" / f"date={day}"
+    files = sorted(folder.glob("*.parquet"))
+    if not files:
+        return 0
+    con = duckdb.connect()
+    tmp = folder / "ticks.parquet.tmp"
+    con.execute(f"""
+        COPY (SELECT * FROM read_parquet('{folder}/*.parquet', union_by_name=true) ORDER BY symbol, ts)
+        TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)""")
+    os.replace(tmp, folder / "ticks.parquet")
+    for f in files:
+        if f.name != "ticks.parquet":
+            f.unlink()
+    return con.execute(f"SELECT count(*) FROM read_parquet('{folder}/ticks.parquet')").fetchone()[0]
+
+
 def compact_day(interval: str, day: date, lake_dir: Path | None = None) -> int:
     """Merge segments + bars.parquet for one day into bars.parquet.  Returns row count."""
     folder = (lake_dir or LAKE_DIR) / "bars" / f"interval={interval}" / f"date={day}"

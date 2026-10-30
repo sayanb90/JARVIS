@@ -63,8 +63,9 @@ def test_decode_ltpc_mode_and_greeks_mode_and_market_status():
     assert {t.symbol: t.vol_today for t in out} == {"RELIANCE.NS": None, "OPT": 50}
 
 
-def test_processor_filters_and_builds_bars():
-    p = FeedProcessor(KMAP, interval_s=60, raw_ticks=True)
+def test_processor_filters_stale_and_future_ticks_and_drains_raw():
+    # SCRUM-77: FeedProcessor no longer builds bars; it only filters and buffers raw ticks.
+    p = FeedProcessor(KMAP)
     now = datetime(2026, 10, 23, 3, 47, 30)
     p.handle(stock_frame(ms(3, 45, 5), 100.0, 1000, bid=99.9), now)
     p.handle(stock_frame(ms(3, 45, 40), 101.0, 1200, bid=100.9), now)
@@ -72,10 +73,11 @@ def test_processor_filters_and_builds_bars():
     p.handle(stock_frame(ms(3, 20, 0) - 86_400_000, 90.0, 5), now)      # yesterday's last trade
     p.handle(stock_frame(ms(3, 55, 0), 120.0, 9000), now)               # ahead of the clock
     assert (p.ticks, p.dropped_stale, p.dropped_future) == (3, 1, 1)
-    bars, ticks = p.drain(now)
-    assert len(ticks) == 3 and len(bars) == 2
-    b0 = bars[0]
-    assert (b0.ts, b0.open, b0.close, b0.volume, b0.bid) == (datetime(2026, 10, 23, 3, 45), 100.0, 101.0, 200, 100.9)
+    ticks = p.drain()
+    assert len(ticks) == 3
+    assert [t.ltp for t in ticks] == [100.0, 101.0, 102.0]
+    assert ticks[0].ts == datetime(2026, 10, 23, 3, 45, 5) and ticks[0].bid == 99.9
+    assert p.drain() == []                                              # drained once; nothing left
 
 
 def test_key_map_from_isin():
@@ -112,7 +114,7 @@ def test_end_to_end_against_fake_server(tmp_path):
         async with serve(handler, "127.0.0.1", 0) as srv:
             port = srv.sockets[0].getsockname()[1]
             clock = lambda: datetime(2026, 10, 23, 3, 47, 0)  # noqa: E731
-            feed = UpstoxFeed("TKN", KMAP, url=f"ws://127.0.0.1:{port}", mode="full", interval_s=60,
+            feed = UpstoxFeed("TKN", KMAP, url=f"ws://127.0.0.1:{port}", mode="full",
                               lake_dir=tmp_path / "lake", flush_s=0.05, write_s=0.05, clock=clock)
             stop = asyncio.Event()
             asyncio.get_running_loop().call_later(0.25, stop.set)
@@ -123,12 +125,14 @@ def test_end_to_end_against_fake_server(tmp_path):
     assert seen["auth"] == "Bearer TKN" and seen["sub_is_binary"]
     assert seen["sub"]["method"] == "sub" and seen["sub"]["data"]["mode"] == "full"
     assert set(seen["sub"]["data"]["instrumentKeys"]) == {KEY, IDX}
+    # SCRUM-77: the live feed persists raw ticks, not pre-built bars; the three ticks here (at
+    # 03:45:05, 03:45:40, 03:46:10) are each >=1s apart, so each becomes its own one-second bar.
     from data_layer import tick_store
     from data_layer.query import Lake
-    tick_store.compact_day("1m", D.date(), tmp_path / "lake")
-    df = Lake(tmp_path / "lake").sql("SELECT * FROM bars_1m ORDER BY ts")
-    assert df.symbol.tolist() == ["RELIANCE.NS", "RELIANCE.NS"]
-    assert df.close.tolist() == [101.0, 102.0] and df.volume.tolist()[0] == 200
+    tick_store.compact_ticks_day(D.date(), tmp_path / "lake")
+    df = Lake(tmp_path / "lake").sql("SELECT * FROM bars_1s WHERE symbol = 'RELIANCE.NS' ORDER BY ts")
+    assert df.close.tolist() == [100.0, 101.0, 102.0]
+    assert df.volume.tolist() == [0, 200, 300]                  # first tick of the day is the baseline
 
 
 def test_rejected_token_is_fatal(tmp_path):
@@ -230,7 +234,7 @@ def test_sigint_saves_and_compacts(tmp_path):
     from data_layer.query import Lake
     df = Lake(tmp_path / "lake").sql("SELECT * FROM bars_1s ORDER BY ts")
     assert df.close.tolist() == [100.0, 101.0]
-    assert not list((tmp_path / "lake/bars/interval=1s/date=2026-10-23").glob("seg-*"))   # compacted
+    assert not list((tmp_path / "lake/ticks/date=2026-10-23").glob("seg-*"))   # compacted
 
 
 def test_dump_frames_saves_raw_bytes(tmp_path):

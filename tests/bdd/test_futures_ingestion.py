@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from pytest_bdd import given, parsers, scenarios, then, when
 
 from data_layer import tick_store, verify
-from data_layer.ticks import Bar
+from data_layer.ticks import Tick
 from data_layer.upstox import candles
 from data_layer.upstox import fo_instruments as fo
 from data_layer.upstox.feed import UpstoxFeed
@@ -99,9 +99,13 @@ def _stream(ctx, n, oi0):
 
 @given(parsers.parse("equity bars for {sym} exist for the same day"))
 def _equity(ctx, sym):
+    # Raw ticks, not legacy bars: the live feed persists ticks only (SCRUM-77), and equities and F&O
+    # are collected by separate feed processes into the SAME day's ticks folder, so this is the
+    # realistic shape (no OI, since equities never carry open interest).
     t0 = datetime(2026, 10, 23, 3, 45)
-    tick_store.write_bars([Bar(t0 + timedelta(seconds=i), sym, "IN", 100, 101, 99, 100.5, 5, 100.2, 1, 100.4, 100.6, 10, 12)
-                           for i in range(30)], "1s", ctx.w.lakedir)
+    tick_store.write_ticks([Tick(t0 + timedelta(seconds=i), sym, 100.0 + (i % 5) * 0.1, 1000 + i * 5,
+                                 bid=100.4, bid_qty=10, ask=100.6, ask_qty=12)
+                            for i in range(30)], ctx.w.lakedir)
 
 
 @when("the collector runs the session with a valid token")
@@ -121,7 +125,7 @@ def _run(ctx):
                 await asyncio.wait_for(feed.run_session(stop), timeout=20)
             finally:
                 helper.cancel()
-            tick_store.compact_day(feed.label, DAY, ctx.w.lakedir)
+            tick_store.compact_ticks_day(DAY, ctx.w.lakedir)
     asyncio.run(main())
 
 

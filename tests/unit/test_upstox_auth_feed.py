@@ -9,7 +9,7 @@ import pytest
 from websockets.asyncio.server import serve
 
 from data_layer.upstox import auth, feed
-from data_layer.upstox.feed import UpstoxFeed, interval_label
+from data_layer.upstox.feed import UpstoxFeed
 from data_layer.upstox.instruments import build_key_map, equity_key
 from tests.helpers import ms
 from tests.unit.test_upstox_adapter import KEY, KMAP, stock_frame
@@ -111,10 +111,6 @@ def test_equity_key_and_master_validation(tmp_path):
 
 
 # -- feed resilience ----------------------------------------------------------------------------------------
-def test_interval_labels():
-    assert [interval_label(s) for s in (60, 300, 3600, 45)] == ["1m", "5m", "60m", "45s"]
-
-
 def test_invalid_mode_rejected_at_construction(tmp_path):
     with pytest.raises(ValueError):
         UpstoxFeed("T", KMAP, mode="depth30")
@@ -192,7 +188,7 @@ def test_text_frames_and_unknown_binary_instruments_are_harmless(tmp_path):
     async def main():
         async with serve(handler, "127.0.0.1", 0) as srv:
             f = UpstoxFeed("T", KMAP, url=f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}",
-                           lake_dir=tmp_path / "lake", clock=CLOCK, raw_ticks=True)
+                           lake_dir=tmp_path / "lake", clock=CLOCK)
             stop = asyncio.Event()
             asyncio.get_running_loop().call_later(0.2, stop.set)
             await f.run_session(stop)

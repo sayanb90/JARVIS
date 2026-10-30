@@ -11,7 +11,7 @@ import duckdb
 import pytest
 
 from data_layer import backup, health, tick_store, universe
-from data_layer.ticks import BarAggregator, Tick
+from data_layer.ticks import Tick
 from tests.helpers import OHLC_H, UNI_HEADER, write_csv
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -198,11 +198,10 @@ def healthy(world, tmp_path, monkeypatch):
     for m, sym in (("in", "A.NS"), ("us", "AAPL"), ("uk", "SHEL.L"), ("eu", "SAP.DE")):
         write_csv(world.data / f"ohlc/ohlc_2026_{m}.csv", OHLC_H, [["2026.10.26", sym, m.upper(), 1, 2, 1, 1.5, 10]])
     world.lake.load_ohlc()
-    ag, bars = BarAggregator(1), []
-    for sym in ("A.NS", "B.NS"):
-        bars += ag.add(Tick(datetime(2026, 10, 27, 3, 45, 1), sym, 100.0, 1))
-    tick_store.write_bars(bars + ag.flush_all(), "1s", world.lakedir)
-    tick_store.compact_day("1s", date(2026, 10, 27), world.lakedir)
+    # SCRUM-77: the live feed stores raw ticks, not pre-built bars; health.py reads lake/ticks/.
+    tick_store.write_ticks([Tick(datetime(2026, 10, 27, 3, 45, 1), sym, 100.0, 1) for sym in ("A.NS", "B.NS")],
+                           world.lakedir)
+    tick_store.compact_ticks_day(date(2026, 10, 27), world.lakedir)
     (world.root / "logs/scheduler.log").write_text("2026-10-26 22:31:00,100  INFO  [scheduler]  Scheduler finished successfully\n")
     bk = tmp_path / "bk"
     (bk / "2026-10-27").mkdir(parents=True); (bk / "2026-10-27/MANIFEST.json").write_text("{}")
@@ -228,9 +227,9 @@ def test_each_problem_is_reported(healthy, capsys, monkeypatch):
     world, bk = healthy
     (world.root / "logs/scheduler.log").write_text(
         "2026-10-26 22:31:00,1  INFO  Scheduler finished successfully\n2026-10-27 11:00:00,1  ERROR  Scheduler finished with errors\n")
-    seg = world.lakedir / "bars/interval=1s/date=2026-10-26"; seg.mkdir(parents=True)
-    duckdb.sql(f"COPY (SELECT TIMESTAMP '2026-10-26 03:45:00' AS ts, 'A.NS' AS symbol) TO '{seg}/bars.parquet' (FORMAT PARQUET)")
-    duckdb.sql(f"COPY (SELECT TIMESTAMP '2026-10-26 03:45:01' AS ts, 'A.NS' AS symbol) TO '{seg}/seg-0001.parquet' (FORMAT PARQUET)")  # an old day never compacted
+    # Two uncompacted tick segments for an old day (never compacted) — health.py looks under lake/ticks/.
+    tick_store.write_ticks([Tick(datetime(2026, 10, 26, 3, 45, 0), "A.NS", 100.0, 1)], world.lakedir)
+    tick_store.write_ticks([Tick(datetime(2026, 10, 26, 3, 45, 1), "A.NS", 100.0, 2)], world.lakedir)
     monkeypatch.delenv("UPSTOX_ACCESS_TOKEN")
     monkeypatch.setattr(health.shutil, "disk_usage", lambda p: type("D", (), {"total": 100, "free": 3})())
     (bk / "2026-10-27").rename(bk / "2026-10-20")
@@ -265,7 +264,7 @@ def test_live_session_check_fails_when_the_feed_is_silent(healthy, capsys, monke
     world, bk = healthy
     inside = datetime(2026, 10, 27, 5, 0)
     monkeypatch.setattr(health, "utcnow", lambda: inside)
-    today = world.lakedir / "bars/interval=1s/date=2026-10-27"
+    today = world.lakedir / "ticks/date=2026-10-27"
     f = next(today.glob("*.parquet"))
     os.utime(f, (inside.timestamp() - 10, inside.timestamp() - 10))
     assert health.check(inside, lake_dir=world.lakedir, root=world.root, backup_path=bk).fails == 0

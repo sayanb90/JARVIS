@@ -1,11 +1,17 @@
 """
-Upstox v3 live market-data collector: WebSocket -> ticks -> bars -> Parquet.
+Upstox v3 live market-data collector: WebSocket -> raw ticks -> Parquet.
 
   python -m data_layer.upstox.auth ...      # obtain a token (writes .env); expires daily (runbook O10)
   python -m data_layer.upstox.feed                 # daemon: waits for each NSE session
   python -m data_layer.upstox.feed --once          # run one session now (until close)
-  python -m data_layer.upstox.feed --limit 20 --raw-ticks     # also keep every tick (large)
-  python -m data_layer.upstox.feed --interval 1               # 1-second bars: the default base resolution
+  python -m data_layer.upstox.feed --limit 20              # subscribe only the first N universe symbols
+
+Every tick/L1 update is persisted as-is (full raw-tick precision; see SCRUM-77 and docs/RUNBOOK.md
+section 2.2/16). There is no 1-second bar aggregation in this path any more: that discarded real
+sub-second detail that Upstox actually sends (ltt is epoch milliseconds, pushed per update, not per
+second). 1-minute+ bars built from the REST candle API (data_layer/upstox/candles.py) are a separate,
+unaffected pipeline. The query layer (data_layer/query.py) derives bars of any width from these raw
+ticks on read.
 
 Protocol (from the official SDK, upstox-python-sdk 2.30.0):
   wss://api.upstox.com/v3/feed/market-data-feed   header  Authorization: Bearer <token>
@@ -33,7 +39,7 @@ import websockets
 
 from .. import tick_store
 from ..lake import ENV_FILE
-from ..ticks import SESSION_CLOSE_UTC, SESSION_OPEN_UTC, Bar, BarAggregator, Tick
+from ..ticks import SESSION_CLOSE_UTC, SESSION_OPEN_UTC, Tick
 from . import decode
 from .instruments import segment_key_map
 
@@ -50,18 +56,11 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def interval_label(interval_s: int) -> str:
-    return f"{interval_s // 60}m" if interval_s % 60 == 0 else f"{interval_s}s"
-
-
 class FeedProcessor:
-    """Synchronous core: frame bytes in, bars/ticks out.  The async runner only moves data."""
+    """Synchronous core: frame bytes in, raw ticks out.  The async runner only moves data."""
 
-    def __init__(self, key_map: dict[str, str], interval_s: int = 1, raw_ticks: bool = False) -> None:
+    def __init__(self, key_map: dict[str, str]) -> None:
         self.key_map = key_map
-        self.agg = BarAggregator(interval_s)
-        self.raw_ticks = raw_ticks
-        self._bars: list[Bar] = []
         self._ticks: list[Tick] = []
         self.status: dict[str, str] = {}
         self.frames = self.ticks = self.dropped_stale = self.dropped_future = 0
@@ -85,19 +84,16 @@ class FeedProcessor:
                                 "(is ltt really epoch ms?)", t.ts, now)
                 continue
             self.ticks += 1
-            if self.raw_ticks:
-                self._ticks.append(t)
-            self._bars += self.agg.add(t)
+            self._ticks.append(t)
 
-    def drain(self, now: datetime, final: bool = False) -> tuple[list[Bar], list[Tick]]:
-        self._bars += self.agg.flush_all() if final else self.agg.flush(now)
-        bars, ticks, self._bars, self._ticks = self._bars, self._ticks, [], []
-        return bars, ticks
+    def drain(self) -> list[Tick]:
+        ticks, self._ticks = self._ticks, []
+        return ticks
 
 
 class UpstoxFeed:
     def __init__(self, token: str, key_map: dict[str, str], *, url: str = FEED_URL,
-                 mode: str = "full", interval_s: int = 1, raw_ticks: bool = False,
+                 mode: str = "full",
                  lake_dir: Path | None = None, flush_s: float = 2.0, write_s: float = 15.0,
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None,
@@ -108,8 +104,7 @@ class UpstoxFeed:
         # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
         self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
-        self.proc = FeedProcessor(key_map, interval_s, raw_ticks)
-        self.label = interval_label(interval_s)
+        self.proc = FeedProcessor(key_map)
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.clock = clock
         self.dump_left, self.dump_dir = dump_frames, dump_dir or Path("logs/frames")
@@ -117,10 +112,8 @@ class UpstoxFeed:
 
     # -- persistence -------------------------------------------------------
     def persist(self, final: bool = False) -> int:
-        bars, ticks = self.proc.drain(self.clock(), final)
-        n = tick_store.write_bars(bars, self.label, self.lake_dir)
-        tick_store.write_ticks(ticks, self.lake_dir)
-        return n
+        ticks = self.proc.drain()
+        return tick_store.write_ticks(ticks, self.lake_dir)
 
     # -- one connection ----------------------------------------------------
     def _subscribe_msgs(self) -> list[bytes]:
@@ -167,9 +160,9 @@ class UpstoxFeed:
             if (now - last_write).total_seconds() >= self.write_s:
                 n = self.persist()
                 last_write = now
-                log.info("frames=%d ticks=%d bars_written=%d stale=%d future=%d late=%d",
+                log.info("frames=%d ticks=%d ticks_written=%d stale=%d future=%d",
                          self.proc.frames, self.proc.ticks, n,
-                         self.proc.dropped_stale, self.proc.dropped_future, self.proc.agg.late_dropped)
+                         self.proc.dropped_stale, self.proc.dropped_future)
             if (now - self._last_frame).total_seconds() > self.stale_s:
                 log.warning("no frames for %.0fs, reconnecting", (now - self._last_frame).total_seconds())
                 await ws.close()
@@ -250,8 +243,8 @@ async def run_day(feed: UpstoxFeed, end: datetime) -> None:
     finally:
         t.cancel()
     day = end.date()
-    rows = tick_store.compact_day(feed.label, day, feed.lake_dir)
-    log.info("session %s done: compacted %d bars", day, rows)
+    rows = tick_store.compact_ticks_day(day, feed.lake_dir)
+    log.info("session %s done: compacted %d ticks", day, rows)
 
 
 async def run_forever(make_feed, once: bool = False) -> None:
@@ -280,13 +273,11 @@ def current_token() -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Upstox v3 live feed collector (India)")
     ap.add_argument("--once", action="store_true", help="run one session now instead of daemon mode")
-    ap.add_argument("--interval", type=int, default=1, help="bar width in seconds (default 1; the intraday base resolution)")
     ap.add_argument("--mode", choices=MODES, default="full")
     ap.add_argument("--segment", choices=["eq", "fo"], default="eq",
                     help="eq: the NSE equity universe; fo: the futures and options chosen by fo_instruments select")
     ap.add_argument("--fo-file", default=None, help="contract list for --segment fo (default data/fo_universe.csv)")
     ap.add_argument("--limit", type=int, default=None, help="subscribe only the first N universe symbols")
-    ap.add_argument("--raw-ticks", action="store_true", help="also store every tick with L1 (large)")
     ap.add_argument("--dump-frames", type=int, default=0, metavar="N",
                     help="save the first N raw binary frames to logs/frames/ (test fixtures, market data only)")
     ap.add_argument("--url", default=FEED_URL)
@@ -303,8 +294,8 @@ def main() -> None:
     if not key_map:
         raise SystemExit("no instruments to subscribe: " + ("run fo_instruments import and select" if a.segment == "fo"
                                                            else "no universe symbols with a usable ISIN"))
-    make = lambda: UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, interval_s=a.interval,  # noqa: E731
-                              raw_ticks=a.raw_ticks, dump_frames=a.dump_frames, token_provider=current_token,
+    make = lambda: UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode,  # noqa: E731
+                              dump_frames=a.dump_frames, token_provider=current_token,
                               auth_retry_s=None if a.once else 60.0)
     asyncio.run(run_forever(make, once=a.once))
 

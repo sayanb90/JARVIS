@@ -97,24 +97,25 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
         r.line("WARN", "no 1-second bars stored yet (feed has not run)")
     else:
         newest = days[0]
-        stale_days = [d for d in days if d < today.isoformat() and any((lake_dir / "bars/interval=1s" / f"date={d}").glob("seg-*.parquet"))]
+        stale_days = [d for d in days
+                     if d < today.isoformat() and any((lake_dir / "ticks" / f"date={d}").glob("seg-*.parquet"))]
         r.line("PASS" if newest >= expected_day.isoformat() else "WARN", f"latest bar day {newest} (expected {expected_day} or later)")
         syms = lake.bar_symbols(newest, "1s")
         want = max(len(with_isin), 1)
         r.line("PASS" if len(syms) >= 0.8 * want else "WARN", f"bars on {newest}: {len(syms)} instruments of {len(with_isin)} subscribable")
         r.line("WARN" if stale_days else "PASS", f"days with uncompacted segment files: {stale_days or 'none'}"
-               + (" (run: python -c \"from data_layer.tick_store import compact_day; ...\")" if stale_days else ""))
+               + (" (run: python -c \"from data_layer.tick_store import compact_ticks_day; ...\")" if stale_days else ""))
 
     # is the feed writing right now?
     if in_session(now):
-        folder = lake_dir / "bars/interval=1s" / f"date={today}"
+        folder = lake_dir / "ticks" / f"date={today}"
         files = list(folder.glob("*.parquet")) if folder.exists() else []
         newest_age = (now.timestamp() - max((f.stat().st_mtime for f in files), default=0)) if files else None
         # file mtimes are real wall-clock; only compare when `now` is the real now
         if abs((utcnow() - now).total_seconds()) < 120:
             ok = newest_age is not None and newest_age < 120
-            r.line("PASS" if ok else "FAIL", "live feed is writing bars (newest file under 2 minutes old)" if ok else
-                   f"live feed is NOT writing: newest bar file {'none today' if newest_age is None else f'{newest_age:.0f}s old'}")
+            r.line("PASS" if ok else "FAIL", "live feed is writing ticks (newest file under 2 minutes old)" if ok else
+                   f"live feed is NOT writing: newest tick file {'none today' if newest_age is None else f'{newest_age:.0f}s old'}")
 
     # service
     if shutil.which("systemctl"):

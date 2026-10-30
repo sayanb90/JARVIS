@@ -89,13 +89,11 @@ def test_feed_main_builds_feed_from_cli_flags(monkeypatch, tmp_path):
 
     async def fake_run_forever(make, once):
         f = make()
-        seen.update(n=len(f.keys), mode=f.mode, once=once, interval=f.proc.agg.interval.total_seconds(),
-                    raw=f.proc.raw_ticks, dump=f.dump_left)
+        seen.update(n=len(f.keys), mode=f.mode, once=once, dump=f.dump_left)
     monkeypatch.setattr(feed, "run_forever", fake_run_forever)
-    monkeypatch.setattr(sys, "argv", ["feed", "--once", "--limit", "3", "--mode", "ltpc", "--interval", "300",
-                                      "--raw-ticks", "--dump-frames", "2"])
+    monkeypatch.setattr(sys, "argv", ["feed", "--once", "--limit", "3", "--mode", "ltpc", "--dump-frames", "2"])
     feed.main()
-    assert seen == {"n": 3, "mode": "ltpc", "once": True, "interval": 300.0, "raw": True, "dump": 2}
+    assert seen == {"n": 3, "mode": "ltpc", "once": True, "dump": 2}
 
 
 def test_feed_main_without_usable_universe_exits(monkeypatch, tmp_path):
