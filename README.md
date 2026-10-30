@@ -216,6 +216,8 @@ python -m data_layer.verify fo --date 2026-10-30
 
 Tested against a local fake server; not yet run against Upstox itself (runbook sections 13 and 17, Gate U1).
 
+**Admin:** set `ADMIN_USER` and `ADMIN_PASSWORD` to enable `/admin`, a password-protected data browser (tables grouped by service, paged), a read-only SQL console and the subscription list with ticker upload (runbook section 18).
+
 Go-live steps, daily ops, backups and the futures/options section are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 **Manual runs:**

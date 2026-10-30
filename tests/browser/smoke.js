@@ -9,7 +9,7 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   const base = process.argv[2];
   const browser = await chromium.launch();
   const errors = [];
-  const watch = (p) => { p.on('pageerror', (e) => errors.push('pageerror ' + e.message)); p.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); }); };
+  const watch = (p, allow422 = false) => { p.on('pageerror', (e) => errors.push('pageerror ' + e.message)); p.on('console', (m) => { if (m.type() === 'error' && !(allow422 && /status of 422/.test(m.text()))) errors.push(m.text()); }); };
   const open = async (vw, vh, hash = '') => {
     const p = await (await browser.newContext({ viewport: { width: vw, height: vh } })).newPage(); watch(p);
     await p.goto(base + '/' + hash);
@@ -121,6 +121,28 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
     await ph.waitForTimeout(300);
     if (await ph.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) fail('horizontal scroll on a phone: ' + h);
     await ph.context().close();
+  }
+
+  // ---------------- /admin: login, browse a table page by page, read-only query, subscriptions ----------------
+  const anon = await (await browser.newContext()).newPage();
+  if ((await anon.goto(base + '/admin')).status() !== 401) fail('/admin must ask for the admin password');
+  for (const [w, h] of [[1400, 1000], [390, 844]]) {
+    const ad = await (await browser.newContext({ viewport: { width: w, height: h }, httpCredentials: { username: 'admin', password: 'smoke-pass' } })).newPage(); watch(ad, true);   // refused queries answer 422 by design
+    await ad.goto(base + '/admin#tab=data&service=market&table=bars_1s_legacy');
+    await ad.waitForSelector('#grid tbody tr td.rn', { timeout: 20000 });
+    if ((await ad.$$eval('#grid tbody tr', (r) => r.length)) !== 200) fail('admin grid should show 200 rows');
+    await ad.click('#pager button[aria-label="Next page"]');
+    await ad.waitForFunction(() => /page 2 of/.test(document.getElementById('status').textContent));
+    if ((await ad.textContent('#grid tbody tr:first-child td.rn')).trim() !== '201') fail('page 2 should start at row 201');
+    if (await ad.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) fail(`admin data page scrolls sideways at ${w}px`);
+    await ad.click('#tab-query'); await ad.click('#run');
+    await ad.waitForFunction(() => /Query ok/.test(document.getElementById('status').textContent) || /no such|Catalog/i.test(document.getElementById('status').textContent), null, { timeout: 20000 });
+    await ad.fill('#sql', 'DROP VIEW market.bars_1s_legacy'); await ad.click('#run');
+    await ad.waitForSelector('#qpager .err-box');
+    await ad.click('#tab-subs');
+    await ad.waitForSelector('#eq-grid tbody tr');
+    if (await ad.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)) fail(`admin subscriptions page scrolls sideways at ${w}px`);
+    await ad.context().close();
   }
 
   // ---------------- bad input falls back instead of a blank page ----------------

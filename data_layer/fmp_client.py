@@ -473,12 +473,22 @@ def write_fund_meta(symbols: list[str], market: str) -> None:
              len(existing), len(symbols))
 
 
+def active_universe_csv() -> Path:
+    """
+    The universe file in force: data/universe.local.csv (written by the admin upload page, git-ignored, so a
+    `git pull` on the server never conflicts with it) when present, else the tracked data/universe.csv.
+    """
+    local = UNIVERSE_CSV.with_name("universe.local.csv")
+    return local if local.exists() else UNIVERSE_CSV
+
+
 def _load_universe_market_map() -> dict[str, str]:
-    """Return {symbol: market} from data/universe.csv, or empty dict if missing."""
-    if not UNIVERSE_CSV.exists():
+    """Return {symbol: market} from the active universe file, or empty dict if missing."""
+    path = active_universe_csv()
+    if not path.exists():
         return {}
     result: dict[str, str] = {}
-    with UNIVERSE_CSV.open(newline="", encoding="utf-8") as f:
+    with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(row for row in f if not row.startswith("#"))
         for rec in reader:
             sym = rec.get("symbol", "").strip()
@@ -490,11 +500,12 @@ def _load_universe_market_map() -> dict[str, str]:
 
 def read_universe(market: str | None = None) -> list[dict]:
     """
-    Read data/universe.csv, optionally filtered by market ("IN").
+    Read the active universe file (see active_universe_csv), optionally filtered by market ("IN").
     Returns list of dicts with keys: symbol, name, market, exchange, isin, ...
     Falls back to NIFTY_50 if the file doesn't exist.
     """
-    if not UNIVERSE_CSV.exists():
+    path = active_universe_csv()
+    if not path.exists():
         log.warning("universe.csv not found — falling back to built-in lists")
         rows = []
         if market in (None, "IN"):
@@ -502,7 +513,7 @@ def read_universe(market: str | None = None) -> list[dict]:
         return rows
 
     rows = []
-    with UNIVERSE_CSV.open(newline="", encoding="utf-8") as f:
+    with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(row for row in f if not row.startswith("#"))
         for rec in reader:
             if market is None or rec.get("market", "").strip() == market:
