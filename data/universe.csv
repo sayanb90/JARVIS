@@ -39,16 +39,6 @@ JPM,JPMorgan Chase & Co,US,NYSE,US46625H1005,46625H100,JPM.N,JPM US Equity,Finan
 XOM,Exxon Mobil Corp,US,NYSE,US30231G1022,30231G102,XOM.N,XOM US Equity,Energy,USD
 JNJ,Johnson & Johnson,US,NYSE,US4781601046,478160104,JNJ.N,JNJ US Equity,Health Care,USD
 V,Visa Inc Class A,US,NYSE,US92826C8394,92826C839,V.N,V US Equity,Financials,USD
-RELIANCE.NS,Reliance Industries Ltd,IN,NSE,INE002A01018,,RELI.NS,RIL IN Equity,Energy,INR
-TCS.NS,Tata Consultancy Services Ltd,IN,NSE,INE467B01029,,TCS.NS,TCS IN Equity,Information Technology,INR
-HDFCBANK.NS,HDFC Bank Ltd,IN,NSE,INE040A01034,,HDBK.NS,HDFCB IN Equity,Financials,INR
-INFY.NS,Infosys Ltd,IN,NSE,INE009A01021,,INFY.NS,INFO IN Equity,Information Technology,INR
-ICICIBANK.NS,ICICI Bank Ltd,IN,NSE,INE090A01021,,ICBK.NS,ICICIBC IN Equity,Financials,INR
-ITC.NS,ITC Ltd,IN,NSE,INE154A01025,,ITC.NS,ITC IN Equity,Consumer Staples,INR
-WIPRO.NS,Wipro Ltd,IN,NSE,INE075A01022,,WIPR.NS,WPRO IN Equity,Information Technology,INR
-AXISBANK.NS,Axis Bank Ltd,IN,NSE,INE238A01034,,AXBK.NS,AXSB IN Equity,Financials,INR
-MARUTI.NS,Maruti Suzuki India Ltd,IN,NSE,INE585B01010,,MRTI.NS,MSIL IN Equity,Consumer Discretionary,INR
-BAJFINANCE.NS,Bajaj Finance Ltd,IN,NSE,INE296A01024,,BJFN.NS,BAF IN Equity,Financials,INR
 SHEL.L,Shell plc,UK,LSE,,,,,,GBp
 AZN.L,AstraZeneca plc,UK,LSE,,,,,,GBp
 HSBA.L,HSBC Holdings plc,UK,LSE,,,,,,GBp
@@ -69,3 +59,503 @@ SAN.PA,Sanofi SA,EU,EURONEXT-PAR,,,,,,EUR
 AIR.PA,Airbus SE,EU,EURONEXT-PAR,,,,,,EUR
 ALV.DE,Allianz SE,EU,XETRA,,,,,,EUR
 ENEL.MI,Enel SpA,EU,BORSA-ITALIANA,,,,,,EUR
+360ONE.NS,360 ONE WAM Ltd.,IN,NSE,INE466L01038,,,,Financial Services,INR
+AADHARHFC.NS,Aadhar Housing Finance Ltd.,IN,NSE,INE883F01010,,,,Financial Services,INR
+AARTIIND.NS,Aarti Industries Ltd.,IN,NSE,INE769A01020,,,,Chemicals,INR
+AAVAS.NS,Aavas Financiers Ltd.,IN,NSE,INE216P01012,,,,Financial Services,INR
+ABB.NS,ABB India Ltd.,IN,NSE,INE117A01022,,,,Capital Goods,INR
+ABBOTINDIA.NS,Abbott India Ltd.,IN,NSE,INE358A01014,,,,Healthcare,INR
+ABCAPITAL.NS,Aditya Birla Capital Ltd.,IN,NSE,INE674K01013,,,,Financial Services,INR
+ABDL.NS,Allied Blenders and Distillers Ltd.,IN,NSE,INE552Z01027,,,,Fast Moving Consumer Goods,INR
+ABREL.NS,Aditya Birla Real Estate Ltd.,IN,NSE,INE055A01016,,,,Realty,INR
+ABSLAMC.NS,Aditya Birla Sun Life AMC Ltd.,IN,NSE,INE404A01024,,,,Financial Services,INR
+ACC.NS,ACC Ltd.,IN,NSE,INE012A01025,,,,Construction Materials,INR
+ACE.NS,Action Construction Equipment Ltd.,IN,NSE,INE731H01025,,,,Capital Goods,INR
+ACMESOLAR.NS,ACME Solar Holdings Ltd.,IN,NSE,INE622W01025,,,,Power,INR
+ACUTAAS.NS,Acutaas Chemicals Ltd.,IN,NSE,INE00FF01025,,,,Healthcare,INR
+ADANIENSOL.NS,Adani Energy Solutions Ltd.,IN,NSE,INE931S01010,,,,Power,INR
+ADANIENT.NS,Adani Enterprises Ltd.,IN,NSE,INE423A01024,,,,Metals & Mining,INR
+ADANIGREEN.NS,Adani Green Energy Ltd.,IN,NSE,INE364U01010,,,,Power,INR
+ADANIPORTS.NS,Adani Ports and Special Economic Zone Ltd.,IN,NSE,INE742F01042,,,,Services,INR
+ADANIPOWER.NS,Adani Power Ltd.,IN,NSE,INE814H01029,,,,Power,INR
+AEGISLOG.NS,Aegis Logistics Ltd.,IN,NSE,INE208C01025,,,,Oil Gas & Consumable Fuels,INR
+AEGISVOPAK.NS,Aegis Vopak Terminals Ltd.,IN,NSE,INE0INX01018,,,,Oil Gas & Consumable Fuels,INR
+AETHER.NS,Aether Industries Ltd.,IN,NSE,INE0BWX01014,,,,Chemicals,INR
+AFCONS.NS,Afcons Infrastructure Ltd.,IN,NSE,INE101I01011,,,,Construction,INR
+AFFLE.NS,Affle 3i Ltd.,IN,NSE,INE00WC01027,,,,Information Technology,INR
+AIAENG.NS,AIA Engineering Ltd.,IN,NSE,INE212H01026,,,,Capital Goods,INR
+AIIL.NS,Authum Investment & Infrastructure Ltd.,IN,NSE,INE206F01022,,,,Financial Services,INR
+AJANTPHARM.NS,Ajanta Pharmaceuticals Ltd.,IN,NSE,INE031B01049,,,,Healthcare,INR
+ALKEM.NS,Alkem Laboratories Ltd.,IN,NSE,INE540L01014,,,,Healthcare,INR
+AMBER.NS,Amber Enterprises India Ltd.,IN,NSE,INE371P01015,,,,Consumer Durables,INR
+AMBUJACEM.NS,Ambuja Cements Ltd.,IN,NSE,INE079A01024,,,,Construction Materials,INR
+ANANDRATHI.NS,Anand Rathi Wealth Ltd.,IN,NSE,INE463V01026,,,,Financial Services,INR
+ANANTRAJ.NS,Anant Raj Ltd.,IN,NSE,INE242C01024,,,,Realty,INR
+ANGELONE.NS,Angel One Ltd.,IN,NSE,INE732I01021,,,,Financial Services,INR
+ANTHEM.NS,Anthem Biosciences Ltd.,IN,NSE,INE0CZ201020,,,,Healthcare,INR
+ANURAS.NS,Anupam Rasayan India Ltd.,IN,NSE,INE930P01018,,,,Chemicals,INR
+APARINDS.NS,Apar Industries Ltd.,IN,NSE,INE372A01015,,,,Capital Goods,INR
+APLAPOLLO.NS,APL Apollo Tubes Ltd.,IN,NSE,INE702C01027,,,,Capital Goods,INR
+APOLLOHOSP.NS,Apollo Hospitals Enterprise Ltd.,IN,NSE,INE437A01024,,,,Healthcare,INR
+APOLLOTYRE.NS,Apollo Tyres Ltd.,IN,NSE,INE438A01022,,,,Automobile and Auto Components,INR
+APTUS.NS,Aptus Value Housing Finance India Ltd.,IN,NSE,INE852O01025,,,,Financial Services,INR
+ARE&M.NS,Amara Raja Energy & Mobility Ltd.,IN,NSE,INE885A01032,,,,Automobile and Auto Components,INR
+ASAHIINDIA.NS,Asahi India Glass Ltd.,IN,NSE,INE439A01020,,,,Automobile and Auto Components,INR
+ASHOKLEY.NS,Ashok Leyland Ltd.,IN,NSE,INE208A01029,,,,Capital Goods,INR
+ASIANPAINT.NS,Asian Paints Ltd.,IN,NSE,INE021A01026,,,,Consumer Durables,INR
+ASTERDM.NS,Aster DM Quality Care Ltd.,IN,NSE,INE914M01019,,,,Healthcare,INR
+ASTRAL.NS,Astral Ltd.,IN,NSE,INE006I01046,,,,Capital Goods,INR
+ATGL.NS,Adani Total Gas Ltd.,IN,NSE,INE399L01023,,,,Oil Gas & Consumable Fuels,INR
+ATHERENERG.NS,Ather Energy Ltd.,IN,NSE,INE0LEZ01016,,,,Automobile and Auto Components,INR
+ATUL.NS,Atul Ltd.,IN,NSE,INE100A01010,,,,Chemicals,INR
+AUBANK.NS,AU Small Finance Bank Ltd.,IN,NSE,INE949L01017,,,,Financial Services,INR
+AUROPHARMA.NS,Aurobindo Pharma Ltd.,IN,NSE,INE406A01037,,,,Healthcare,INR
+AVANTIFEED.NS,Avanti Feeds Ltd.,IN,NSE,INE871C01038,,,,Fast Moving Consumer Goods,INR
+AWL.NS,AWL Agri Business Ltd.,IN,NSE,INE699H01024,,,,Fast Moving Consumer Goods,INR
+AXISBANK.NS,Axis Bank Ltd.,IN,NSE,INE238A01034,,,,Financial Services,INR
+AZAD.NS,Azad Engineering Ltd.,IN,NSE,INE02IJ01035,,,,Capital Goods,INR
+BAGMANE.NS,Bagmane Prime Office REIT,IN,NSE,INE2OVN25015,,,,Realty,INR
+BAJAJ-AUTO.NS,Bajaj Auto Ltd.,IN,NSE,INE917I01010,,,,Automobile and Auto Components,INR
+BAJAJFINSV.NS,Bajaj Finserv Ltd.,IN,NSE,INE918I01026,,,,Financial Services,INR
+BAJAJHFL.NS,Bajaj Housing Finance Ltd.,IN,NSE,INE377Y01014,,,,Financial Services,INR
+BAJAJHLDNG.NS,Bajaj Holdings & Investment Ltd.,IN,NSE,INE118A01012,,,,Financial Services,INR
+BAJFINANCE.NS,Bajaj Finance Ltd.,IN,NSE,INE296A01032,,,,Financial Services,INR
+BALKRISIND.NS,Balkrishna Industries Ltd.,IN,NSE,INE787D01026,,,,Automobile and Auto Components,INR
+BALRAMCHIN.NS,Balrampur Chini Mills Ltd.,IN,NSE,INE119A01028,,,,Fast Moving Consumer Goods,INR
+BANDHANBNK.NS,Bandhan Bank Ltd.,IN,NSE,INE545U01014,,,,Financial Services,INR
+BANKBARODA.NS,Bank of Baroda,IN,NSE,INE028A01039,,,,Financial Services,INR
+BANKINDIA.NS,Bank of India,IN,NSE,INE084A01016,,,,Financial Services,INR
+BATAINDIA.NS,Bata India Ltd.,IN,NSE,INE176A01028,,,,Consumer Durables,INR
+BBOX.NS,Black Box Ltd.,IN,NSE,INE676A01027,,,,Information Technology,INR
+BDL.NS,Bharat Dynamics Ltd.,IN,NSE,INE171Z01026,,,,Capital Goods,INR
+BEL.NS,Bharat Electronics Ltd.,IN,NSE,INE263A01024,,,,Capital Goods,INR
+BELRISE.NS,Belrise Industries Ltd.,IN,NSE,INE894V01022,,,,Automobile and Auto Components,INR
+BEML.NS,BEML Ltd.,IN,NSE,INE258A01024,,,,Capital Goods,INR
+BERGEPAINT.NS,Berger Paints India Ltd.,IN,NSE,INE463A01038,,,,Consumer Durables,INR
+BHARATCOAL.NS,Bharat Coking Coal Ltd.,IN,NSE,INE05XR01022,,,,Oil Gas & Consumable Fuels,INR
+BHARATFORG.NS,Bharat Forge Ltd.,IN,NSE,INE465A01025,,,,Automobile and Auto Components,INR
+BHARTIARTL.NS,Bharti Airtel Ltd.,IN,NSE,INE397D01024,,,,Telecommunication,INR
+BHARTIHEXA.NS,Bharti Hexacom Ltd.,IN,NSE,INE343G01021,,,,Telecommunication,INR
+BHEL.NS,Bharat Heavy Electricals Ltd.,IN,NSE,INE257A01026,,,,Capital Goods,INR
+BIOCON.NS,Biocon Ltd.,IN,NSE,INE376G01013,,,,Healthcare,INR
+BIRET.NS,Brookfield India Real Estate Trust,IN,NSE,INE0FDU25010,,,,Realty,INR
+BLS.NS,BLS International Services Ltd.,IN,NSE,INE153T01027,,,,Consumer Services,INR
+BLUESTARCO.NS,Blue Star Ltd.,IN,NSE,INE472A01039,,,,Consumer Durables,INR
+BOSCHLTD.NS,Bosch Ltd.,IN,NSE,INE323A01026,,,,Automobile and Auto Components,INR
+BPCL.NS,Bharat Petroleum Corporation Ltd.,IN,NSE,INE029A01011,,,,Oil Gas & Consumable Fuels,INR
+BRIGADE.NS,Brigade Enterprises Ltd.,IN,NSE,INE791I01019,,,,Realty,INR
+BRITANNIA.NS,Britannia Industries Ltd.,IN,NSE,INE216A01030,,,,Fast Moving Consumer Goods,INR
+BSE.NS,BSE Ltd.,IN,NSE,INE118H01025,,,,Financial Services,INR
+BSOFT.NS,Birlasoft Ltd.,IN,NSE,INE836A01035,,,,Information Technology,INR
+CAMS.NS,Computer Age Management Services Ltd.,IN,NSE,INE596I01020,,,,Financial Services,INR
+CANBK.NS,Canara Bank,IN,NSE,INE476A01022,,,,Financial Services,INR
+CANFINHOME.NS,Can Fin Homes Ltd.,IN,NSE,INE477A01020,,,,Financial Services,INR
+CANHLIFE.NS,Canara HSBC Life Insurance Company Ltd.,IN,NSE,INE01TY01017,,,,Financial Services,INR
+CAPLIPOINT.NS,Caplin Point Laboratories Ltd.,IN,NSE,INE475E01026,,,,Healthcare,INR
+CARBORUNIV.NS,Carborundum Universal Ltd.,IN,NSE,INE120A01034,,,,Capital Goods,INR
+CARTRADE.NS,Cartrade Tech Ltd.,IN,NSE,INE290S01011,,,,Consumer Services,INR
+CASTROLIND.NS,Castrol India Ltd.,IN,NSE,INE172A01027,,,,Oil Gas & Consumable Fuels,INR
+CCL.NS,CCL Products (I) Ltd.,IN,NSE,INE421D01022,,,,Fast Moving Consumer Goods,INR
+CDSL.NS,Central Depository Services (India) Ltd.,IN,NSE,INE736A01011,,,,Financial Services,INR
+CEATLTD.NS,Ceat Ltd.,IN,NSE,INE482A01020,,,,Automobile and Auto Components,INR
+CEMPRO.NS,Cemindia Projects Ltd.,IN,NSE,INE686A01026,,,,Construction,INR
+CENTRALBK.NS,Central Bank of India,IN,NSE,INE483A01010,,,,Financial Services,INR
+CESC.NS,CESC Ltd.,IN,NSE,INE486A01021,,,,Power,INR
+CGCL.NS,Capri Global Capital Ltd.,IN,NSE,INE180C01042,,,,Financial Services,INR
+CGPOWER.NS,CG Power and Industrial Solutions Ltd.,IN,NSE,INE067A01029,,,,Capital Goods,INR
+CHAMBLFERT.NS,Chambal Fertilizers & Chemicals Ltd.,IN,NSE,INE085A01013,,,,Chemicals,INR
+CHENNPETRO.NS,Chennai Petroleum Corporation Ltd.,IN,NSE,INE178A01016,,,,Oil Gas & Consumable Fuels,INR
+CHOICEIN.NS,Choice International Ltd.,IN,NSE,INE102B01014,,,,Financial Services,INR
+CHOLAFIN.NS,Cholamandalam Investment and Finance Company Ltd.,IN,NSE,INE121A01024,,,,Financial Services,INR
+CHOLAHLDNG.NS,Cholamandalam Financial Holdings Ltd.,IN,NSE,INE149A01033,,,,Financial Services,INR
+CIEINDIA.NS,CIE Automotive India Ltd.,IN,NSE,INE536H01010,,,,Automobile and Auto Components,INR
+CIPLA.NS,Cipla Ltd.,IN,NSE,INE059A01026,,,,Healthcare,INR
+CLEAN.NS,Clean Science and Technology Ltd.,IN,NSE,INE227W01023,,,,Chemicals,INR
+CLEANMAX.NS,Clean Max Enviro Energy Solutions Ltd.,IN,NSE,INE647U01026,,,,Power,INR
+CMPDI.NS,Central Mine Planning & Design Institute Ltd.,IN,NSE,INE05HV01027,,,,Services,INR
+COALINDIA.NS,Coal India Ltd.,IN,NSE,INE522F01014,,,,Oil Gas & Consumable Fuels,INR
+COCHINSHIP.NS,Cochin Shipyard Ltd.,IN,NSE,INE704P01025,,,,Capital Goods,INR
+COFORGE.NS,Coforge Ltd.,IN,NSE,INE591G01025,,,,Information Technology,INR
+COHANCE.NS,Cohance Lifesciences Ltd.,IN,NSE,INE03QK01018,,,,Healthcare,INR
+COLPAL.NS,Colgate Palmolive (India) Ltd.,IN,NSE,INE259A01022,,,,Fast Moving Consumer Goods,INR
+CONCOR.NS,Container Corporation of India Ltd.,IN,NSE,INE111A01025,,,,Services,INR
+CONCORDBIO.NS,Concord Biotech Ltd.,IN,NSE,INE338H01029,,,,Healthcare,INR
+COROMANDEL.NS,Coromandel International Ltd.,IN,NSE,INE169A01031,,,,Chemicals,INR
+CPPLUS.NS,Aditya Infotech Ltd.,IN,NSE,INE819V01029,,,,Capital Goods,INR
+CRAFTSMAN.NS,Craftsman Automation Ltd.,IN,NSE,INE00LO01017,,,,Automobile and Auto Components,INR
+CREDITACC.NS,CreditAccess Grameen Ltd.,IN,NSE,INE741K01010,,,,Financial Services,INR
+CRISIL.NS,CRISIL Ltd.,IN,NSE,INE007A01025,,,,Financial Services,INR
+CROMPTON.NS,Crompton Greaves Consumer Electricals Ltd.,IN,NSE,INE299U01018,,,,Consumer Durables,INR
+CUB.NS,City Union Bank Ltd.,IN,NSE,INE491A01021,,,,Financial Services,INR
+CUMMINSIND.NS,Cummins India Ltd.,IN,NSE,INE298A01020,,,,Capital Goods,INR
+CUPID.NS,Cupid Ltd.,IN,NSE,INE509F01029,,,,Fast Moving Consumer Goods,INR
+CYIENT.NS,Cyient Ltd.,IN,NSE,INE136B01020,,,,Information Technology,INR
+DABUR.NS,Dabur India Ltd.,IN,NSE,INE016A01026,,,,Fast Moving Consumer Goods,INR
+DALBHARAT.NS,Dalmia Bharat Ltd.,IN,NSE,INE00R701025,,,,Construction Materials,INR
+DATAPATTNS.NS,Data Patterns (India) Ltd.,IN,NSE,INE0IX101010,,,,Capital Goods,INR
+DEEPAKFERT.NS,Deepak Fertilisers & Petrochemicals Corp. Ltd.,IN,NSE,INE501A01019,,,,Chemicals,INR
+DEEPAKNTR.NS,Deepak Nitrite Ltd.,IN,NSE,INE288B01029,,,,Chemicals,INR
+DELHIVERY.NS,Delhivery Ltd.,IN,NSE,INE148O01028,,,,Services,INR
+DEVYANI.NS,Devyani International Ltd.,IN,NSE,INE872J01023,,,,Consumer Services,INR
+DIVISLAB.NS,Divi's Laboratories Ltd.,IN,NSE,INE361B01024,,,,Healthcare,INR
+DIXON.NS,Dixon Technologies (India) Ltd.,IN,NSE,INE935N01020,,,,Consumer Durables,INR
+DLF.NS,DLF Ltd.,IN,NSE,INE271C01023,,,,Realty,INR
+DMART.NS,Avenue Supermarts Ltd.,IN,NSE,INE192R01011,,,,Consumer Services,INR
+DOMS.NS,DOMS Industries Ltd.,IN,NSE,INE321T01012,,,,Fast Moving Consumer Goods,INR
+DRREDDY.NS,Dr. Reddy's Laboratories Ltd.,IN,NSE,INE089A01031,,,,Healthcare,INR
+ECLERX.NS,eClerx Services Ltd.,IN,NSE,INE738I01010,,,,Services,INR
+EICHERMOT.NS,Eicher Motors Ltd.,IN,NSE,INE066A01021,,,,Automobile and Auto Components,INR
+EIDPARRY.NS,E.I.D. Parry (India) Ltd.,IN,NSE,INE126A01031,,,,Fast Moving Consumer Goods,INR
+EIHOTEL.NS,EIH Ltd.,IN,NSE,INE230A01023,,,,Consumer Services,INR
+ELECON.NS,Elecon Engineering Co. Ltd.,IN,NSE,INE205B01031,,,,Capital Goods,INR
+ELGIEQUIP.NS,Elgi Equipments Ltd.,IN,NSE,INE285A01027,,,,Capital Goods,INR
+EMAMILTD.NS,Emami Ltd.,IN,NSE,INE548C01032,,,,Fast Moving Consumer Goods,INR
+EMBASSY.NS,EMBASSY OFFICE PARKS REIT,IN,NSE,INE041025011,,,,Realty,INR
+EMCURE.NS,Emcure Pharmaceuticals Ltd.,IN,NSE,INE168P01015,,,,Healthcare,INR
+EMMVEE.NS,Emmvee Photovoltaic Power Ltd.,IN,NSE,INE1C6T01020,,,,Capital Goods,INR
+ENDURANCE.NS,Endurance Technologies Ltd.,IN,NSE,INE913H01037,,,,Automobile and Auto Components,INR
+ENGINERSIN.NS,Engineers India Ltd.,IN,NSE,INE510A01028,,,,Construction,INR
+ENRIN.NS,Siemens Energy India Ltd.,IN,NSE,INE1NPP01017,,,,Capital Goods,INR
+ESCORTS.NS,Escorts Kubota Ltd.,IN,NSE,INE042A01014,,,,Capital Goods,INR
+ETERNAL.NS,Eternal Ltd.,IN,NSE,INE758T01015,,,,Consumer Services,INR
+EXIDEIND.NS,Exide Industries Ltd.,IN,NSE,INE302A01020,,,,Automobile and Auto Components,INR
+FACT.NS,Fertilisers and Chemicals Travancore Ltd.,IN,NSE,INE188A01015,,,,Chemicals,INR
+FEDERALBNK.NS,Federal Bank Ltd.,IN,NSE,INE171A01029,,,,Financial Services,INR
+FINCABLES.NS,Finolex Cables Ltd.,IN,NSE,INE235A01022,,,,Capital Goods,INR
+FIRSTCRY.NS,Brainbees Solutions Ltd.,IN,NSE,INE02RE01045,,,,Consumer Services,INR
+FIVESTAR.NS,Five-Star Business Finance Ltd.,IN,NSE,INE128S01021,,,,Financial Services,INR
+FLUOROCHEM.NS,Gujarat Fluorochemicals Ltd.,IN,NSE,INE09N301011,,,,Chemicals,INR
+FORCEMOT.NS,Force Motors Ltd.,IN,NSE,INE451A01017,,,,Automobile and Auto Components,INR
+FORTIS.NS,Fortis Healthcare Ltd.,IN,NSE,INE061F01013,,,,Healthcare,INR
+FRACTAL.NS,Fractal Analytics Ltd.,IN,NSE,INE212S01015,,,,Information Technology,INR
+FSL.NS,Firstsource Solutions Ltd.,IN,NSE,INE684F01012,,,,Services,INR
+GABRIEL.NS,Gabriel India Ltd.,IN,NSE,INE524A01029,,,,Automobile and Auto Components,INR
+GAIL.NS,GAIL (India) Ltd.,IN,NSE,INE129A01019,,,,Oil Gas & Consumable Fuels,INR
+GALLANTT.NS,Gallantt Ispat Ltd.,IN,NSE,INE297H01019,,,,Capital Goods,INR
+GESHIP.NS,Great Eastern Shipping Co. Ltd.,IN,NSE,INE017A01032,,,,Services,INR
+GICRE.NS,General Insurance Corporation of India,IN,NSE,INE481Y01014,,,,Financial Services,INR
+GILLETTE.NS,Gillette India Ltd.,IN,NSE,INE322A01010,,,,Fast Moving Consumer Goods,INR
+GLAND.NS,Gland Pharma Ltd.,IN,NSE,INE068V01023,,,,Healthcare,INR
+GLAXO.NS,Glaxosmithkline Pharmaceuticals Ltd.,IN,NSE,INE159A01016,,,,Healthcare,INR
+GLENMARK.NS,Glenmark Pharmaceuticals Ltd.,IN,NSE,INE935A01035,,,,Healthcare,INR
+GMDCLTD.NS,Gujarat Mineral Development Corporation Ltd.,IN,NSE,INE131A01031,,,,Metals & Mining,INR
+GMRAIRPORT.NS,GMR Airports Ltd.,IN,NSE,INE776C01039,,,,Services,INR
+GODFRYPHLP.NS,Godfrey Phillips India Ltd.,IN,NSE,INE260B01028,,,,Fast Moving Consumer Goods,INR
+GODREJCP.NS,Godrej Consumer Products Ltd.,IN,NSE,INE102D01028,,,,Fast Moving Consumer Goods,INR
+GODREJIND.NS,Godrej Industries Ltd.,IN,NSE,INE233A01035,,,,Diversified,INR
+GODREJPROP.NS,Godrej Properties Ltd.,IN,NSE,INE484J01027,,,,Realty,INR
+GPIL.NS,Godawari Power & Ispat Ltd.,IN,NSE,INE177H01039,,,,Capital Goods,INR
+GRANULES.NS,Granules India Ltd.,IN,NSE,INE101D01020,,,,Healthcare,INR
+GRAPHITE.NS,Graphite India Ltd.,IN,NSE,INE371A01025,,,,Capital Goods,INR
+GRASIM.NS,Grasim Industries Ltd.,IN,NSE,INE047A01021,,,,Construction Materials,INR
+GRAVITA.NS,Gravita India Ltd.,IN,NSE,INE024L01027,,,,Metals & Mining,INR
+GROWW.NS,Billionbrains Garage Ventures Ltd.,IN,NSE,INE0HOQ01053,,,,Financial Services,INR
+GRSE.NS,Garden Reach Shipbuilders & Engineers Ltd.,IN,NSE,INE382Z01011,,,,Capital Goods,INR
+GVT&D.NS,GE Vernova T&D India Ltd.,IN,NSE,INE200A01026,,,,Capital Goods,INR
+HAL.NS,Hindustan Aeronautics Ltd.,IN,NSE,INE066F01020,,,,Capital Goods,INR
+HAVELLS.NS,Havells India Ltd.,IN,NSE,INE176B01034,,,,Consumer Durables,INR
+HBLENGINE.NS,HBL Engineering Ltd.,IN,NSE,INE292B01021,,,,Capital Goods,INR
+HCLTECH.NS,HCL Technologies Ltd.,IN,NSE,INE860A01027,,,,Information Technology,INR
+HDBFS.NS,HDB Financial Services Ltd.,IN,NSE,INE756I01012,,,,Financial Services,INR
+HDFCAMC.NS,HDFC Asset Management Company Ltd.,IN,NSE,INE127D01025,,,,Financial Services,INR
+HDFCBANK.NS,HDFC Bank Ltd.,IN,NSE,INE040A01034,,,,Financial Services,INR
+HDFCLIFE.NS,HDFC Life Insurance Company Ltd.,IN,NSE,INE795G01014,,,,Financial Services,INR
+HEGAM.NS,HEG Advanced Materials Ltd.,IN,NSE,INE545A01024,,,,Capital Goods,INR
+HEROMOTOCO.NS,Hero MotoCorp Ltd.,IN,NSE,INE158A01026,,,,Automobile and Auto Components,INR
+HEXT.NS,Hexaware Technologies Ltd.,IN,NSE,INE093A01041,,,,Information Technology,INR
+HFCL.NS,HFCL Ltd.,IN,NSE,INE548A01028,,,,Telecommunication,INR
+HINDALCO.NS,Hindalco Industries Ltd.,IN,NSE,INE038A01020,,,,Metals & Mining,INR
+HINDCOPPER.NS,Hindustan Copper Ltd.,IN,NSE,INE531E01026,,,,Metals & Mining,INR
+HINDPETRO.NS,Hindustan Petroleum Corporation Ltd.,IN,NSE,INE094A01015,,,,Oil Gas & Consumable Fuels,INR
+HINDUNILVR.NS,Hindustan Unilever Ltd.,IN,NSE,INE030A01027,,,,Fast Moving Consumer Goods,INR
+HINDZINC.NS,Hindustan Zinc Ltd.,IN,NSE,INE267A01025,,,,Metals & Mining,INR
+HOMEFIRST.NS,Home First Finance Company India Ltd.,IN,NSE,INE481N01025,,,,Financial Services,INR
+HONASA.NS,Honasa Consumer Ltd.,IN,NSE,INE0J5401028,,,,Fast Moving Consumer Goods,INR
+HONAUT.NS,Honeywell Automation India Ltd.,IN,NSE,INE671A01010,,,,Capital Goods,INR
+HSCL.NS,Himadri Speciality Chemical Ltd.,IN,NSE,INE019C01026,,,,Chemicals,INR
+HUDCO.NS,Housing & Urban Development Corporation Ltd.,IN,NSE,INE031A01017,,,,Financial Services,INR
+HYUNDAI.NS,Hyundai Motor India Ltd.,IN,NSE,INE0V6F01027,,,,Automobile and Auto Components,INR
+ICICIAMC.NS,ICICI Prudential Asset Management Company Ltd.,IN,NSE,INE346A01027,,,,Financial Services,INR
+ICICIBANK.NS,ICICI Bank Ltd.,IN,NSE,INE090A01021,,,,Financial Services,INR
+ICICIGI.NS,ICICI Lombard General Insurance Company Ltd.,IN,NSE,INE765G01017,,,,Financial Services,INR
+ICICILIFE.NS,ICICI Life Insurance Ltd.,IN,NSE,INE726G01019,,,,Financial Services,INR
+IDBI.NS,IDBI Bank Ltd.,IN,NSE,INE008A01015,,,,Financial Services,INR
+IDEA.NS,Vodafone Idea Ltd.,IN,NSE,INE669E01016,,,,Telecommunication,INR
+IDFCFIRSTB.NS,IDFC First Bank Ltd.,IN,NSE,INE092T01019,,,,Financial Services,INR
+IEX.NS,Indian Energy Exchange Ltd.,IN,NSE,INE022Q01020,,,,Financial Services,INR
+IFCI.NS,IFCI Ltd.,IN,NSE,INE039A01010,,,,Financial Services,INR
+IGIL.NS,International Gemological Institute Ltd.,IN,NSE,INE0Q9301021,,,,Services,INR
+IGL.NS,Indraprastha Gas Ltd.,IN,NSE,INE203G01027,,,,Oil Gas & Consumable Fuels,INR
+IIFL.NS,IIFL Finance Ltd.,IN,NSE,INE530B01024,,,,Financial Services,INR
+IKS.NS,Inventurus Knowledge Solutions Ltd.,IN,NSE,INE115Q01022,,,,Information Technology,INR
+INDHOTEL.NS,Indian Hotels Co. Ltd.,IN,NSE,INE053A01029,,,,Consumer Services,INR
+INDIACEM.NS,India Cements Ltd.,IN,NSE,INE383A01012,,,,Construction Materials,INR
+INDIAMART.NS,Indiamart Intermesh Ltd.,IN,NSE,INE933S01016,,,,Consumer Services,INR
+INDIANB.NS,Indian Bank,IN,NSE,INE562A01011,,,,Financial Services,INR
+INDIGO.NS,InterGlobe Aviation Ltd.,IN,NSE,INE646L01027,,,,Services,INR
+INDUSINDBK.NS,IndusInd Bank Ltd.,IN,NSE,INE095A01012,,,,Financial Services,INR
+INDUSTOWER.NS,Indus Towers Ltd.,IN,NSE,INE121J01017,,,,Telecommunication,INR
+INFY.NS,Infosys Ltd.,IN,NSE,INE009A01021,,,,Information Technology,INR
+INOXINDIA.NS,INOX India Ltd.,IN,NSE,INE616N01034,,,,Capital Goods,INR
+INOXWIND.NS,Inox Wind Ltd.,IN,NSE,INE066P01011,,,,Capital Goods,INR
+INTELLECT.NS,Intellect Design Arena Ltd.,IN,NSE,INE306R01017,,,,Information Technology,INR
+IOB.NS,Indian Overseas Bank,IN,NSE,INE565A01014,,,,Financial Services,INR
+IOC.NS,Indian Oil Corporation Ltd.,IN,NSE,INE242A01010,,,,Oil Gas & Consumable Fuels,INR
+IPCALAB.NS,Ipca Laboratories Ltd.,IN,NSE,INE571A01038,,,,Healthcare,INR
+IRB.NS,IRB Infrastructure Developers Ltd.,IN,NSE,INE821I01022,,,,Construction,INR
+IRCON.NS,IRCON International Ltd.,IN,NSE,INE962Y01021,,,,Construction,INR
+IRCTC.NS,Indian Railway Catering And Tourism Corporation Ltd.,IN,NSE,INE335Y01020,,,,Consumer Services,INR
+IREDA.NS,Indian Renewable Energy Development Agency Ltd.,IN,NSE,INE202E01016,,,,Financial Services,INR
+IRFC.NS,Indian Railway Finance Corporation Ltd.,IN,NSE,INE053F01010,,,,Financial Services,INR
+ITC.NS,ITC Ltd.,IN,NSE,INE154A01025,,,,Fast Moving Consumer Goods,INR
+ITCHOTELS.NS,ITC Hotels Ltd.,IN,NSE,INE379A01028,,,,Consumer Services,INR
+ITI.NS,ITI Ltd.,IN,NSE,INE248A01017,,,,Telecommunication,INR
+J&KBANK.NS,Jammu & Kashmir Bank Ltd.,IN,NSE,INE168A01041,,,,Financial Services,INR
+JAINREC.NS,Jain Resource Recycling Ltd.,IN,NSE,INE0YD401026,,,,Metals & Mining,INR
+JBMA.NS,JBM Auto Ltd.,IN,NSE,INE927D01051,,,,Automobile and Auto Components,INR
+JINDALSAW.NS,Jindal Saw Ltd.,IN,NSE,INE324A01032,,,,Capital Goods,INR
+JINDALSTEL.NS,Jindal Steel Ltd.,IN,NSE,INE749A01030,,,,Metals & Mining,INR
+JIOFIN.NS,Jio Financial Services Ltd.,IN,NSE,INE758E01017,,,,Financial Services,INR
+JKCEMENT.NS,J.K. Cement Ltd.,IN,NSE,INE823G01014,,,,Construction Materials,INR
+JKTYRE.NS,JK Tyre & Industries Ltd.,IN,NSE,INE573A01042,,,,Automobile and Auto Components,INR
+JMFINANCIL.NS,JM Financial Ltd.,IN,NSE,INE780C01023,,,,Financial Services,INR
+JPPOWER.NS,Jaiprakash Power Ventures Ltd.,IN,NSE,INE351F01018,,,,Power,INR
+JSL.NS,Jindal Stainless Ltd.,IN,NSE,INE220G01021,,,,Metals & Mining,INR
+JSWCEMENT.NS,JSW Cement Ltd.,IN,NSE,INE718I01012,,,,Construction Materials,INR
+JSWENERGY.NS,JSW Energy Ltd.,IN,NSE,INE121E01018,,,,Power,INR
+JSWINFRA.NS,JSW Infrastructure Ltd.,IN,NSE,INE880J01026,,,,Services,INR
+JSWSTEEL.NS,JSW Steel Ltd.,IN,NSE,INE019A01038,,,,Metals & Mining,INR
+JUBLFOOD.NS,Jubilant Foodworks Ltd.,IN,NSE,INE797F01020,,,,Consumer Services,INR
+JUBLINGREA.NS,Jubilant Ingrevia Ltd.,IN,NSE,INE0BY001018,,,,Chemicals,INR
+JWL.NS,Jupiter Wagons Ltd.,IN,NSE,INE209L01016,,,,Capital Goods,INR
+JYOTICNC.NS,Jyoti CNC Automation Ltd.,IN,NSE,INE980O01024,,,,Capital Goods,INR
+KAJARIACER.NS,Kajaria Ceramics Ltd.,IN,NSE,INE217B01036,,,,Consumer Durables,INR
+KALYANKJIL.NS,Kalyan Jewellers India Ltd.,IN,NSE,INE303R01014,,,,Consumer Durables,INR
+KARURVYSYA.NS,Karur Vysya Bank Ltd.,IN,NSE,INE036D01028,,,,Financial Services,INR
+KAYNES.NS,Kaynes Technology India Ltd.,IN,NSE,INE918Z01012,,,,Capital Goods,INR
+KEC.NS,Kec International Ltd.,IN,NSE,INE389H01022,,,,Construction,INR
+KEI.NS,KEI Industries Ltd.,IN,NSE,INE878B01027,,,,Capital Goods,INR
+KFINTECH.NS,Kfin Technologies Ltd.,IN,NSE,INE138Y01010,,,,Financial Services,INR
+KIMS.NS,Krishna Institute of Medical Sciences Ltd.,IN,NSE,INE967H01025,,,,Healthcare,INR
+KIRLOSBROS.NS,Kirloskar Brothers Ltd.,IN,NSE,INE732A01036,,,,Capital Goods,INR
+KIRLOSENG.NS,Kirloskar Oil Eng Ltd.,IN,NSE,INE146L01010,,,,Capital Goods,INR
+KOTAKBANK.NS,Kotak Mahindra Bank Ltd.,IN,NSE,INE237A01036,,,,Financial Services,INR
+KPIL.NS,Kalpataru Projects International Ltd.,IN,NSE,INE220B01022,,,,Construction,INR
+KPITTECH.NS,KPIT Technologies Ltd.,IN,NSE,INE04I401011,,,,Information Technology,INR
+KPRMILL.NS,K.P.R. Mill Ltd.,IN,NSE,INE930H01031,,,,Textiles,INR
+KSB.NS,KSB Ltd.,IN,NSE,INE999A01023,,,,Capital Goods,INR
+LALPATHLAB.NS,Dr. Lal Path Labs Ltd.,IN,NSE,INE600L01024,,,,Healthcare,INR
+LAURUSLABS.NS,Laurus Labs Ltd.,IN,NSE,INE947Q01028,,,,Healthcare,INR
+LEMONTREE.NS,Lemon Tree Hotels Ltd.,IN,NSE,INE970X01018,,,,Consumer Services,INR
+LENSKART.NS,Lenskart Solutions Ltd.,IN,NSE,INE956O01016,,,,Consumer Services,INR
+LGEINDIA.NS,LG Electronics India Ltd.,IN,NSE,INE324D01010,,,,Consumer Durables,INR
+LICHSGFIN.NS,LIC Housing Finance Ltd.,IN,NSE,INE115A01026,,,,Financial Services,INR
+LICI.NS,Life Insurance Corporation of India,IN,NSE,INE0J1Y01017,,,,Financial Services,INR
+LINDEINDIA.NS,Linde India Ltd.,IN,NSE,INE473A01011,,,,Chemicals,INR
+LLOYDSME.NS,Lloyds Metals And Energy Ltd.,IN,NSE,INE281B01032,,,,Metals & Mining,INR
+LODHA.NS,Lodha Developers Ltd.,IN,NSE,INE670K01029,,,,Realty,INR
+LT.NS,Larsen & Toubro Ltd.,IN,NSE,INE018A01030,,,,Construction,INR
+LTF.NS,L&T Finance Ltd.,IN,NSE,INE498L01015,,,,Financial Services,INR
+LTFOODS.NS,LT Foods Ltd.,IN,NSE,INE818H01020,,,,Fast Moving Consumer Goods,INR
+LTM.NS,LTM Ltd.,IN,NSE,INE214T01019,,,,Information Technology,INR
+LTTS.NS,L&T Technology Services Ltd.,IN,NSE,INE010V01017,,,,Information Technology,INR
+LUPIN.NS,Lupin Ltd.,IN,NSE,INE326A01037,,,,Healthcare,INR
+M&M.NS,Mahindra & Mahindra Ltd.,IN,NSE,INE101A01026,,,,Automobile and Auto Components,INR
+M&MFIN.NS,Mahindra & Mahindra Financial Services Ltd.,IN,NSE,INE774D01024,,,,Financial Services,INR
+MAHABANK.NS,Bank of Maharashtra,IN,NSE,INE457A01014,,,,Financial Services,INR
+MANAPPURAM.NS,Manappuram Finance Ltd.,IN,NSE,INE522D01027,,,,Financial Services,INR
+MANKIND.NS,Mankind Pharma Ltd.,IN,NSE,INE634S01028,,,,Healthcare,INR
+MARICO.NS,Marico Ltd.,IN,NSE,INE196A01026,,,,Fast Moving Consumer Goods,INR
+MARUTI.NS,Maruti Suzuki India Ltd.,IN,NSE,INE585B01010,,,,Automobile and Auto Components,INR
+MAXHEALTH.NS,Max Healthcare Institute Ltd.,IN,NSE,INE027H01010,,,,Healthcare,INR
+MAZDOCK.NS,Mazagoan Dock Shipbuilders Ltd.,IN,NSE,INE249Z01020,,,,Capital Goods,INR
+MCX.NS,Multi Commodity Exchange of India Ltd.,IN,NSE,INE745G01043,,,,Financial Services,INR
+MEDANTA.NS,Global Health Ltd.,IN,NSE,INE474Q01031,,,,Healthcare,INR
+MEESHO.NS,Meesho Ltd.,IN,NSE,INE0VDM01015,,,,Consumer Services,INR
+MFSL.NS,Max Financial Services Ltd.,IN,NSE,INE180A01020,,,,Financial Services,INR
+MGL.NS,Mahanagar Gas Ltd.,IN,NSE,INE002S01010,,,,Oil Gas & Consumable Fuels,INR
+MINDACORP.NS,Minda Corporation Ltd.,IN,NSE,INE842C01021,,,,Automobile and Auto Components,INR
+MMTC.NS,MMTC Ltd.,IN,NSE,INE123F01029,,,,Services,INR
+MOTHERSON.NS,Samvardhana Motherson International Ltd.,IN,NSE,INE775A01035,,,,Automobile and Auto Components,INR
+MOTILALOFS.NS,Motilal Oswal Financial Services Ltd.,IN,NSE,INE338I01027,,,,Financial Services,INR
+MPHASIS.NS,MphasiS Ltd.,IN,NSE,INE356A01018,,,,Information Technology,INR
+MRF.NS,MRF Ltd.,IN,NSE,INE883A01011,,,,Automobile and Auto Components,INR
+MRPL.NS,Mangalore Refinery & Petrochemicals Ltd.,IN,NSE,INE103A01014,,,,Oil Gas & Consumable Fuels,INR
+MSUMI.NS,Motherson Sumi Wiring India Ltd.,IN,NSE,INE0FS801015,,,,Automobile and Auto Components,INR
+MTARTECH.NS,MTAR Technologies Ltd.,IN,NSE,INE864I01014,,,,Capital Goods,INR
+MUTHOOTFIN.NS,Muthoot Finance Ltd.,IN,NSE,INE414G01012,,,,Financial Services,INR
+NAM-INDIA.NS,Nippon Life India Asset Management Ltd.,IN,NSE,INE298J01013,,,,Financial Services,INR
+NATCOPHARM.NS,NATCO Pharma Ltd.,IN,NSE,INE987B01026,,,,Healthcare,INR
+NATIONALUM.NS,National Aluminium Co. Ltd.,IN,NSE,INE139A01034,,,,Metals & Mining,INR
+NAUKRI.NS,Info Edge (India) Ltd.,IN,NSE,INE663F01032,,,,Consumer Services,INR
+NAVA.NS,Nava Ltd.,IN,NSE,INE725A01030,,,,Power,INR
+NAVINFLUOR.NS,Navin Fluorine International Ltd.,IN,NSE,INE048G01026,,,,Chemicals,INR
+NBCC.NS,NBCC (India) Ltd.,IN,NSE,INE095N01031,,,,Construction,INR
+NCC.NS,NCC Ltd.,IN,NSE,INE868B01028,,,,Construction,INR
+NESTLEIND.NS,Nestle India Ltd.,IN,NSE,INE239A01024,,,,Fast Moving Consumer Goods,INR
+NETWEB.NS,Netweb Technologies India Ltd.,IN,NSE,INE0NT901020,,,,Information Technology,INR
+NEULANDLAB.NS,Neuland Laboratories Ltd.,IN,NSE,INE794A01010,,,,Healthcare,INR
+NH.NS,Narayana Hrudayalaya Ltd.,IN,NSE,INE410P01011,,,,Healthcare,INR
+NHPC.NS,NHPC Ltd.,IN,NSE,INE848E01016,,,,Power,INR
+NIACL.NS,The New India Assurance Company Ltd.,IN,NSE,INE470Y01017,,,,Financial Services,INR
+NLCINDIA.NS,NLC India Ltd.,IN,NSE,INE589A01014,,,,Power,INR
+NMDC.NS,NMDC Ltd.,IN,NSE,INE584A01023,,,,Metals & Mining,INR
+NSLNISP.NS,NMDC Steel Ltd.,IN,NSE,INE0NNS01018,,,,Metals & Mining,INR
+NTPC.NS,NTPC Ltd.,IN,NSE,INE733E01010,,,,Power,INR
+NTPCGREEN.NS,NTPC Green Energy Ltd.,IN,NSE,INE0ONG01011,,,,Power,INR
+NUVAMA.NS,Nuvama Wealth Management Ltd.,IN,NSE,INE531F01023,,,,Financial Services,INR
+NUVOCO.NS,Nuvoco Vistas Corporation Ltd.,IN,NSE,INE118D01016,,,,Construction Materials,INR
+NYKAA.NS,FSN E-Commerce Ventures Ltd.,IN,NSE,INE388Y01029,,,,Consumer Services,INR
+OBEROIRLTY.NS,Oberoi Realty Ltd.,IN,NSE,INE093I01010,,,,Realty,INR
+OFSS.NS,Oracle Financial Services Software Ltd.,IN,NSE,INE881D01027,,,,Information Technology,INR
+OIL.NS,Oil India Ltd.,IN,NSE,INE274J01014,,,,Oil Gas & Consumable Fuels,INR
+OLAELEC.NS,Ola Electric Mobility Ltd.,IN,NSE,INE0LXG01040,,,,Automobile and Auto Components,INR
+OLECTRA.NS,Olectra Greentech Ltd.,IN,NSE,INE260D01016,,,,Automobile and Auto Components,INR
+ONESOURCE.NS,Onesource Specialty Pharma Ltd.,IN,NSE,INE013P01021,,,,Healthcare,INR
+ONGC.NS,Oil & Natural Gas Corporation Ltd.,IN,NSE,INE213A01029,,,,Oil Gas & Consumable Fuels,INR
+PAGEIND.NS,Page Industries Ltd.,IN,NSE,INE761H01022,,,,Textiles,INR
+PARADEEP.NS,Paradeep Phosphates Ltd.,IN,NSE,INE088F01024,,,,Chemicals,INR
+PATANJALI.NS,Patanjali Foods Ltd.,IN,NSE,INE619A01035,,,,Fast Moving Consumer Goods,INR
+PAYTM.NS,One 97 Communications Ltd.,IN,NSE,INE982J01020,,,,Financial Services,INR
+PCBL.NS,PCBL Chemical Ltd.,IN,NSE,INE602A01031,,,,Chemicals,INR
+PERSISTENT.NS,Persistent Systems Ltd.,IN,NSE,INE262H01021,,,,Information Technology,INR
+PETRONET.NS,Petronet LNG Ltd.,IN,NSE,INE347G01014,,,,Oil Gas & Consumable Fuels,INR
+PFC.NS,Power Finance Corporation Ltd.,IN,NSE,INE134E01011,,,,Financial Services,INR
+PFOCUS.NS,Prime Focus Ltd.,IN,NSE,INE367G01038,,,,Media Entertainment & Publication,INR
+PGEL.NS,PG Electroplast Ltd.,IN,NSE,INE457L01029,,,,Consumer Durables,INR
+PHOENIXLTD.NS,Phoenix Mills Ltd.,IN,NSE,INE211B01039,,,,Realty,INR
+PIDILITIND.NS,Pidilite Industries Ltd.,IN,NSE,INE318A01026,,,,Chemicals,INR
+PIIND.NS,PI Industries Ltd.,IN,NSE,INE603J01030,,,,Chemicals,INR
+PINELABS.NS,Pine Labs Ltd.,IN,NSE,INE15B701018,,,,Financial Services,INR
+PIRAMALFIN.NS,Piramal Finance Ltd.,IN,NSE,INE202B01038,,,,Financial Services,INR
+PNB.NS,Punjab National Bank,IN,NSE,INE160A01022,,,,Financial Services,INR
+PNBHOUSING.NS,PNB Housing Finance Ltd.,IN,NSE,INE572E01012,,,,Financial Services,INR
+POLICYBZR.NS,PB Fintech Ltd.,IN,NSE,INE417T01026,,,,Financial Services,INR
+POLYCAB.NS,Polycab India Ltd.,IN,NSE,INE455K01017,,,,Capital Goods,INR
+POLYMED.NS,Poly Medicure Ltd.,IN,NSE,INE205C01021,,,,Healthcare,INR
+POONAWALLA.NS,Poonawalla Fincorp Ltd.,IN,NSE,INE511C01022,,,,Financial Services,INR
+POWERGRID.NS,Power Grid Corporation of India Ltd.,IN,NSE,INE752E01010,,,,Power,INR
+POWERINDIA.NS,Hitachi Energy India Ltd.,IN,NSE,INE07Y701011,,,,Capital Goods,INR
+PPLPHARMA.NS,Piramal Pharma Ltd.,IN,NSE,INE0DK501011,,,,Healthcare,INR
+PREMIERENE.NS,Premier Energies Ltd.,IN,NSE,INE0BS701011,,,,Capital Goods,INR
+PRESTIGE.NS,Prestige Estates Projects Ltd.,IN,NSE,INE811K01011,,,,Realty,INR
+PRIVISCL.NS,Privi Speciality Chemicals Ltd.,IN,NSE,INE959A01019,,,,Chemicals,INR
+PTCIL.NS,PTC Industries Ltd.,IN,NSE,INE596F01018,,,,Capital Goods,INR
+PVRINOX.NS,PVR INOX Ltd.,IN,NSE,INE191H01014,,,,Media Entertainment & Publication,INR
+PWL.NS,Physicswallah Ltd.,IN,NSE,INE0LP301011,,,,Consumer Services,INR
+RADICO.NS,Radico Khaitan Ltd,IN,NSE,INE944F01028,,,,Fast Moving Consumer Goods,INR
+RAILTEL.NS,Railtel Corporation Of India Ltd.,IN,NSE,INE0DD101019,,,,Telecommunication,INR
+RAINBOW.NS,Rainbow Childrens Medicare Ltd.,IN,NSE,INE961O01016,,,,Healthcare,INR
+RAMCOCEM.NS,The Ramco Cements Ltd.,IN,NSE,INE331A01037,,,,Construction Materials,INR
+RBLBANK.NS,RBL Bank Ltd.,IN,NSE,INE976G01028,,,,Financial Services,INR
+RECLTD.NS,REC Ltd.,IN,NSE,INE020B01018,,,,Financial Services,INR
+REDINGTON.NS,Redington Ltd.,IN,NSE,INE891D01026,,,,Services,INR
+RELIANCE.NS,Reliance Industries Ltd.,IN,NSE,INE002A01018,,,,Oil Gas & Consumable Fuels,INR
+RHIM.NS,RHI MAGNESITA INDIA LTD.,IN,NSE,INE743M01012,,,,Capital Goods,INR
+RITES.NS,RITES Ltd.,IN,NSE,INE320J01015,,,,Construction,INR
+RKFORGE.NS,Ramkrishna Forgings Ltd.,IN,NSE,INE399G01023,,,,Automobile and Auto Components,INR
+RPOWER.NS,Reliance Power Ltd.,IN,NSE,INE614G01033,,,,Power,INR
+RRKABEL.NS,R R Kabel Ltd.,IN,NSE,INE777K01022,,,,Capital Goods,INR
+RUBICON.NS,Rubicon Research Ltd.,IN,NSE,INE506V01022,,,,Healthcare,INR
+RVNL.NS,Rail Vikas Nigam Ltd.,IN,NSE,INE415G01027,,,,Construction,INR
+SAGILITY.NS,Sagility Ltd.,IN,NSE,INE0W2G01015,,,,Information Technology,INR
+SAIL.NS,Steel Authority of India Ltd.,IN,NSE,INE114A01011,,,,Metals & Mining,INR
+SAILIFE.NS,Sai Life Sciences Ltd.,IN,NSE,INE570L01029,,,,Healthcare,INR
+SAMMAANCAP.NS,Sammaan Capital Ltd.,IN,NSE,INE148I01020,,,,Financial Services,INR
+SANSERA.NS,Sansera Engineering Ltd.,IN,NSE,INE953O01021,,,,Automobile and Auto Components,INR
+SARDAEN.NS,Sarda Energy and Minerals Ltd.,IN,NSE,INE385C01021,,,,Metals & Mining,INR
+SBICARD.NS,SBI Cards and Payment Services Ltd.,IN,NSE,INE018E01016,,,,Financial Services,INR
+SBILIFE.NS,SBI Life Insurance Company Ltd.,IN,NSE,INE123W01016,,,,Financial Services,INR
+SBIN.NS,State Bank of India,IN,NSE,INE062A01020,,,,Financial Services,INR
+SCHAEFFLER.NS,Schaeffler India Ltd.,IN,NSE,INE513A01022,,,,Automobile and Auto Components,INR
+SCHNEIDER.NS,Schneider Electric Infrastructure Ltd.,IN,NSE,INE839M01018,,,,Capital Goods,INR
+SCI.NS,Shipping Corporation of India Ltd.,IN,NSE,INE109A01011,,,,Services,INR
+SHREECEM.NS,Shree Cement Ltd.,IN,NSE,INE070A01015,,,,Construction Materials,INR
+SHRIPISTON.NS,SPR Auto Technologies Ltd.,IN,NSE,INE526E01018,,,,Automobile and Auto Components,INR
+SHRIRAMFIN.NS,Shriram Finance Ltd.,IN,NSE,INE721A01047,,,,Financial Services,INR
+SHYAMMETL.NS,Shyam Metalics and Energy Ltd.,IN,NSE,INE810G01011,,,,Capital Goods,INR
+SIEMENS.NS,Siemens Ltd.,IN,NSE,INE003A01024,,,,Capital Goods,INR
+SIGNATURE.NS,Signatureglobal (India) Ltd.,IN,NSE,INE903U01023,,,,Realty,INR
+SJVN.NS,SJVN Ltd.,IN,NSE,INE002L01015,,,,Power,INR
+SOBHA.NS,Sobha Ltd.,IN,NSE,INE671H01015,,,,Realty,INR
+SOLARINDS.NS,Solar Industries India Ltd.,IN,NSE,INE343H01029,,,,Chemicals,INR
+SONACOMS.NS,Sona BLW Precision Forgings Ltd.,IN,NSE,INE073K01018,,,,Automobile and Auto Components,INR
+SRF.NS,SRF Ltd.,IN,NSE,INE647A01010,,,,Chemicals,INR
+STARHEALTH.NS,Star Health and Allied Insurance Company Ltd.,IN,NSE,INE575P01011,,,,Financial Services,INR
+STLTECH.NS,Sterlite Technologies Ltd.,IN,NSE,INE089C01029,,,,Telecommunication,INR
+SUMICHEM.NS,Sumitomo Chemical India Ltd.,IN,NSE,INE258G01013,,,,Chemicals,INR
+SUNDARMFIN.NS,Sundaram Finance Ltd.,IN,NSE,INE660A01013,,,,Financial Services,INR
+SUNPHARMA.NS,Sun Pharmaceutical Industries Ltd.,IN,NSE,INE044A01036,,,,Healthcare,INR
+SUNTV.NS,Sun TV Network Ltd.,IN,NSE,INE424H01027,,,,Media Entertainment & Publication,INR
+SUPREMEIND.NS,Supreme Industries Ltd.,IN,NSE,INE195A01028,,,,Capital Goods,INR
+SUZLON.NS,Suzlon Energy Ltd.,IN,NSE,INE040H01021,,,,Capital Goods,INR
+SWANCORP.NS,Swan Corp Ltd.,IN,NSE,INE665A01038,,,,Chemicals,INR
+SWIGGY.NS,Swiggy Ltd.,IN,NSE,INE00H001014,,,,Consumer Services,INR
+SYNGENE.NS,Syngene International Ltd.,IN,NSE,INE398R01022,,,,Healthcare,INR
+SYRMA.NS,Syrma SGS Technology Ltd.,IN,NSE,INE0DYJ01015,,,,Capital Goods,INR
+TARIL.NS,Transformers And Rectifiers (India) Ltd.,IN,NSE,INE763I01026,,,,Capital Goods,INR
+TATACAP.NS,Tata Capital Ltd.,IN,NSE,INE976I01016,,,,Financial Services,INR
+TATACHEM.NS,Tata Chemicals Ltd.,IN,NSE,INE092A01019,,,,Chemicals,INR
+TATACOMM.NS,Tata Communications Ltd.,IN,NSE,INE151A01013,,,,Telecommunication,INR
+TATACONSUM.NS,Tata Consumer Products Ltd.,IN,NSE,INE192A01025,,,,Fast Moving Consumer Goods,INR
+TATAELXSI.NS,Tata Elxsi Ltd.,IN,NSE,INE670A01012,,,,Information Technology,INR
+TATAINVEST.NS,Tata Investment Corporation Ltd.,IN,NSE,INE672A01026,,,,Financial Services,INR
+TATAPOWER.NS,Tata Power Co. Ltd.,IN,NSE,INE245A01021,,,,Power,INR
+TATASTEEL.NS,Tata Steel Ltd.,IN,NSE,INE081A01020,,,,Metals & Mining,INR
+TATATECH.NS,Tata Technologies Ltd.,IN,NSE,INE142M01025,,,,Information Technology,INR
+TBOTEK.NS,TBO Tek Ltd.,IN,NSE,INE673O01025,,,,Consumer Services,INR
+TCS.NS,Tata Consultancy Services Ltd.,IN,NSE,INE467B01029,,,,Information Technology,INR
+TDPOWERSYS.NS,TD Power Systems Ltd.,IN,NSE,INE419M01035,,,,Capital Goods,INR
+TECHM.NS,Tech Mahindra Ltd.,IN,NSE,INE669C01036,,,,Information Technology,INR
+TECHNOE.NS,Techno Electric & Engineering Company Ltd.,IN,NSE,INE285K01026,,,,Construction,INR
+TEGA.NS,Tega Industries Ltd.,IN,NSE,INE011K01018,,,,Capital Goods,INR
+TEJASNET.NS,Tejas Networks Ltd.,IN,NSE,INE010J01012,,,,Telecommunication,INR
+TENNIND.NS,Tenneco Clean Air India Ltd.,IN,NSE,INE19RI01016,,,,Automobile and Auto Components,INR
+THANGAMAYL.NS,Thangamayil Jewellery Ltd.,IN,NSE,INE085J01014,,,,Consumer Durables,INR
+THERMAX.NS,Thermax Ltd.,IN,NSE,INE152A01029,,,,Capital Goods,INR
+TIINDIA.NS,Tube Investments of India Ltd.,IN,NSE,INE974X01010,,,,Automobile and Auto Components,INR
+TIMKEN.NS,Timken India Ltd.,IN,NSE,INE325A01013,,,,Capital Goods,INR
+TITAGARH.NS,Titagarh Rail Systems Ltd.,IN,NSE,INE615H01020,,,,Capital Goods,INR
+TITAN.NS,Titan Company Ltd.,IN,NSE,INE280A01028,,,,Consumer Durables,INR
+TMCV.NS,Tata Motors Ltd.,IN,NSE,INE1TAE01010,,,,Capital Goods,INR
+TMPV.NS,Tata Motors Passenger Vehicles Ltd.,IN,NSE,INE155A01022,,,,Automobile and Auto Components,INR
+TORNTPHARM.NS,Torrent Pharmaceuticals Ltd.,IN,NSE,INE685A01028,,,,Healthcare,INR
+TORNTPOWER.NS,Torrent Power Ltd.,IN,NSE,INE813H01021,,,,Power,INR
+TRENT.NS,Trent Ltd.,IN,NSE,INE849A01020,,,,Consumer Services,INR
+TRIDENT.NS,Trident Ltd.,IN,NSE,INE064C01022,,,,Textiles,INR
+TRITURBINE.NS,Triveni Turbine Ltd.,IN,NSE,INE152M01016,,,,Capital Goods,INR
+TTML.NS,Tata Teleservices (Maharashtra) Ltd.,IN,NSE,INE517B01013,,,,Telecommunication,INR
+TVSMOTOR.NS,TVS Motor Company Ltd.,IN,NSE,INE494B01023,,,,Automobile and Auto Components,INR
+UBL.NS,United Breweries Ltd.,IN,NSE,INE686F01025,,,,Fast Moving Consumer Goods,INR
+UCOBANK.NS,UCO Bank,IN,NSE,INE691A01018,,,,Financial Services,INR
+ULTRACEMCO.NS,UltraTech Cement Ltd.,IN,NSE,INE481G01011,,,,Construction Materials,INR
+UNIONBANK.NS,Union Bank of India,IN,NSE,INE692A01016,,,,Financial Services,INR
+UNITDSPR.NS,United Spirits Ltd.,IN,NSE,INE854D01024,,,,Fast Moving Consumer Goods,INR
+UNOMINDA.NS,UNO Minda Ltd.,IN,NSE,INE405E01023,,,,Automobile and Auto Components,INR
+UPL.NS,UPL Ltd.,IN,NSE,INE628A01036,,,,Chemicals,INR
+URBANCO.NS,Urban Company Ltd.,IN,NSE,INE0CAZ01013,,,,Consumer Services,INR
+USHAMART.NS,Usha Martin Ltd.,IN,NSE,INE228A01035,,,,Capital Goods,INR
+UTIAMC.NS,UTI Asset Management Company Ltd.,IN,NSE,INE094J01016,,,,Financial Services,INR
+VAML.NS,Vedanta Aluminium Metal Ltd.,IN,NSE,INE1CDF01017,,,,Metals & Mining,INR
+VBL.NS,Varun Beverages Ltd.,IN,NSE,INE200M01039,,,,Fast Moving Consumer Goods,INR
+VEDL.NS,Vedanta Ltd.,IN,NSE,INE205A01025,,,,Metals & Mining,INR
+VEDPOWER.NS,Vedanta Power Ltd.,IN,NSE,INE694L01019,,,,Power,INR
+VIJAYA.NS,Vijaya Diagnostic Centre Ltd.,IN,NSE,INE043W01024,,,,Healthcare,INR
+VISL.NS,Vedanta Iron and Steel Ltd.,IN,NSE,INE1CLE01013,,,,Metals & Mining,INR
+VMM.NS,Vishal Mega Mart Ltd.,IN,NSE,INE01EA01019,,,,Consumer Services,INR
+VOGL.NS,Vedanta Oil and Gas Ltd.,IN,NSE,INE704J01044,,,,Oil Gas & Consumable Fuels,INR
+VOLTAS.NS,Voltas Ltd.,IN,NSE,INE226A01021,,,,Consumer Durables,INR
+VTL.NS,Vardhman Textiles Ltd.,IN,NSE,INE825A01020,,,,Textiles,INR
+WAAREEENER.NS,Waaree Energies Ltd.,IN,NSE,INE377N01017,,,,Capital Goods,INR
+WELCORP.NS,Welspun Corp Ltd.,IN,NSE,INE191B01025,,,,Capital Goods,INR
+WELSPUNLIV.NS,Welspun Living Ltd.,IN,NSE,INE192B01031,,,,Textiles,INR
+WHIRLPOOL.NS,Whirlpool of India Ltd.,IN,NSE,INE716A01013,,,,Consumer Durables,INR
+WIPRO.NS,Wipro Ltd.,IN,NSE,INE075A01022,,,,Information Technology,INR
+WOCKPHARMA.NS,Wockhardt Ltd.,IN,NSE,INE049B01025,,,,Healthcare,INR
+YESBANK.NS,Yes Bank Ltd.,IN,NSE,INE528G01035,,,,Financial Services,INR
+ZEEL.NS,Zee Entertainment Enterprises Ltd.,IN,NSE,INE256A01028,,,,Media Entertainment & Publication,INR
+ZENSARTECH.NS,Zensar Technolgies Ltd.,IN,NSE,INE520A01027,,,,Information Technology,INR
+ZENTEC.NS,Zen Technologies Ltd.,IN,NSE,INE251B01027,,,,Capital Goods,INR
+ZFCVINDIA.NS,ZF Commercial Vehicle Control Systems India Ltd.,IN,NSE,INE342J01019,,,,Automobile and Auto Components,INR
+ZYDUSLIFE.NS,Zydus Lifesciences Ltd.,IN,NSE,INE010B01027,,,,Healthcare,INR
+ZYDUSWELL.NS,Zydus Wellness Ltd.,IN,NSE,INE768C01028,,,,Fast Moving Consumer Goods,INR

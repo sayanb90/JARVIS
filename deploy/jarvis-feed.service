@@ -17,9 +17,10 @@ StartLimitBurst=10
 User=jarvis
 WorkingDirectory=/home/jarvis/JARVIS
 EnvironmentFile=/home/jarvis/JARVIS/.env
-# --limit 5: Gate U1 cautious start (first live session). Widen once a full session comes back clean
-# (section 13.3) -- drop --limit for the whole universe, or raise it gradually.
-ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m data_layer.upstox.feed --limit 5
+# Widened to the full NIFTY 500 universe (2026-10-30) after the 5-ticker Gate U1 smoke test came back
+# clean. Real per-connection subscription limits are still unverified (runbook 13.3) -- watch the log
+# for 401/403 or subscribe errors; fall back to --limit N if Upstox rejects the full batch.
+ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m data_layer.upstox.feed
 # SIGTERM makes the collector save the bars received so far and compact the day before it exits
 KillSignal=SIGTERM
 TimeoutStopSec=60
