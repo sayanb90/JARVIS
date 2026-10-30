@@ -94,7 +94,15 @@ function jumpToSymbol(sym) {
   if (!sym) return;
   state.symbol = sym;
   setTab('instrument', false);
-  loadSymbols().catch((e) => setStatus(e.message, true));
+  // /api/symbols is equities-only now (F&O has its own tab), so an F&O contract would not survive a
+  // loadSymbols() refresh: add it to the dropdown directly instead, same as a normal equity jump.
+  if (!$('symbol').querySelector(`option[value="${sym}"]`)) {
+    const opt = document.createElement('option');
+    opt.value = sym; opt.textContent = sym + ' (F&O)';
+    $('symbol').prepend(opt);
+  }
+  $('symbol').value = sym;
+  refresh();
 }
 
 /* ---------- instrument view ---------- */
@@ -225,7 +233,9 @@ async function refreshFo() {
   writeHash();
   setStatus('Loading ' + state.underlying + '…');
   try {
-    const d = await api('/api/fo/chain', { date: state.day, underlying: state.underlying, expiry: state.expiry || '' });
+    const params = { date: state.day, underlying: state.underlying };
+    if (state.expiry) params.expiry = state.expiry;
+    const d = await api('/api/fo/chain', params);
     if (id !== reqId) return;
     state.foData = d; state.expiry = d.expiry;
     fillSelect($('expiry'), d.expiries.map((e) => [e, e]), d.expiry);

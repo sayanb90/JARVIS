@@ -150,6 +150,14 @@ class Lake:
         return self.rollup(width_s, symbol, frame=df) if width_s > 1 and not df.empty else df
 
     # -- futures and options (runbook section 17) ---------------------------
+    def fo_symbols(self) -> set[str]:
+        """Every symbol ever in the F&O instrument table (any day, including expired contracts), used to
+        separate derivatives from equities when a view wants one or the other.  {} if nothing imported yet."""
+        fo_path = self.dir / "instruments" / "fo.parquet"
+        if not fo_path.exists():
+            return set()
+        return set(pd.read_parquet(fo_path, columns=["symbol"])["symbol"])
+
     def fo_underlyings(self, day: str, interval: str = "1s") -> list[str]:
         """Underlyings with derivative bars on `day` (joins that day's bar symbols against the
         instrument table written by `fo_instruments import`); [] if nothing was ever imported."""

@@ -11,7 +11,7 @@
 <header>
   <h1>JARVIS <span>Intraday</span></h1>
   <nav role="tablist">
-    <button role="tab" id="tab-instrument" aria-selected="true">Instrument</button>
+    <button role="tab" id="tab-instrument" aria-selected="true">Equities</button>
     <button role="tab" id="tab-overview" aria-selected="false">Market overview</button>
     <button role="tab" id="tab-fo" aria-selected="false">F&amp;O</button>
   </nav>
@@ -21,7 +21,7 @@
 
 <section class="controls" aria-label="Selection">
   <label>Date <select id="date"></select></label>
-  <label>Instrument <select id="symbol"></select></label>
+  <label>Equity <select id="symbol"></select></label>
   <label>Bar width <select id="width"></select></label>
   <label>Volatility window <select id="volwin"></select></label>
   <label>Underlying <select id="underlying"></select></label>
@@ -74,7 +74,7 @@
       </div>
       <h3 class="section-h">Option chain &mdash; <span id="fo-chain-title"></span></h3>
       <div class="table-wrap"><table id="fo-chain"></table></div>
-      <p class="note">Spot is a proxy (last close of the nearest future); no index LTP is collected. ATM row is highlighted. Click a price to open that contract in the Instrument tab.</p>
+      <p class="note">Spot is a proxy (last close of the nearest future); no index LTP is collected. ATM row is highlighted. Click a price to open that contract's full intraday chart.</p>
     </div>
   </section>
 </main>

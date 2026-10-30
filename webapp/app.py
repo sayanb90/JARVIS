@@ -6,9 +6,9 @@ JARVIS intraday viewer: a small read-only web app over the Parquet lake.
 
 API (JSON):
   GET /api/meta                                    days available, demo flag, allowed bar widths
-  GET /api/symbols?date=YYYY-MM-DD                 instruments with bars that day
-  GET /api/day?date=&symbol=&width=1&vol_window=300   summary + chart series for one instrument
-  GET /api/overview?date=                          one row per instrument: volume, spread, volatility, ...
+  GET /api/symbols?date=YYYY-MM-DD                 equities with bars that day (F&O contracts are listed under /api/fo/*)
+  GET /api/day?date=&symbol=&width=1&vol_window=300   summary + chart series for one instrument (equity or F&O)
+  GET /api/overview?date=                          one row per equity: volume, spread, volatility, ...
   GET /api/fo/meta?date=                           underlyings with derivative bars that day
   GET /api/fo/chain?date=&underlying=&expiry=      futures + option chain snapshot (section 17)
 
@@ -105,9 +105,13 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     @app.get("/api/symbols")
     def symbols(date: str):
         _check_date(date)
-        df = lake().bar_symbols(date, interval)
+        q = lake()
+        df = q.bar_symbols(date, interval)
         if df.empty:
             raise HTTPException(404, f"no bars for {date}")
+        df = df[~df["symbol"].isin(q.fo_symbols())]                 # equities only; F&O has its own tab
+        if df.empty:
+            raise HTTPException(404, f"no equity bars for {date}")
         return df.to_dict("records")
 
     @app.get("/api/day")
@@ -137,7 +141,10 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         key = (date, tuple((f.name, f.stat().st_mtime_ns) for f in files))
         if key not in overview_cache:
             overview_cache.clear()          # keep only the latest day in memory
-            overview_cache[key] = _json_safe(lake().day_overview(date, interval).to_dict("records"))
+            q = lake()
+            rows = q.day_overview(date, interval)
+            rows = rows[~rows["symbol"].isin(q.fo_symbols())]       # equities only; F&O has its own tab
+            overview_cache[key] = _json_safe(rows.to_dict("records"))
         return overview_cache[key]
 
     @app.get("/api/fo/meta")
@@ -148,6 +155,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     @app.get("/api/fo/chain")
     def fo_chain(date: str, underlying: str, expiry: str | None = None):
         _check_date(date)
+        expiry = expiry or None               # an empty string means "no preference", same as omitting it
         if not UNDERLYING_RE.match(underlying):
             raise HTTPException(422, "invalid underlying")
         if expiry is not None and not DATE_RE.match(expiry):

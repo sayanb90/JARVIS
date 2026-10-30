@@ -214,6 +214,22 @@ def test_fo_api_meta_and_chain_endpoints(tmp_path):
     assert c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "../etc"}).status_code == 422
     assert c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "NIFTY", "expiry": "bad"}).status_code == 422
     assert c.get("/api/fo/meta", params={"date": "not-a-date"}).status_code == 422
+    # the viewer sends expiry="" (not omitted) before a user has picked one; that must not 422
+    empty = c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "NIFTY", "expiry": ""})
+    assert empty.status_code == 200 and empty.json()["expiry"] == "2026-11-23"
+
+
+def test_api_symbols_and_overview_exclude_fo_contracts(tmp_path):
+    seed_fo_chain(tmp_path)
+    tick_store.write_bars([Bar(OPEN, "A.NS", "IN", 1, 2, 0.5, 1.5, 3, 1.2, 1, None, None, None, None)], "1s", tmp_path)
+    tick_store.compact_day("1s", DAY, tmp_path)
+    c = TestClient(create_app(tmp_path))
+    syms = {s["symbol"] for s in c.get("/api/symbols", params={"date": "2026-10-23"}).json()}
+    assert syms == {"A.NS"}                                                     # F&O contracts filtered out
+    rows = {r["symbol"] for r in c.get("/api/overview", params={"date": "2026-10-23"}).json()}
+    assert rows == {"A.NS"}
+    # the instrument-level chart still works for an F&O symbol directly (the F&O tab links to it)
+    assert c.get("/api/day", params={"date": "2026-10-23", "symbol": "NIFTY_FUT_23_NOV_26"}).status_code == 200
 
 
 # -- verification of futures bars --------------------------------------------------------
