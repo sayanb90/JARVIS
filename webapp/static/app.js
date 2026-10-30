@@ -6,7 +6,7 @@ const fmtInt = (x) => (x == null ? '–' : Math.round(x).toLocaleString('en-IN')
 const WIDTH_LABEL = { 1: '1 second', 5: '5 seconds', 15: '15 seconds', 30: '30 seconds', 60: '1 minute', 300: '5 minutes' };
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
 
-const state = { meta: null, day: null, symbol: null, width: 1, volwin: 300, tab: 'instrument', data: null, overview: [], sort: ['volume', -1] };
+const state = { meta: null, day: null, symbol: null, width: 1, volwin: 300, tab: 'instrument', data: null, overview: [], sort: ['volume', -1], underlying: null, expiry: null, foData: null };
 let reqId = 0;
 
 async function api(path, params) {
@@ -24,10 +24,12 @@ const fillSelect = (el, items, sel) => { el.innerHTML = items.map(([v, l]) => `<
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  return { day: p.get('date'), symbol: p.get('symbol'), tab: p.get('tab'), width: +p.get('width') || null, volwin: +p.get('volwin') || null };
+  return { day: p.get('date'), symbol: p.get('symbol'), tab: p.get('tab'), width: +p.get('width') || null, volwin: +p.get('volwin') || null,
+          underlying: p.get('underlying'), expiry: p.get('expiry') };
 }
 function writeHash() {
-  const p = new URLSearchParams({ date: state.day || '', symbol: state.symbol || '', tab: state.tab, width: state.width, volwin: state.volwin });
+  const p = new URLSearchParams({ date: state.day || '', symbol: state.symbol || '', tab: state.tab, width: state.width, volwin: state.volwin,
+                                  underlying: state.underlying || '', expiry: state.expiry || '' });
   history.replaceState(null, '', '#' + p.toString());
 }
 
@@ -39,9 +41,10 @@ async function init() {
   fillSelect($('volwin'), state.meta.vol_windows.map((w) => [w, VOLWIN_LABEL[w] || w + ' s']), (state.volwin = state.meta.vol_windows.includes(h.volwin) ? h.volwin : 300));
   if (!state.meta.days.length) { $('empty').hidden = false; $('view-instrument').hidden = true; setStatus('No data'); return; }
   fillSelect($('date'), state.meta.days.map((d) => [d, d]), (state.day = state.meta.days.includes(h.day) ? h.day : state.meta.days[0]));
-  state.symbol = h.symbol;
-  setTab(h.tab === 'overview' ? 'overview' : 'instrument', false);
-  await loadSymbols();
+  state.symbol = h.symbol; state.underlying = h.underlying; state.expiry = h.expiry;
+  const tab = h.tab === 'overview' ? 'overview' : h.tab === 'fo' ? 'fo' : 'instrument';
+  setTab(tab, false);
+  if (tab === 'fo') await loadFoUnderlyings(); else await loadSymbols();
 }
 
 async function loadSymbols() {
@@ -75,10 +78,23 @@ function setTab(tab, reload = true) {
   state.tab = tab;
   $('tab-instrument').setAttribute('aria-selected', tab === 'instrument');
   $('tab-overview').setAttribute('aria-selected', tab === 'overview');
+  $('tab-fo').setAttribute('aria-selected', tab === 'fo');
   $('view-instrument').hidden = tab !== 'instrument';
   $('view-overview').hidden = tab !== 'overview';
+  $('view-fo').hidden = tab !== 'fo';
   for (const id of ['symbol', 'width', 'volwin']) $(id).closest('label').style.display = tab === 'instrument' ? '' : 'none';
-  if (reload) refresh();
+  for (const id of ['underlying', 'expiry']) $(id).closest('label').style.display = tab === 'fo' ? '' : 'none';
+  if (reload) {
+    if (tab === 'fo') loadFoUnderlyings().catch((e) => setStatus(e.message, true));
+    else refresh();
+  }
+}
+
+function jumpToSymbol(sym) {
+  if (!sym) return;
+  state.symbol = sym;
+  setTab('instrument', false);
+  loadSymbols().catch((e) => setStatus(e.message, true));
 }
 
 /* ---------- instrument view ---------- */
@@ -191,11 +207,105 @@ function renderOverview() {
       xaxis: { title: { text: 'Realised vol (%)', font: { size: 11 } }, gridcolor: grid }, yaxis: { title: { text: 'Avg spread (bps)', font: { size: 11 } }, gridcolor: grid, rangemode: 'tozero' } }, { responsive: true, displaylogo: false });
 }
 
+/* ---------- futures & options ---------- */
+async function loadFoUnderlyings() {
+  setStatus('Loading underlyings…');
+  const meta = await api('/api/fo/meta', { date: state.day });
+  if (!meta.underlyings.length) {
+    fillSelect($('underlying'), []); fillSelect($('expiry'), []);
+    state.foData = null; renderFo(null); setStatus('No F&O data for ' + state.day); return;
+  }
+  fillSelect($('underlying'), meta.underlyings.map((u) => [u, u]),
+    (state.underlying = meta.underlyings.includes(state.underlying) ? state.underlying : meta.underlyings[0]));
+  await refreshFo();
+}
+
+async function refreshFo() {
+  const id = ++reqId;
+  writeHash();
+  setStatus('Loading ' + state.underlying + '…');
+  try {
+    const d = await api('/api/fo/chain', { date: state.day, underlying: state.underlying, expiry: state.expiry || '' });
+    if (id !== reqId) return;
+    state.foData = d; state.expiry = d.expiry;
+    fillSelect($('expiry'), d.expiries.map((e) => [e, e]), d.expiry);
+    renderFo(d);
+    setStatus(`${d.underlying} · ${d.expiry || 'no option expiry'} · ${d.chain.length} strikes`);
+  } catch (e) { if (id === reqId) setStatus(e.message, true); }
+}
+
+function foCards(d) {
+  const items = [
+    ['Spot (proxy)', fmt(d.spot)], ['ATM strike', fmtInt(d.atm_strike)],
+    ['PCR (put/call OI)', d.pcr == null ? '–' : d.pcr.toFixed(2)],
+    ['Total call OI', fmtInt(d.total_call_oi)], ['Total put OI', fmtInt(d.total_put_oi)],
+  ];
+  $('fo-cards').innerHTML = items.map(([k, v]) => `<div class="card"><b>${k}</b><span>${v}</span></div>`).join('');
+}
+
+function renderFoFutures(d) {
+  const chg = (v) => v == null ? '–' : `<span class="${v >= 0 ? 'pos' : 'neg'}">${v >= 0 ? '+' : ''}${fmtInt(v)}</span>`;
+  $('fo-futures').innerHTML = '<thead><tr><th>Expiry</th><th>LTP</th><th>OI</th><th>OI chg</th><th>Volume</th></tr></thead><tbody>' +
+    d.futures.map((r) => `<tr data-s="${r.symbol}"><td>${r.expiry}</td><td>${fmt(r.close)}</td><td>${fmtInt(r.oi)}</td><td>${chg(r.oi_change)}</td><td>${fmtInt(r.volume)}</td></tr>`).join('') +
+    '</tbody>';
+  $('fo-futures').querySelectorAll('tbody tr').forEach((tr) => tr.onclick = () => jumpToSymbol(tr.dataset.s));
+}
+
+function renderFoChain(d) {
+  $('fo-chain-title').textContent = d.underlying + (d.expiry ? ' · ' + d.expiry : ' · no option expiry collected');
+  const cell = (sym, val, cls = '') => sym ? `<td class="${cls}" data-s="${sym}">${val}</td>` : '<td class="muted">–</td>';
+  const chg = (v) => v == null ? '–' : (v >= 0 ? '+' : '') + fmtInt(v);
+  const rows = d.chain.map((r) => `<tr${r.strike === d.atm_strike ? ' class="atm"' : ''}>` +
+    cell(r.ce_symbol, fmtInt(r.ce_oi)) + cell(r.ce_symbol, chg(r.ce_oi_change), r.ce_oi_change >= 0 ? 'pos' : 'neg') +
+    cell(r.ce_symbol, fmtInt(r.ce_volume)) + cell(r.ce_symbol, fmt(r.ce_close)) +
+    `<td class="strike">${fmtInt(r.strike)}</td>` +
+    cell(r.pe_symbol, fmt(r.pe_close)) + cell(r.pe_symbol, fmtInt(r.pe_volume)) +
+    cell(r.pe_symbol, chg(r.pe_oi_change), r.pe_oi_change >= 0 ? 'pos' : 'neg') + cell(r.pe_symbol, fmtInt(r.pe_oi)) +
+    '</tr>').join('');
+  $('fo-chain').innerHTML = `<thead><tr><th colspan="4">Calls</th><th></th><th colspan="4">Puts</th></tr>
+    <tr><th>OI</th><th>OI chg</th><th>Vol</th><th>LTP</th><th>Strike</th><th>LTP</th><th>Vol</th><th>OI chg</th><th>OI</th></tr></thead>
+    <tbody>${rows}</tbody>`;
+  $('fo-chain').querySelectorAll('td[data-s]').forEach((td) => td.onclick = () => jumpToSymbol(td.dataset.s));
+}
+
+function renderFoOiChart(d) {
+  const strikes = d.chain.map((r) => String(r.strike));
+  const fg = css('--fg'), grid = css('--grid'), teal = css('--teal'), orange = css('--orange');
+  const tr = [
+    { x: d.chain.map((r) => r.ce_oi == null ? 0 : -r.ce_oi), y: strikes, name: 'Call OI', type: 'bar', orientation: 'h',
+      marker: { color: teal }, customdata: d.chain.map((r) => r.ce_oi || 0), hovertemplate: 'Strike %{y}<br>Call OI %{customdata:,}<extra></extra>' },
+    { x: d.chain.map((r) => r.pe_oi == null ? 0 : r.pe_oi), y: strikes, name: 'Put OI', type: 'bar', orientation: 'h',
+      marker: { color: orange }, hovertemplate: 'Strike %{y}<br>Put OI %{x:,}<extra></extra>' },
+  ];
+  const layout = {
+    title: { text: 'Open interest by strike', font: { size: 13 } }, barmode: 'overlay', height: Math.max(400, strikes.length * 18),
+    margin: { l: 70, r: 20, t: 36, b: 40 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { color: fg, family: '-apple-system, BlinkMacSystemFont, Inter, Helvetica Neue, sans-serif' },
+    hoverlabel: { bgcolor: '#1d1d1f', bordercolor: 'rgba(255,255,255,.2)', font: { color: fg } },
+    legend: { orientation: 'h', y: 1.04 },
+    xaxis: { title: { text: 'Open interest (puts →, ← calls)', font: { size: 11 } }, gridcolor: grid, zerolinecolor: grid, tickformat: ',' },
+    yaxis: { type: 'category', categoryorder: 'array', categoryarray: strikes, gridcolor: grid, tickfont: { size: 10 } },
+  };
+  Plotly.react('chart-oi', tr, layout, { responsive: true, displaylogo: false });
+}
+
+function renderFo(d) {
+  if (!d || (!d.futures.length && !d.chain.length)) { $('fo-empty').hidden = false; $('fo-body').hidden = true; return; }
+  $('fo-empty').hidden = true; $('fo-body').hidden = false;
+  foCards(d); renderFoFutures(d); renderFoChain(d); renderFoOiChart(d);
+}
+
 /* ---------- wiring ---------- */
-$('date').onchange = (e) => { state.day = e.target.value; loadSymbols().catch((x) => setStatus(x.message, true)); };
+$('date').onchange = (e) => {
+  state.day = e.target.value;
+  (state.tab === 'fo' ? loadFoUnderlyings() : loadSymbols()).catch((x) => setStatus(x.message, true));
+};
 $('symbol').onchange = (e) => { state.symbol = e.target.value; refresh(); };
 $('width').onchange = (e) => { state.width = +e.target.value; refresh(); };
 $('volwin').onchange = (e) => { state.volwin = +e.target.value; refresh(); };
+$('underlying').onchange = (e) => { state.underlying = e.target.value; state.expiry = null; refreshFo().catch((x) => setStatus(x.message, true)); };
+$('expiry').onchange = (e) => { state.expiry = e.target.value; refreshFo().catch((x) => setStatus(x.message, true)); };
 $('tab-instrument').onclick = () => setTab('instrument');
 $('tab-overview').onclick = () => setTab('overview');
+$('tab-fo').onclick = () => setTab('fo');
 init();

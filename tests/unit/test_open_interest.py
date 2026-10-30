@@ -149,6 +149,73 @@ def test_demo_derivatives_have_open_interest_and_default_demo_is_unchanged(tmp_p
     assert (tmp_path / "d3" / "DEMO").exists()
 
 
+# -- option chain / futures snapshot (query layer + webapp) ------------------------------
+def fo_records():
+    def r(itype, strike=None, token="t"):
+        label = "FUT" if itype == "FUT" else f"{int(strike)} {itype}"
+        return {"segment": "NSE_FO", "instrument_type": itype, "instrument_key": f"NSE_FO|{token}",
+                "trading_symbol": f"NIFTY {label} 23 NOV 26", "underlying_symbol": "NIFTY",
+                "underlying_key": "NSE_INDEX|Nifty 50", "expiry": "2026-11-23", "lot_size": 65,
+                "tick_size": 5.0, "weekly": False, "strike_price": strike}
+    return [r("FUT", token="f"), r("CE", 24500, "c1"), r("PE", 24500, "p1"), r("CE", 24600, "c2"), r("PE", 24600, "p2")]
+
+
+def chain_bar(sym, close, oi):
+    return Bar(OPEN, sym, "IN", close, close, close, close, 10, close, 1, close - 0.05, close + 0.05, 5, 5, oi=oi)
+
+
+def seed_fo_chain(lake_dir):
+    fo.save_table(fo.parse_master(fo_records()), DAY, lake_dir)
+    bars = [chain_bar("NIFTY_FUT_23_NOV_26", 24550.0, 1_000_000), chain_bar("NIFTY_24500_CE_23_NOV_26", 120.0, 500_000),
+           chain_bar("NIFTY_24500_PE_23_NOV_26", 90.0, 400_000), chain_bar("NIFTY_24600_CE_23_NOV_26", 80.0, 300_000),
+           chain_bar("NIFTY_24600_PE_23_NOV_26", 110.0, 600_000)]
+    tick_store.write_bars(bars, "1s", lake_dir)
+    tick_store.compact_day("1s", DAY, lake_dir)
+
+
+def test_fo_underlyings_and_chain_pick_the_right_expiry_atm_and_totals(tmp_path):
+    seed_fo_chain(tmp_path)
+    q = Lake(tmp_path)
+    assert q.fo_underlyings("2026-10-23") == ["NIFTY"]
+    assert q.fo_underlyings("2099-01-01") == []                                 # no bars that day
+    d = q.fo_chain("2026-10-23", "NIFTY")
+    assert d["expiry"] == "2026-11-23" and d["expiries"] == ["2026-11-23"]
+    assert d["spot"] == 24550.0 and d["atm_strike"] == 24500                    # nearer to 24500 than 24600
+    assert d["total_call_oi"] == 800_000 and d["total_put_oi"] == 1_000_000
+    assert d["pcr"] == round(1_000_000 / 800_000, 3)
+    assert d["futures"] == [{"symbol": "NIFTY_FUT_23_NOV_26", "expiry": "2026-11-23", "close": 24550.0,
+                             "oi": 1_000_000, "oi_change": 0, "volume": 10, "bars": 1}]
+    row = next(r for r in d["chain"] if r["strike"] == 24500)
+    assert row["ce_symbol"] == "NIFTY_24500_CE_23_NOV_26" and row["ce_close"] == 120.0 and row["ce_oi"] == 500_000
+    assert row["pe_close"] == 90.0 and row["pe_oi"] == 400_000
+    assert len(d["chain"]) == 2
+
+
+def test_fo_chain_is_empty_without_a_match(tmp_path):
+    assert Lake(tmp_path).fo_chain("2026-10-23", "NIFTY") == {}                 # no instrument table at all
+    seed_fo_chain(tmp_path)
+    assert Lake(tmp_path).fo_chain("2026-10-23", "RELIANCE") == {}              # underlying not in the table
+    assert Lake(tmp_path).fo_chain("2099-01-01", "NIFTY") == {}                 # no bars that day
+
+
+def test_fo_chain_defaults_to_an_available_expiry_when_the_requested_one_is_missing(tmp_path):
+    seed_fo_chain(tmp_path)
+    d = Lake(tmp_path).fo_chain("2026-10-23", "NIFTY", expiry="2099-01-01")
+    assert d["expiry"] == "2026-11-23"
+
+
+def test_fo_api_meta_and_chain_endpoints(tmp_path):
+    seed_fo_chain(tmp_path)
+    c = TestClient(create_app(tmp_path))
+    assert c.get("/api/fo/meta", params={"date": "2026-10-23"}).json() == {"underlyings": ["NIFTY"]}
+    r = c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "NIFTY"})
+    assert r.status_code == 200 and r.json()["atm_strike"] == 24500
+    assert c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "NOSUCH"}).status_code == 404
+    assert c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "../etc"}).status_code == 422
+    assert c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "NIFTY", "expiry": "bad"}).status_code == 422
+    assert c.get("/api/fo/meta", params={"date": "not-a-date"}).status_code == 422
+
+
 # -- verification of futures bars --------------------------------------------------------
 def contracts(*syms):
     return pd.DataFrame({"symbol": list(syms)})
