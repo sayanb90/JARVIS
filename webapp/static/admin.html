@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>JARVIS Admin</title>
+<link rel="stylesheet" href="/admin/static/style.css">
+<link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+<header class="appbar">
+  <div class="appbar-inner">
+    <div class="brand">JARVIS <span>Admin</span></div>
+    <nav class="primary" role="tablist" aria-label="Admin sections">
+      <button role="tab" id="tab-data" data-tab="data" aria-selected="true">Data</button>
+      <button role="tab" id="tab-query" data-tab="query" aria-selected="false">Query</button>
+      <button role="tab" id="tab-subs" data-tab="subs" aria-selected="false">Subscriptions</button>
+    </nav>
+    <div class="spacer"></div>
+    <a class="viewer-link" href="/">Viewer &rarr;</a>
+  </div>
+</header>
+<div id="context" class="context busy" role="status" aria-live="polite"><i class="dot"></i><span id="status">Loading…</span></div>
+
+<main>
+  <!-- ================= Data: browse any table, page by page ================= -->
+  <section id="view-data" class="view">
+    <div class="page-head">
+      <div><h1>Data</h1><p class="sub">Every table JARVIS keeps, grouped by service. Read-only; pages load one at a time.</p></div>
+    </div>
+    <div class="toolbar browse-bar">
+      <label class="field"><span>Service</span><select id="service"></select></label>
+      <label class="field wide"><span>Table</span><select id="table-name"></select></label>
+      <label class="field" id="day-field"><span>Day</span><select id="day"></select></label>
+      <label class="field"><span>Symbol</span><input id="symbol" type="search" placeholder="all" autocomplete="off" spellcheck="false"></label>
+      <label class="field"><span>Order</span><select id="order"><option value="stored">As stored</option><option value="desc">Newest first</option><option value="asc">Oldest first</option></select></label>
+      <label class="field"><span>Rows</span><select id="size"><option>50</option><option>100</option><option selected>200</option><option>500</option></select></label>
+    </div>
+    <div id="svc-cards" class="svc-cards"></div>
+    <div class="panel">
+      <header><h3 id="tbl-title">Table</h3><span class="hint" id="tbl-meta"></span></header>
+      <div class="grid-wrap"><table id="grid" class="grid"></table></div>
+      <footer class="pager" id="pager"></footer>
+    </div>
+  </section>
+
+  <!-- ================= Query: read-only SQL ================= -->
+  <section id="view-query" class="view" hidden>
+    <div class="page-head">
+      <div><h1>Query</h1><p class="sub">One SELECT at a time against <code>service.table</code>. Results come back 200 rows a page; nothing can be changed from here.</p></div>
+    </div>
+    <div class="split wide">
+      <div class="stack">
+        <div class="panel">
+          <div class="body">
+            <textarea id="sql" spellcheck="false" rows="7" aria-label="SQL query">SELECT symbol, count(*) AS ticks, min(ts) AS first, max(ts) AS last
+FROM market.ticks
+WHERE date = (SELECT max(date) FROM market.ticks)
+GROUP BY symbol
+ORDER BY ticks DESC</textarea>
+            <div class="qbar"><button id="run" class="btn primary">Run <kbd>Ctrl</kbd>+<kbd>Enter</kbd></button><span class="muted" id="qmeta"></span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="grid-wrap"><table id="qgrid" class="grid"></table></div>
+          <footer class="pager" id="qpager"></footer>
+        </div>
+      </div>
+      <aside class="panel">
+        <header><h3>Tables</h3></header>
+        <div class="body" id="schema"></div>
+        <header><h3>Examples</h3></header>
+        <div class="body" id="examples"></div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= Subscriptions: what the feed collects, and changing it ================= -->
+  <section id="view-subs" class="view" hidden>
+    <div class="page-head">
+      <div><h1>Subscriptions</h1><p class="sub" id="subs-sub"></p></div>
+    </div>
+    <div id="subs-kpis" class="kpis"></div>
+    <nav class="subtabs" role="tablist" aria-label="Subscription views">
+      <button role="tab" data-sub="eq" aria-selected="true">Equities</button>
+      <button role="tab" data-sub="fo" aria-selected="false">Futures &amp; options</button>
+      <button role="tab" data-sub="upload" aria-selected="false">Upload tickers</button>
+      <button role="tab" data-sub="history" aria-selected="false">History</button>
+    </nav>
+    <div class="subview" data-sub="eq">
+      <div class="panel">
+        <header><h3>Equity subscription list<span class="hint" id="eq-hint"></span></h3><input id="eq-filter" type="search" placeholder="Filter" autocomplete="off"></header>
+        <div class="grid-wrap"><table id="eq-grid" class="grid"></table></div>
+        <footer class="pager" id="eq-pager"></footer>
+      </div>
+    </div>
+    <div class="subview stack" data-sub="fo" hidden>
+      <div class="panel"><header><h3>Contracts selected today</h3></header><div class="grid-wrap"><table id="fo-grid" class="grid"></table></div></div>
+      <div class="panel"><header><h3>Watchlist<span class="hint">data/fo_watchlist.csv: underlyings and the expiry / strike window collected each day</span></h3></header><div class="grid-wrap"><table id="wl-grid" class="grid"></table></div></div>
+    </div>
+    <div class="subview" data-sub="upload" hidden>
+      <div class="split wide">
+        <div class="panel">
+          <header><h3>Upload a ticker list</h3></header>
+          <div class="body">
+            <p class="muted">A CSV with NSE tickers in the first column (a header row is fine), for example <code>RELIANCE</code>, <code>TCS</code>, <code>M&amp;M</code>.
+              Each ticker is matched to its ISIN and Upstox key from the NSE instrument file. Nothing changes until you press Apply.</p>
+            <div class="toolbar">
+              <label class="field wide"><span>CSV file</span><input id="csv" type="file" accept=".csv,.txt,text/csv,text/plain"></label>
+              <label class="field"><span>Mode</span><select id="mode"><option value="replace">Replace the India list</option><option value="add">Add to the India list</option></select></label>
+            </div>
+            <label class="field" style="margin-top:12px"><span>…or paste tickers</span><textarea id="paste" rows="5" spellcheck="false" placeholder="RELIANCE&#10;TCS&#10;HDFCBANK"></textarea></label>
+            <div class="qbar"><button id="preview" class="btn">Preview</button><button id="apply" class="btn primary" disabled>Apply</button><span class="muted" id="up-meta"></span></div>
+          </div>
+        </div>
+        <aside class="panel"><header><h3>Preview</h3></header><div class="body" id="plan"><p class="muted">Choose a file or paste tickers, then Preview.</p></div></aside>
+      </div>
+      <p class="note">Applying writes <code>data/universe.local.csv</code> (the previous list is kept under History). The live feed reads the list at each session start, so the change takes effect at the next open; restart <code>jarvis-feed</code> to apply it now. Other markets (US, UK, EU) are untouched.</p>
+    </div>
+    <div class="subview" data-sub="history" hidden>
+      <div class="panel"><header><h3>Saved versions<span class="hint">newest first; restoring keeps the current list as a version too</span></h3></header><div class="grid-wrap"><table id="hist-grid" class="grid"></table></div></div>
+    </div>
+  </section>
+</main>
+<script src="/admin/static/admin.js"></script>
+</body>
+</html>

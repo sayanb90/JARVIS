@@ -288,15 +288,29 @@ def main() -> None:
         raise SystemExit("no token: set UPSTOX_ACCESS_TOKEN (see python -m data_layer.upstox.auth)")
     if not token:
         log.warning("no Upstox token yet: the daemon will keep retrying; run python -m data_layer.upstox.auth")
-    key_map = segment_key_map(a.segment, a.fo_file)
-    if a.limit:
-        key_map = dict(list(key_map.items())[: a.limit])
+    def keys() -> dict[str, str]:
+        km = segment_key_map(a.segment, a.fo_file)
+        return dict(list(km.items())[: a.limit]) if a.limit else km
+
+    key_map = keys()
     if not key_map:
         raise SystemExit("no instruments to subscribe: " + ("run fo_instruments import and select" if a.segment == "fo"
                                                            else "no universe symbols with a usable ISIN"))
-    make = lambda: UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode,  # noqa: E731
-                              dump_frames=a.dump_frames, token_provider=current_token,
-                              auth_retry_s=None if a.once else 60.0)
+
+    def make() -> UpstoxFeed:
+        # the subscription list is re-read at every session start, so a universe uploaded on the admin page takes
+        # effect at the next open without a restart; a missing or empty file keeps the last good list
+        nonlocal key_map
+        try:
+            fresh = keys()
+        except (Exception, SystemExit) as exc:          # noqa: BLE001 -- never let a bad file stop the collector
+            log.error("could not re-read the subscription list (%s); keeping %d instruments", exc, len(key_map))
+            fresh = {}
+        if fresh and fresh != key_map:
+            log.info("subscription list changed: %d -> %d instruments", len(key_map), len(fresh))
+            key_map = fresh
+        return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
+                          token_provider=current_token, auth_retry_s=None if a.once else 60.0)
     asyncio.run(run_forever(make, once=a.once))
 
 

@@ -12,7 +12,8 @@ API (JSON):
   GET /api/fo/meta?date=                           underlyings with derivative bars that day
   GET /api/fo/chain?date=&underlying=&expiry=      futures + option chain snapshot (section 17)
 
-The app never writes to the lake.  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
+Admin (data browser, read-only SQL, subscription list) is at /admin when ADMIN_USER and ADMIN_PASSWORD are set;
+see webapp/admin.py.  The app never writes to the lake.  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
 for remote access, and/or set WEBAPP_USER and WEBAPP_PASSWORD to require HTTP Basic auth.
 """
 
@@ -76,8 +77,8 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     user, password = os.getenv("WEBAPP_USER"), os.getenv("WEBAPP_PASSWORD")
 
     def auth(request: Request) -> None:
-        if not (user and password):
-            return
+        if not (user and password) or request.url.path.startswith("/admin"):
+            return                                   # /admin has its own, separate credentials (webapp/admin.py)
         header = request.headers.get("authorization", "")
         ok = False
         if header.lower().startswith("basic "):
@@ -92,6 +93,10 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     app = FastAPI(title="JARVIS intraday viewer", docs_url=None, redoc_url=None, dependencies=[Depends(auth)])
     app.add_middleware(GZipMiddleware, minimum_size=1000)
     app.state.lake_path = lake_path
+    from .admin import admin_router
+    admin = admin_router(lake_path)
+    if admin is not None:                            # only when ADMIN_USER and ADMIN_PASSWORD are set
+        app.include_router(admin)
     overview_cache: dict[tuple, list] = {}
 
     def lake() -> Lake:

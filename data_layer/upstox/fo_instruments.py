@@ -176,6 +176,58 @@ def save_table(df: pd.DataFrame, asof: date, lake_dir: Path | None = None) -> in
     return len(out)
 
 
+# ---------------------------------------------------------------------------
+# Equities from the same file (NSE_EQ records): lets a plain list of tickers be mapped to Upstox keys
+# ---------------------------------------------------------------------------
+EQ_SEGMENT = "NSE_EQ"
+EQ_COLUMNS = ["symbol", "name", "isin", "instrument_key", "instrument_type", "exchange_token", "tick_size", "lot_size"]
+
+
+def parse_equities(records: Iterable[dict]) -> pd.DataFrame:
+    """
+    NSE cash-equity records -> one row per trading symbol (as on the exchange, e.g. RELIANCE).  The ISIN comes from
+    the `isin` field or, failing that, from the key itself (`NSE_EQ|<ISIN>`).  When one symbol appears in several
+    series, the regular `EQ` series wins.
+    """
+    rows = []
+    for r in records:
+        if r.get("segment") != EQ_SEGMENT:
+            continue
+        key, sym = r.get("instrument_key") or "", (r.get("trading_symbol") or "").strip().upper()
+        if not key or not sym:
+            continue
+        isin = (r.get("isin") or key.split("|", 1)[-1]).strip().upper()
+        rows.append({"symbol": sym, "name": (r.get("name") or "").strip(), "isin": isin, "instrument_key": key,
+                     "instrument_type": (r.get("instrument_type") or "").strip().upper(),
+                     "exchange_token": str(r.get("exchange_token") or ""), "tick_size": float(r.get("tick_size") or 0),
+                     "lot_size": int(r.get("lot_size") or 1)})
+    df = pd.DataFrame(rows, columns=EQ_COLUMNS)
+    if df.empty:
+        return df
+    df["_rank"] = (df["instrument_type"] != "EQ").astype(int)
+    return (df.sort_values(["symbol", "_rank"]).drop_duplicates("symbol").drop(columns="_rank")
+              .sort_values("symbol").reset_index(drop=True))
+
+
+def eq_table_path(lake_dir: Path | None = None) -> Path:
+    return (lake_dir or lake_mod.LAKE_DIR) / "instruments" / "eq.parquet"
+
+
+def save_eq_table(df: pd.DataFrame, lake_dir: Path | None = None) -> int:
+    """Replace the equity table (a snapshot: listings and delistings come and go with the daily file)."""
+    path = eq_table_path(lake_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    df.to_parquet(tmp, compression="zstd", index=False)
+    os.replace(tmp, path)
+    return len(df)
+
+
+def load_eq_table(lake_dir: Path | None = None) -> pd.DataFrame:
+    p = eq_table_path(lake_dir)
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame(columns=EQ_COLUMNS)
+
+
 def resolve(symbol: str, lake_dir: Path | None = None) -> dict | None:
     """Contract record for a lake symbol (expired contracts included), or None."""
     t = load_table(lake_dir)
@@ -371,7 +423,12 @@ def main(argv: list[str] | None = None) -> None:
             path = download(lake_mod.DATA_DIR / "NSE.json.gz")
         if not path:
             raise SystemExit("give --file <NSE.json[.gz]> or --download")
-        df = parse_master(read_records(path))
+        records = read_records(path)
+        eq = parse_equities(records)
+        if not eq.empty:
+            save_eq_table(eq)
+            print(f"stored {len(eq)} NSE equities (ticker -> Upstox key) in {eq_table_path()}")
+        df = parse_master(records)
         if df.empty:
             raise SystemExit("no NSE_FO futures/options records found: wrong file, or the field names differ. "
                              "Run `peek` and compare with the module docstring")

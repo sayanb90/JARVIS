@@ -76,9 +76,12 @@ def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
         return 0
     con = duckdb.connect()
     tmp = folder / "ticks.parquet.tmp"
-    con.execute(f"""
-        COPY (SELECT * FROM read_parquet('{folder}/*.parquet', union_by_name=true) ORDER BY symbol, ts)
-        TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)""")
+    # hive_partitioning=false: the date=YYYY-MM-DD folder must not become a stored column; files compacted before
+    # this fix carry one, so it is dropped here too
+    src = f"read_parquet('{folder}/*.parquet', union_by_name=true, hive_partitioning=false)"
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+    sel = "* EXCLUDE (date)" if "date" in cols else "*"
+    con.execute(f"COPY (SELECT {sel} FROM {src} ORDER BY symbol, ts) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)")
     os.replace(tmp, folder / "ticks.parquet")
     for f in files:
         if f.name != "ticks.parquet":
