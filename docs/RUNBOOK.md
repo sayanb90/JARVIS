@@ -1,9 +1,58 @@
 # JARVIS Go-Live Runbook
 
-**Next test: section 14 (VPS test day).** Living document. Update the **Status** column and tick the gates as each item is
-proven *on the VPS*, not on a dev box. Last reviewed: 2026-10-25.
+**Next: "Before the next launch" below.** Living document. Update the **Status** column and tick the gates as each item is
+proven *on the VPS*, not on a dev box. Last reviewed: 2026-10-30.
 
 Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · `[ ]` not started
+
+---
+
+## Before the next launch (to-do, 2026-10-30)
+
+What has to happen on the VPS before the current code is called live. Work top to bottom; each line names its Jira ticket (all in SCRUM Sprint 1). Tick here and move the ticket when it is proven on the VPS.
+
+### A. Deploy the code
+- [ ] **Merge PR #9** (JARVIS admin, feed re-reads the subscription list each session, tick-compaction fix). SCRUM-79, SCRUM-77
+- [ ] On the VPS, after the close (the feed restart drops nothing outside the session):
+  ```bash
+  cd ~/JARVIS && git checkout master && git pull && .venv/bin/pip install -r requirements.txt   # no new packages
+  sudo systemctl restart jarvis-viewer jarvis-feed
+  ```
+
+### B. Configure
+- [ ] `.env`: set `ADMIN_USER` and a long `ADMIN_PASSWORD`, different from `WEBAPP_*`, then restart `jarvis-viewer`. Without both, `/admin` is a 404. SCRUM-79
+- [ ] nginx: `/admin` only over HTTPS (HTTP redirects); add `limit_req` on `location /admin`. Confirm `https://jarvis.tensortlabs.com` has a valid certificate. SCRUM-62
+
+### C. One-off data housekeeping
+- [ ] Load the equity instrument table that the ticker upload maps against. The 03:25 UTC cron does this every weekday from now on, so this is only needed once now:
+  ```bash
+  python -m data_layer.upstox.fo_instruments import --download     # prints "stored N NSE equities ..."
+  python -c "from data_layer.upstox.fo_instruments import load_eq_table as t; d=t(); print(len(d)); print(d.head())"
+  ```
+  Pass when N is in the thousands and `isin` and `instrument_key` (`NSE_EQ|<ISIN>`) are filled. If N is 0, the file's NSE_EQ field names differ from the assumption in section 18.4: report it. SCRUM-79
+- [ ] Re-compact tick days written before the fix, so their files lose the stray `date` column (not during a session):
+  ```bash
+  python -c "from datetime import date; from pathlib import Path; from data_layer.tick_store import compact_ticks_day as c
+  for d in sorted(Path('lake/ticks').glob('date=*')): print(d.name, c(date.fromisoformat(d.name[5:])))"
+  ```
+  SCRUM-77
+- [ ] Disk: `du -sh lake/ticks lake` after a full session; expect about 90 MB a day of ticks at 500 equities + ~350 contracts (SCRUM-77). Check that the backup target has room for the same growth (section 7).
+
+### D. Prove it on live data (one full session after A–C)
+- [ ] **Equities:** `python -m data_layer.verify bars --date <day>` (bars now derived from ticks) prints no FAIL; then close the first-session ticket. SCRUM-59
+- [ ] **Health:** `python -m data_layer.health --after-close` is clean: it now checks ticks, including uncompacted segments. SCRUM-77
+- [ ] **Futures and options:** `python -m data_layer.verify fo --date <day>` prints no FAIL; volume units confirmed (contracts or quantity). Section 17.5. SCRUM-71
+- [ ] **Viewer:** Derivatives tab with the live BANKNIFTY chain on desktop and phone (summary, chain, open interest, contract). Market heat map with the 500-stock list. SCRUM-76
+- [ ] **Admin:** log in at `/admin`. Page through today's `market.ticks`, run a query, check that Subscriptions shows the ~500 equities as "yes" in `listed` with ticks today. Run one upload **Preview** (no Apply), or Apply an "Add" of one ticker and then Restore it under History. SCRUM-79
+- [ ] **Wider coverage:** if the session is clean, record instruments per connection, CPU and memory, and disk per day. SCRUM-72
+
+### E. Decisions to settle (owner)
+- [ ] Corporate actions: SCRUM-60 and SCRUM-74 overlap; keep one.
+- [ ] Per-instrument coverage flags (which instruments get ticks, daily OHLC, fundamentals, corporate actions): the remaining part of SCRUM-73.
+- [ ] O9 (FMP India fundamentals coverage) and O13 (F&O history source) are still open (section 11).
+
+### Not blocking this launch
+Implied volatility and greeks, compare-contracts overlay and chain time slider (SCRUM-76 follow-ups); corporate actions (SCRUM-74); the backtester (SCRUM-22); the TensorT Labs admin console (SCRUM-75, separate repo).
 
 ---
 
@@ -376,7 +425,7 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 | O5 | First F&O underlying, and the first strategy that needs it | Phase 3 |
 | O6 | Monthly data budget ceiling | Phase 3 |
 | O7 | ~~Upstox v2 or v3~~ Closed: v3 (ADR-4) | — |
-| O8 | Keep raw ticks/L1 as well as 1-second bars? Decide after the first live session shows the real update rate and disk use (13.5) | Section 13 |
+| O8 | ~~Keep raw ticks/L1 as well as 1-second bars?~~ **Resolved 2026-10-30 (SCRUM-77):** the feed stores every raw tick and no longer writes 1-second bars; bars of any width are derived from ticks on read. About 90 MB a day at the current universe | — |
 | O9 | Fundamentals source for NSE: does the FMP free tier cover Indian tickers? Unverified, must be tested before relying on it | Phase 1 |
 | O12 | F&O: which underlyings and how many strikes and expiries to collect first? Start with NIFTY, BANKNIFTY and 2-3 stocks; widen after measuring disk and tick rate (17.6) | Section 17 |
 | O13 | F&O history: use the Plus plan's expired-contract OHLC, a vendor, or forward collection only? | Section 17 |
@@ -739,7 +788,7 @@ One `SELECT` (or `WITH … SELECT`) at a time against `service.table`, for examp
 
 **How it takes effect:** the live feed re-reads the list at every session start, so an applied list is subscribed at the next open. Restart `jarvis-feed` to apply it immediately. If the file is missing or unreadable at session start, the feed keeps the last good list.
 
-**Feasibility, and what it depends on:** the mapping uses the Upstox NSE instrument file. `python -m data_layer.upstox.fo_instruments import --download` (or `--file`) now stores the equity table as well as the F&O table, so run it once (and ideally daily, before the open). Until then only tickers already in the list can be matched. The upload also assumes the file's `NSE_EQ` records carry `trading_symbol` and either `isin` or a key of the form `NSE_EQ|<ISIN>`; check once with `fo_instruments peek`.
+**Feasibility, and what it depends on:** the mapping uses the Upstox NSE instrument file. `python -m data_layer.upstox.fo_instruments import --download` (or `--file`) now stores the equity table as well as the F&O table. The 03:25 UTC weekday cron already runs it, so after one run it stays current. Until then only tickers already in the list can be matched. The upload also assumes the file's `NSE_EQ` records carry `trading_symbol` and either `isin` or a key of the form `NSE_EQ|<ISIN>`. Check once with the `load_eq_table` one-liner in "Before the next launch" C (`peek` shows only F&O records).
 
 **Why a separate file:** `data/universe.local.csv` is git-ignored and takes precedence over the tracked `data/universe.csv`, so a `git pull` on the server never conflicts with an upload. Deleting it returns to the tracked list.
 
