@@ -32,6 +32,20 @@ STOCKS = [
 ]
 
 
+# symbol, start price, activity, annual vol, book size, spread widening, start open interest (futures / options demo)
+DERIVATIVES = [
+    ("NIFTY_FUT_26_NOV_26", 24500.0, 0.85, 0.16, 600, 0.2, 9_800_000),
+    ("NIFTY_24500_CE_26_NOV_26", 182.0, 0.60, 0.95, 900, 1.5, 4_200_000),
+]
+
+
+def add_open_interest(df: pd.DataFrame, oi0: int, rng: np.random.Generator) -> pd.DataFrame:
+    """Open interest only moves on some updates: a slow random walk that is refreshed every few seconds."""
+    steps = np.where(rng.random(len(df)) < 0.04, rng.normal(0, 0.0006, len(df)), 0.0)
+    df["oi"] = pd.array((oi0 * np.exp(np.cumsum(steps))).astype("int64"), dtype="Int64")
+    return df
+
+
 def weekdays_ending(end: date, n: int) -> list[date]:
     out, d = [], end
     while len(out) < n:
@@ -87,7 +101,8 @@ def simulate(symbol, price0, activity, ann_vol, size, widen, day: date, rng: np.
         "bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "src": "demo"})
 
 
-def write_demo(out: Path, days: int = 3, end: date | None = None, seed: int = 11) -> list[date]:
+def write_demo(out: Path, days: int = 3, end: date | None = None, seed: int = 11,
+               derivatives: bool = False) -> list[date]:
     end = end or date(2026, 10, 23)
     ds = weekdays_ending(end, days)
     con = duckdb.connect()
@@ -97,8 +112,13 @@ def write_demo(out: Path, days: int = 3, end: date | None = None, seed: int = 11
             rng = np.random.default_rng([seed, d.toordinal(), si])                # same date + seed -> same data, whatever `days` is
             drift = 1 + 0.004 * ((d.toordinal() % 5) - 2)                         # a different starting level per date
             frames.append(simulate(sym, p0 * drift, act, vol, size, widen, d, rng))
+        if derivatives:
+            for di2, (sym, p0, act, vol, size, widen, oi0) in enumerate(DERIVATIVES):
+                rng = np.random.default_rng([seed, d.toordinal(), 100 + di2])
+                f = simulate(sym, p0 * (1 + 0.004 * ((d.toordinal() % 5) - 2)), act, vol, size, widen, d, rng)
+                frames.append(add_open_interest(f, oi0, rng))
         df = pd.concat(frames).sort_values(["symbol", "ts"]).reset_index(drop=True)
-        for c in ("n_ticks", "bid_qty", "ask_qty"):
+        for c in ("n_ticks", "bid_qty", "ask_qty") + (("oi",) if derivatives else ()):
             df[c] = df[c].astype("Int64")
         folder = out / "bars" / "interval=1s" / f"date={d}"
         folder.mkdir(parents=True, exist_ok=True)
@@ -114,8 +134,9 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("lake_demo"))
     ap.add_argument("--days", type=int, default=3)
     ap.add_argument("--end", type=date.fromisoformat, default=None)
+    ap.add_argument("--with-derivatives", action="store_true", help="add a demo future and option with open interest")
     a = ap.parse_args()
-    ds = write_demo(a.out, a.days, a.end)
+    ds = write_demo(a.out, a.days, a.end, derivatives=a.with_derivatives)
     print(f"wrote {len(ds)} synthetic days ({ds[0]} to {ds[-1]}) for {len(STOCKS)} stocks to {a.out}")
 
 

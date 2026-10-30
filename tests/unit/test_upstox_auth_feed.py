@@ -232,7 +232,7 @@ def test_main_requires_a_token_and_prefers_feed_token(monkeypatch, tmp_path):
         feed.main()
     seen = {}
     monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "DAILY"); monkeypatch.setenv("UPSTOX_FEED_TOKEN", "LONG")
-    monkeypatch.setattr(feed, "build_key_map", lambda: ({KEY: "X.NS"}, []))
+    monkeypatch.setattr(feed, "segment_key_map", lambda seg, fo_file=None: {KEY: "X.NS"})
     monkeypatch.setattr(feed, "run_forever", lambda make, once: seen.update(token=make().token) or asyncio.sleep(0))
     feed.main()
     assert seen["token"] == "LONG"
@@ -254,7 +254,7 @@ def test_daemon_starts_without_a_token_and_retries_while_once_refuses(monkeypatc
     for v in ("UPSTOX_ACCESS_TOKEN", "UPSTOX_FEED_TOKEN"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setattr(feed, "ENV_FILE", tmp_path / ".env")                       # no .env here
-    monkeypatch.setattr(feed, "build_key_map", lambda: ({KEY: "X.NS"}, []))
+    monkeypatch.setattr(feed, "segment_key_map", lambda seg, fo_file=None: {KEY: "X.NS"})
     seen = {}
 
     async def fake_run_forever(make, once):

@@ -12,3 +12,5 @@ data/fund_meta.csv
 htmlcov/
 lake_demo/
 deploy/local/
+data/fo_universe.csv
+data/NSE.json*

@@ -12,10 +12,13 @@ from data_layer.upstox.proto import MarketDataFeedV3_pb2 as pb
 from tests.helpers import ms
 
 
-def tick_frame(key: str, ltt_ms: int, ltp: float, vtt: int, bid: float | None = None, typ=pb.live_feed) -> bytes:
+def tick_frame(key: str, ltt_ms: int, ltp: float, vtt: int, bid: float | None = None, typ=pb.live_feed,
+               oi: float | None = None) -> bytes:
     r = pb.FeedResponse(type=typ)
     m = r.feeds[key].fullFeed.marketFF
     m.ltpc.ltp, m.ltpc.ltt, m.ltpc.ltq, m.vtt = ltp, ltt_ms, 1, vtt
+    if oi is not None:
+        m.oi = oi
     if bid:
         q = m.marketLevel.bidAskQuote.add()
         q.bidP, q.bidQ, q.askP, q.askQ = bid, 10, bid + 0.05, 12

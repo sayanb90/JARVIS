@@ -84,7 +84,7 @@ def test_feed_main_builds_feed_from_cli_flags(monkeypatch, tmp_path):
     monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "TOK")
     monkeypatch.chdir(tmp_path)
     keys = {f"NSE_EQ|INE{i:09d}": f"S{i}.NS" for i in range(5)}
-    monkeypatch.setattr(feed, "build_key_map", lambda: (keys, []))
+    monkeypatch.setattr(feed, "segment_key_map", lambda seg, fo_file=None: keys)
     seen = {}
 
     async def fake_run_forever(make, once):
@@ -101,7 +101,7 @@ def test_feed_main_builds_feed_from_cli_flags(monkeypatch, tmp_path):
 def test_feed_main_without_usable_universe_exits(monkeypatch, tmp_path):
     monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "TOK")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(feed, "build_key_map", lambda: ({}, ["A.NS"]))
+    monkeypatch.setattr(feed, "segment_key_map", lambda seg, fo_file=None: {})
     monkeypatch.setattr(sys, "argv", ["feed"])
     with pytest.raises(SystemExit, match="ISIN"):
         feed.main()

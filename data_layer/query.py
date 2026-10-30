@@ -113,12 +113,14 @@ class Lake:
         if frame is not None:
             self.con.register("_rollup_src", frame)
             src = "_rollup_src"
+        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        oi_col = f", {last('oi')}" if "oi" in cols else ""                      # futures and options carry open interest
         return self.sql(f"""
             SELECT symbol, market, bucket AS ts,
                    arg_min(open, ts) AS open, max(high) AS high, min(low) AS low, arg_max(close, ts) AS close,
                    sum(volume) AS volume,
                    sum(vwap * volume) FILTER (WHERE vwap IS NOT NULL) / nullif(sum(volume) FILTER (WHERE vwap IS NOT NULL), 0) AS vwap,
-                   sum(n_ticks) AS n_ticks, {last('bid')}, {last('ask')}, {last('bid_qty')}, {last('ask_qty')}
+                   sum(n_ticks) AS n_ticks, {last('bid')}, {last('ask')}, {last('bid_qty')}, {last('ask_qty')}{oi_col}
             FROM (SELECT *, date_trunc('day', ts) + to_seconds(13500 + CAST(floor((epoch(ts - date_trunc('day', ts)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}) AS bucket
                   FROM {src} WHERE {' AND '.join(where)})
             GROUP BY symbol, market, bucket ORDER BY symbol, bucket""", params)

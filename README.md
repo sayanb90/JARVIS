@@ -205,9 +205,18 @@ python -m data_layer.upstox.feed                       # daemon (waits for each 
 
 Missed the session? Pull a whole past or present day from the candle API: `python -m data_layer.upstox.candles --date 2026-10-26` (fills gaps only).
 
-Tested against a local fake server; not yet run against Upstox itself (runbook section 13, Gate U1).
+**Futures and options:** the same pipeline handles NSE_FO contracts, with open interest stored on each bar.
 
-Go-live steps, daily ops, backups and the futures/options planning entry are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+```bash
+python -m data_layer.upstox.fo_instruments import --download     # contract table (keeps expired contracts)
+python -m data_layer.upstox.fo_instruments select --underlying NIFTY RELIANCE --futures 2 --option-expiries 1 --strikes 5 --spot NIFTY=24500
+python -m data_layer.upstox.feed --once --segment fo --limit 20  # live, 1-second bars + open interest
+python -m data_layer.verify fo --date 2026-10-30
+```
+
+Tested against a local fake server; not yet run against Upstox itself (runbook sections 13 and 17, Gate U1).
+
+Go-live steps, daily ops, backups and the futures/options section are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 **Manual runs:**
 

@@ -1,0 +1,242 @@
+"""Open interest end to end: decode -> bar -> Parquet -> roll-up -> API; REST candles; futures verification."""
+from __future__ import annotations
+
+import sys
+from datetime import date, datetime, timedelta
+
+import numpy as np
+import pandas as pd
+import pytest
+from fastapi.testclient import TestClient
+
+from analytics.microstructure import day_summary, series_payload
+from data_layer import tick_store, verify
+from data_layer.query import Lake
+from data_layer.ticks import Bar, BarAggregator, Tick
+from data_layer.upstox import candles, decode, feed
+from data_layer.upstox import fo_instruments as fo
+from data_layer.upstox.proto import MarketDataFeedV3_pb2 as pb
+from tests.bdd.fake_upstox import tick_frame
+from tests.helpers import ms
+from webapp import demo
+from webapp.app import create_app
+
+OPEN = datetime(2026, 10, 23, 3, 45)
+DAY = date(2026, 10, 23)
+
+
+def tick(sec, px, vtt, oi=None, sym="NIFTY_FUT_27_OCT_26"):
+    return Tick(OPEN + timedelta(seconds=sec), sym, px, vtt, px - 0.05, 10, px + 0.05, 12, oi)
+
+
+# -- aggregation ----------------------------------------------------------------
+def test_bar_carries_the_last_open_interest_seen_inside_it():
+    agg = BarAggregator(1)
+    out = agg.add(tick(0, 100, 1000, oi=500)) + agg.add(tick(0, 101, 1010, oi=520)) + agg.add(tick(1, 102, 1020, oi=None))
+    out += agg.flush_all()
+    assert [b.oi for b in out] == [520, None]                      # a tick with no OI leaves the bar's last value alone
+
+
+def test_cash_equity_bars_have_no_open_interest():
+    agg = BarAggregator(1)
+    agg.add(Tick(OPEN, "A.NS", 10.0, 5))
+    assert agg.flush_all()[0].oi is None
+
+
+# -- decoding --------------------------------------------------------------------
+def test_decode_reads_oi_from_a_futures_frame_and_zero_means_none():
+    key = "NSE_FO|50001"
+    t = list(decode.ticks_from_response(decode.parse_frame(tick_frame(key, ms(4, 0, 0), 24500.5, 120, bid=24500.0, oi=9_800_000)),
+                                        {key: "NIFTY_FUT_27_OCT_26"}))
+    assert t[0].oi == 9_800_000 and t[0].symbol == "NIFTY_FUT_27_OCT_26" and t[0].vol_today == 120
+    z = list(decode.ticks_from_response(decode.parse_frame(tick_frame(key, ms(4, 0, 1), 24500.5, 121, oi=0)), {key: "X"}))
+    assert z[0].oi is None
+
+
+def test_decode_reads_oi_from_option_greeks_frames():
+    r = pb.FeedResponse(type=pb.live_feed)
+    g = r.feeds["NSE_FO|1"].firstLevelWithGreeks
+    g.ltpc.ltp, g.ltpc.ltt, g.vtt, g.oi = 180.0, ms(4, 0, 0), 55, 4_200_000
+    t = list(decode.ticks_from_response(r, {"NSE_FO|1": "NIFTY_24500_CE_27_OCT_26"}))
+    assert t[0].oi == 4_200_000
+
+
+# -- storage ---------------------------------------------------------------------
+def fut_bars(n=10, oi0=1000, sym="NIFTY_FUT_27_OCT_26"):
+    return [Bar(OPEN + timedelta(seconds=i), sym, "IN", 100, 101, 99, 100.5, 5, 100.2, 2, 100.4, 100.6, 10, 12, oi=oi0 + i // 3)
+            for i in range(n)]
+
+
+def test_oi_is_stored_as_a_nullable_integer_and_old_files_without_it_still_load(tmp_path):
+    old = [Bar(OPEN, "A.NS", "IN", 1, 2, 0.5, 1.5, 3, None, None, None, None, None, None)]            # no oi
+    tick_store.write_bars(old, "1s", tmp_path)
+    tick_store.write_bars(fut_bars(), "1s", tmp_path)
+    tick_store.compact_day("1s", DAY, tmp_path)
+    df = Lake(tmp_path).sql("SELECT symbol, oi FROM bars_1s ORDER BY symbol, ts")
+    assert str(df.oi.dtype) == "Int64"
+    assert df[df.symbol == "A.NS"].oi.isna().all()
+    assert df[df.symbol != "A.NS"].oi.tolist() == [1000, 1000, 1000, 1001, 1001, 1001, 1002, 1002, 1002, 1003]
+
+
+def test_rollup_keeps_the_last_open_interest_of_each_bucket(tmp_path):
+    tick_store.write_bars(fut_bars(120), "1s", tmp_path)
+    tick_store.compact_day("1s", DAY, tmp_path)
+    r = Lake(tmp_path).day_bars("2026-10-23", "NIFTY_FUT_27_OCT_26", width_s=60)
+    assert r.oi.tolist() == [1000 + 59 // 3, 1000 + 119 // 3]
+    plain = Lake(tmp_path).day_bars("2026-10-23", "NIFTY_FUT_27_OCT_26", width_s=1)
+    assert len(plain) == 120 and "oi" in plain.columns
+
+
+def test_rollup_without_an_oi_column_still_works(tmp_path):
+    bars = [Bar(OPEN + timedelta(seconds=i), "A.NS", "IN", 1, 2, 0.5, 1.5, 3, 1.2, 1, None, None, None, None) for i in range(5)]
+    tick_store.write_bars(bars, "1s", tmp_path)
+    tick_store.compact_day("1s", DAY, tmp_path)
+    q = Lake(tmp_path)
+    df = q.day_bars("2026-10-23", "A.NS", width_s=60)
+    assert len(df) == 1 and "oi" in df.columns and df.oi.isna().all()          # the column exists (all null) after a write
+
+
+# -- REST candles ------------------------------------------------------------------
+def test_candles_read_the_seventh_field_as_open_interest():
+    raw = [["2026-10-23T09:15:00+05:30", 100, 101, 99, 100.5, 40, 12345],
+           ["2026-10-23T09:16:00+05:30", 100, 101, 99, 100.5, 40, 0],             # zero: cash equity style
+           ["2026-10-23T09:17:00+05:30", 100, 101, 99, 100.5, 40],                 # six fields only
+           ["2026-10-23T09:18:00+05:30", 100, 101, 99, 100.5, 40, "oops"]]
+    b = candles.candles_to_bars(raw, "NIFTY_FUT_27_OCT_26")
+    assert [x.oi for x in b] == [12345, None, None, None] and all(x.src == "rest" for x in b)
+
+
+# -- analytics and the API -----------------------------------------------------------
+def test_summary_and_payload_expose_open_interest_only_when_present():
+    df = pd.DataFrame([b.__dict__ if hasattr(b, "__dict__") else {} for b in []])
+    from dataclasses import asdict
+    f = pd.DataFrame([asdict(b) for b in fut_bars(30)])
+    s = day_summary(f)
+    assert (s["oi_first"], s["oi_last"], s["oi_change"]) == (1000, 1009, 9)
+    p = series_payload(f)
+    assert p["oi"][0] == 1000 and p["oi"][-1] == 1009
+    g = f.drop(columns="oi")
+    assert "oi_last" not in day_summary(g) and "oi" not in series_payload(g)
+    h = f.assign(oi=pd.array([None] * len(f), dtype="Int64"))
+    assert "oi_last" not in day_summary(h) and "oi" not in series_payload(h)
+    gap = f.copy(); gap.loc[5:10, "oi"] = pd.NA
+    assert all(v is not None for v in series_payload(gap)["oi"])               # carried forward over missing values
+
+
+def test_api_flags_open_interest_and_symbols_with_underscores_are_accepted(tmp_path):
+    tick_store.write_bars(fut_bars(60) + [Bar(OPEN, "A.NS", "IN", 1, 2, 0.5, 1.5, 3, None, None, None, None, None, None)], "1s", tmp_path)
+    tick_store.compact_day("1s", DAY, tmp_path)
+    c = TestClient(create_app(tmp_path))
+    r = c.get("/api/day", params={"date": "2026-10-23", "symbol": "NIFTY_FUT_27_OCT_26"}).json()
+    assert r["has_oi"] is True and r["summary"]["oi_last"] == 1019 and r["series"]["oi"][0] == 1000
+    e = c.get("/api/day", params={"date": "2026-10-23", "symbol": "A.NS"}).json()
+    assert e["has_oi"] is False and "oi" not in e["series"]
+    assert {s["symbol"] for s in c.get("/api/symbols", params={"date": "2026-10-23"}).json()} == {"A.NS", "NIFTY_FUT_27_OCT_26"}
+
+
+def test_demo_derivatives_have_open_interest_and_default_demo_is_unchanged(tmp_path):
+    demo.write_demo(tmp_path / "d1", days=1)
+    assert "oi" not in Lake(tmp_path / "d1").sql("SELECT * FROM bars_1s LIMIT 1").columns
+    demo.write_demo(tmp_path / "d2", days=1, derivatives=True)
+    q = Lake(tmp_path / "d2")
+    syms = set(q.sql("SELECT DISTINCT symbol FROM bars_1s").symbol)
+    assert {"NIFTY_FUT_26_NOV_26", "NIFTY_24500_CE_26_NOV_26"} <= syms and len(syms) == 12
+    oi = q.sql("SELECT symbol, count(oi) n, min(oi) lo FROM bars_1s GROUP BY symbol")
+    assert oi.set_index("symbol").loc["NIFTY_FUT_26_NOV_26", "n"] > 1000
+    assert oi.set_index("symbol").loc["RELIANCE.NS", "n"] == 0
+    sys.argv = ["demo", "--out", str(tmp_path / "d3"), "--days", "1", "--with-derivatives"]
+    demo.main()
+    assert (tmp_path / "d3" / "DEMO").exists()
+
+
+# -- verification of futures bars --------------------------------------------------------
+def contracts(*syms):
+    return pd.DataFrame({"symbol": list(syms)})
+
+
+def lake_with(tmp_path, bars):
+    tick_store.write_bars(bars, "1s", tmp_path)
+    tick_store.compact_day("1s", DAY, tmp_path)
+    return Lake(tmp_path)
+
+
+def test_verify_fo_passes_a_healthy_day(tmp_path, capsys):
+    bars = fut_bars(200, oi0=1000) + fut_bars(200, oi0=50, sym="NIFTY_24500_CE_27_OCT_26")
+    # make OI move through the day for both contracts
+    for i, b in enumerate(bars):
+        b.oi += i % 40
+    rep = verify.verify_fo(lake_with(tmp_path, bars), DAY, contracts("NIFTY_FUT_27_OCT_26", "NIFTY_24500_CE_27_OCT_26"))
+    out = capsys.readouterr().out
+    assert rep.fails == 0 and "[WARN]" not in out and "open interest coverage" in out
+
+
+def test_verify_fo_fails_without_open_interest_and_warns_on_gaps(tmp_path, capsys):
+    plain = fut_bars(50)
+    for b in plain:
+        b.oi = None
+    rep = verify.verify_fo(lake_with(tmp_path / "a", plain), DAY, contracts("NIFTY_FUT_27_OCT_26"))
+    assert rep.fails == 1 and "no open interest" in capsys.readouterr().out
+    mixed = fut_bars(100)
+    for b in mixed[:30]:
+        b.oi = None
+    rep = verify.verify_fo(lake_with(tmp_path / "b", mixed), DAY, contracts("NIFTY_FUT_27_OCT_26", "NEVER_TRADED"))
+    out = capsys.readouterr().out
+    assert rep.fails == 0 and "under 90%" in out and "NEVER_TRADED" in out and out.count("[WARN]") >= 2
+
+
+def test_verify_fo_edge_cases(tmp_path, capsys):
+    assert verify.verify_fo(Lake(tmp_path), DAY).fails == 1                     # no view
+    lake = lake_with(tmp_path / "x", fut_bars(10))
+    assert verify.verify_fo(lake, date(2026, 10, 24)).fails == 1                # no rows that day
+    rep = verify.verify_fo(lake, DAY)                                           # no contract list: found by having OI
+    assert rep.fails == 0
+    bad = fut_bars(10)
+    bad[0].low, bad[1].oi, bad[2].bid, bad[2].ask = 200, -5, 101.0, 100.0
+    rep = verify.verify_fo(lake_with(tmp_path / "y", bad), DAY)
+    out = capsys.readouterr().out
+    assert rep.fails == 2 and "negative open interest rows: 1" in out and "crossed books: 1" in out
+
+
+def test_verify_fo_cli_reads_the_contract_file_or_all(world, monkeypatch, capsys):
+    world.tick_store.write_bars(fut_bars(30), "1s")
+    world.tick_store.compact_day("1s", DAY)
+    pd.DataFrame({"symbol": ["NIFTY_FUT_27_OCT_26"], "instrument_key": ["NSE_FO|1"], "underlying": ["NIFTY"],
+                  "instrument_type": ["FUT"], "expiry": ["2026-10-27"], "strike": [np.nan], "lot_size": [75]}
+                 ).to_csv(world.data / "fo_universe.csv", index=False)
+    for argv in (["verify", "fo", "--date", "2026-10-23"], ["verify", "fo", "--date", "2026-10-23", "--all"]):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as e:
+            verify.main()
+        assert e.value.code == 0
+    assert "futures/options bars" in capsys.readouterr().out
+
+
+# -- the feed with --segment fo --------------------------------------------------------
+def test_feed_main_segment_fo_uses_the_selected_contracts(world, monkeypatch, tmp_path):
+    monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "TOK")
+    monkeypatch.chdir(tmp_path)
+    seen = {}
+
+    async def fake_run_forever(make, once):
+        f = make()
+        seen.update(keys=sorted(f.keys), once=once)
+    monkeypatch.setattr(feed, "run_forever", fake_run_forever)
+    monkeypatch.setattr(feed, "segment_key_map", lambda seg, fo_file=None: seen.update(seg=seg, file=fo_file) or
+                        {"NSE_FO|1": "A_FUT", "NSE_FO|2": "B_FUT"})
+    monkeypatch.setattr(sys, "argv", ["feed", "--once", "--segment", "fo", "--fo-file", "x.csv", "--limit", "1"])
+    feed.main()
+    assert seen["seg"] == "fo" and seen["file"] == "x.csv" and seen["keys"] == ["NSE_FO|1"]
+    monkeypatch.setattr(feed, "segment_key_map", lambda seg, fo_file=None: {})
+    monkeypatch.setattr(sys, "argv", ["feed", "--segment", "fo"])
+    with pytest.raises(SystemExit, match="fo_instruments import"):
+        feed.main()
+
+
+def test_candles_main_segment_fo(world, monkeypatch):
+    monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "TOK")
+    seen = {}
+    monkeypatch.setattr(candles, "segment_key_map", lambda seg, fo_file=None: seen.update(seg=seg) or {})
+    monkeypatch.setattr(sys, "argv", ["candles", "--date", "2026-10-23", "--segment", "fo"])
+    with pytest.raises(SystemExit, match="fo_instruments import"):
+        candles.main()
+    assert seen["seg"] == "fo"

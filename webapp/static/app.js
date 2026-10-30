@@ -92,13 +92,14 @@ function cards(s) {
     ['Realised vol', fmt(s.realised_vol_pct, 1) + '%'], ['Avg bid size', fmtInt(s.avg_bid_qty)], ['Avg ask size', fmtInt(s.avg_ask_qty)],
     ['Bars', fmtInt(s.bars)], ['Book coverage', fmt(s.book_coverage_pct, 0) + '%'],
   ];
+  if (s.oi_last != null) items.push(['Open interest', fmtInt(s.oi_last)], ['OI change', `<span class="${sign(s.oi_change)}">${s.oi_change >= 0 ? '+' : ''}${fmtInt(s.oi_change)}</span>`]);
   $('cards').innerHTML = items.map(([k, v]) => `<div class="card"><b>${k}</b><span>${v}</span></div>`).join('');
 }
 
 function renderInstrument(d) {
   const s = d.series, S = d.summary;
   cards(S);
-  const fg = css('--fg'), grid = css('--grid'), up = css('--up'), down = css('--down'), acc = css('--accent'), muted = css('--muted'), orange = css('--orange'), purple = css('--purple');
+  const fg = css('--fg'), grid = css('--grid'), up = css('--up'), down = css('--down'), acc = css('--accent'), muted = css('--muted'), orange = css('--orange'), purple = css('--purple'), teal = css('--teal');
   const step = d.width <= 5 ? 'hv' : 'linear';
   // five stacked panels sharing one time axis; domains from the bottom up
   const gaps = 0.025, h = [0.30, 0.17, 0.18, 0.14, 0.14];
@@ -124,11 +125,12 @@ function renderInstrument(d) {
     { x: t, y: s.imbalance_avg, name: `Imbalance (${VOLWIN_LABEL[d.vol_window]} avg)`, type: 'scattergl', mode: 'lines', line: { color: fg, width: 1.4 }, xaxis: 'x', yaxis: 'y5', visible: nb },
     { x: t, y: s.spread_bps, name: 'Spread bps (raw)', type: 'scattergl', mode: 'lines', line: { color: orange, width: 0.5, shape: step }, opacity: 0.22, xaxis: 'x', yaxis: 'y6', visible: nb, showlegend: false },
     { x: t, y: s.spread_bps_avg, name: `Spread bps (${VOLWIN_LABEL[d.vol_window]} avg)`, type: 'scattergl', mode: 'lines', line: { color: orange, width: 1.8 }, xaxis: 'x', yaxis: 'y6', visible: nb },
+    ...(d.has_oi && s.oi ? [{ x: t, y: s.oi, name: 'Open interest', type: 'scattergl', mode: 'lines', line: { color: teal, width: 1.4, shape: step }, xaxis: 'x', yaxis: 'y8' }] : []),
     { x: t, y: s.vol_ann, name: `Realised vol (${VOLWIN_LABEL[d.vol_window]} window, annualised %)`, type: 'scattergl', mode: 'lines', line: { color: purple, width: 1.5 }, xaxis: 'x', yaxis: 'y7' },
   ];
   const ax = (domain, title, extra = {}) => Object.assign({ domain, title: { text: title, font: { size: 11 } }, gridcolor: grid, zerolinecolor: grid, linecolor: grid, tickfont: { size: 10 } }, extra);
   const layout = {
-    height: window.innerWidth < 600 ? 900 : 1000, margin: { l: 62, r: 52, t: window.innerWidth >= 700 ? 70 : 10, b: 40 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    height: window.innerWidth < 600 ? 900 : 1000, margin: { l: 62, r: d.has_oi && s.oi ? 84 : 52, t: window.innerWidth >= 700 ? 70 : 10, b: 40 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
     font: { color: fg, family: '-apple-system, BlinkMacSystemFont, Inter, Helvetica Neue, sans-serif' }, hoverlabel: { bgcolor: '#1d1d1f', bordercolor: 'rgba(255,255,255,.2)', font: { color: fg } }, hovermode: 'x', showlegend: window.innerWidth >= 700, legend: { orientation: 'h', yanchor: 'bottom', y: 1.0, font: { size: 10 } }, barmode: 'relative', bargap: 0,
     xaxis: { anchor: 'y7', domain: [0, 1], gridcolor: grid, linecolor: grid, tickfont: { size: 10 }, showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: muted, title: { text: 'Time (IST)', font: { size: 11 } } },
     yaxis: ax(doms[0], 'Price (₹)', { anchor: 'x' }),
@@ -138,6 +140,7 @@ function renderInstrument(d) {
     yaxis5: { overlaying: 'y4', side: 'right', range: [-1, 1], tickvals: [-1, -0.5, 0, 0.5, 1], showgrid: false, title: { text: 'Imbalance', font: { size: 11 } }, tickfont: { size: 10 }, anchor: 'x' },
     yaxis6: ax(doms[3], 'Spread (bps)', { anchor: 'x', range: [0, smax] }),
     yaxis7: ax(doms[4], 'Realised vol (%)', { anchor: 'x', rangemode: 'tozero' }),
+    yaxis8: { overlaying: 'y', side: 'right', showgrid: false, title: { text: 'Open interest', font: { size: 11 }, standoff: 8 }, tickfont: { size: 10 }, anchor: 'x', visible: !!(d.has_oi && s.oi) },
   };
   // y4's overlay (imbalance) must be declared after its base axis; Plotly handles it, but cumulative uses y2's domain
   Plotly.react('chart', tr, layout, { responsive: true, displaylogo: false, scrollZoom: true, modeBarButtonsToRemove: ['select2d', 'lasso2d'] });
@@ -159,7 +162,7 @@ function bookAt(i) {
     <div style="margin-top:8px">Spread <b>${s.spread[i] == null ? '–' : fmt(s.spread[i])}</b> (${fmt(s.spread_bps[i], 2)} bps)<br>
     Mid <b>${fmt(s.mid[i])}</b> · Imbalance <b>${s.imbalance[i] == null ? '–' : fmt(s.imbalance[i], 2)}</b><br>
     Close <b>${fmt(s.close[i])}</b> · Volume <b>${fmtInt(s.volume[i])}</b><br>
-    Vol (${VOLWIN_LABEL[d.vol_window]}) <b>${s.vol_ann[i] == null ? '–' : fmt(s.vol_ann[i], 1) + '%'}</b></div>`;
+    ${s.oi && s.oi[i] != null ? `Open interest <b>${fmtInt(s.oi[i])}</b><br>` : ''}Vol (${VOLWIN_LABEL[d.vol_window]}) <b>${s.vol_ann[i] == null ? '–' : fmt(s.vol_ann[i], 1) + '%'}</b></div>`;
 }
 
 /* ---------- overview ---------- */
