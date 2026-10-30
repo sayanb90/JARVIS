@@ -251,7 +251,9 @@ class Lake:
             total_put_oi = int(pe["oi_last"].dropna().sum())
             pcr = round(total_put_oi / total_call_oi, 3) if total_call_oi else None
 
+        lots = inst["lot_size"].dropna() if "lot_size" in inst.columns else pd.Series(dtype=float)
         return {"underlying": underlying, "date": day, "expiry": expiry, "expiries": expiries,
+                "lot_size": num(lots.iloc[0]) if len(lots) else None,
                 "spot": spot, "atm_strike": num(atm) if atm is not None else None,
                 "futures": fut_rows, "chain": chain, "pcr": pcr,
                 "total_call_oi": total_call_oi or None, "total_put_oi": total_put_oi or None}
