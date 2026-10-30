@@ -230,3 +230,13 @@ def test_demo_weekday_helper_and_cli(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["demo", "--out", str(tmp_path / "x"), "--days", "1", "--end", "2026-10-23"])
     demo.main()
     assert "wrote 1 synthetic days" in capsys.readouterr().out and (tmp_path / "x/DEMO").exists()
+
+
+def test_demo_ar1_matches_the_step_by_step_recursion():
+    rng = np.random.default_rng(3)
+    for a in (0.9995, 0.97):
+        eps = rng.normal(0, 1, 5000)
+        want = np.zeros(5000)
+        for i in range(1, 5000):
+            want[i] = a * want[i - 1] + eps[i]
+        np.testing.assert_allclose(demo._ar1(eps, a), want, atol=1e-9)

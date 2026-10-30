@@ -32,11 +32,59 @@ STOCKS = [
 ]
 
 
-# symbol, start price, activity, annual vol, book size, spread widening, start open interest (futures / options demo)
-DERIVATIVES = [
-    ("NIFTY_FUT_26_NOV_26", 24500.0, 0.85, 0.16, 600, 0.2, 9_800_000),
-    ("NIFTY_24500_CE_26_NOV_26", 182.0, 0.60, 0.95, 900, 1.5, 4_200_000),
+# Derivatives demo: futures and option chains for two index underlyings, shaped like a real day.
+# underlying, spot, strike step, lot size, futures expiries, option expiries (first = nearest weekly), strikes each side
+UNDERLYINGS = [
+    ("NIFTY", 24500.0, 50, 75, [date(2026, 11, 24), date(2026, 12, 29)], [date(2026, 10, 27), date(2026, 11, 24)], 12),
+    ("BANKNIFTY", 54900.0, 100, 30, [date(2026, 11, 24)], [date(2026, 11, 24)], 12),
 ]
+
+
+def derivative_contracts(asof: date) -> list[dict]:
+    """
+    The demo contract list: one dict per contract with the instrument-table fields plus the simulation inputs
+    (start price, activity, volatility, book size, start open interest).  Option premiums come from a simple
+    intrinsic + time-value shape and open interest peaks near the money and on round strikes, as on a real chain.
+    """
+    out = []
+    for ui, (u, spot, step, lot, fut_exp, opt_exp, k_each) in enumerate(UNDERLYINGS):
+        for e in fut_exp:
+            days = (e - asof).days
+            out.append({"symbol": f"{u}_FUT_{e:%d_%b_%y}".upper(), "underlying": u, "instrument_type": "FUT",
+                        "expiry": e, "strike": np.nan, "lot_size": lot, "weekly": False,
+                        "price0": spot * (1 + 0.065 * days / 365), "activity": 0.85 if e == fut_exp[0] else 0.35,
+                        "vol": 0.15, "size": 600, "widen": 0.2, "oi0": int(9_000_000 / (1 + (e != fut_exp[0]) * 4))})
+        atm = round(spot / step) * step
+        for ei, e in enumerate(opt_exp):
+            t = max((e - asof).days, 1) / 365
+            for j in range(-k_each, k_each + 1):
+                k = atm + j * step
+                for typ in ("CE", "PE"):
+                    intrinsic = max(spot - k, 0) if typ == "CE" else max(k - spot, 0)
+                    m = np.log(k / spot) / (0.14 * np.sqrt(t))
+                    tv = spot * 0.14 * np.sqrt(t) * 0.4 * np.exp(-m * m / 2)
+                    near = np.exp(-abs(j) / 5)
+                    otm = (typ == "CE" and k >= spot) or (typ == "PE" and k <= spot)
+                    oi = 4_000_000 * np.exp(-(j / 7) ** 2) * (1.6 if otm else 0.5) * (2.2 if k % (step * 10) == 0 else 1)
+                    oi *= 1.0 if ei == 0 else 0.45
+                    out.append({"symbol": f"{u}_{k:g}_{typ}_{e:%d_%b_%y}".upper(), "underlying": u, "instrument_type": typ,
+                                "expiry": e, "strike": float(k), "lot_size": lot, "weekly": ei == 0 and u == "NIFTY",
+                                "price0": max(intrinsic + tv, 2.0), "activity": 0.02 + 0.45 * near * (1 if ei == 0 else 0.5),
+                                "vol": 0.9 + 0.4 * abs(j) / k_each, "size": 900, "widen": 1.2,
+                                "oi0": int(oi / lot) * lot or lot})
+    for i, c in enumerate(out):
+        c["instrument_key"] = f"NSE_FO|DEMO{i:05d}"
+    return out
+
+
+def write_instrument_table(out: Path, contracts: list[dict], asof: date) -> None:
+    """lake/instruments/fo.parquet for the demo contracts, as `fo_instruments import` would write it."""
+    from data_layer.upstox import fo_instruments as fo
+    rows = [{"instrument_key": c["instrument_key"], "symbol": c["symbol"], "underlying": c["underlying"],
+             "underlying_key": f"NSE_INDEX|{c['underlying']}", "instrument_type": c["instrument_type"],
+             "expiry": c["expiry"], "strike": c["strike"], "lot_size": c["lot_size"], "tick_size": 0.05,
+             "weekly": c["weekly"], "exchange_token": c["instrument_key"].split("|")[1], "freeze_qty": 0} for c in contracts]
+    fo.save_table(pd.DataFrame(rows, columns=fo.COLUMNS), asof, out)
 
 
 def add_open_interest(df: pd.DataFrame, oi0: int, rng: np.random.Generator) -> pd.DataFrame:
@@ -55,19 +103,30 @@ def weekdays_ending(end: date, n: int) -> list[date]:
     return out[::-1]
 
 
+def _ar1(eps: np.ndarray, a: float, block: int = 256) -> np.ndarray:
+    """x[0] = 0, x[i] = a * x[i-1] + eps[i], vectorised in blocks (a closed form per block stays well scaled)."""
+    x = np.empty_like(eps)
+    prev = 0.0
+    k = np.arange(block)
+    for s0 in range(0, len(eps), block):
+        e = eps[s0:s0 + block].copy()
+        if s0 == 0:
+            e[0] = 0.0
+        p = a ** k[:len(e)]
+        x[s0:s0 + len(e)] = p * (prev * a + np.cumsum(e / p)) if s0 else p * np.cumsum(e / p)
+        prev = x[s0 + len(e) - 1]
+    return x
+
+
 def simulate(symbol, price0, activity, ann_vol, size, widen, day: date, rng: np.random.Generator) -> pd.DataFrame:
     t = np.arange(SESSION)
     u = 1 + 2.4 * np.exp(-t / 1500) + 1.8 * np.exp(-(SESSION - t) / 1500)        # U-shaped intraday activity
     u = u / u.mean()
     # volatility regime: slow AR(1) in log space, scaled by the intraday shape
-    z = np.zeros(SESSION); eps = rng.normal(0, 0.008, SESSION)
-    for i in range(1, SESSION):
-        z[i] = 0.9995 * z[i - 1] + eps[i]
+    z = _ar1(rng.normal(0, 0.008, SESSION), 0.9995)
     regime = np.exp(z - z.var() / 2)
     sig = ann_vol / np.sqrt(250 * SESSION) * regime * np.sqrt(u)
-    imb = np.zeros(SESSION); e2 = rng.normal(0, 0.25, SESSION)
-    for i in range(1, SESSION):
-        imb[i] = 0.97 * imb[i - 1] + e2[i]
+    imb = _ar1(rng.normal(0, 0.25, SESSION), 0.97)
     imb = np.clip(imb, -2.5, 2.5)
     ret = rng.normal(0, 1, SESSION) * sig + 0.0 * sig
     ret[1:] += 0.12 * sig[1:] * np.tanh(imb[:-1])                                # imbalance weakly predicts the move
@@ -105,6 +164,9 @@ def write_demo(out: Path, days: int = 3, end: date | None = None, seed: int = 11
                derivatives: bool = False) -> list[date]:
     end = end or date(2026, 10, 23)
     ds = weekdays_ending(end, days)
+    contracts = derivative_contracts(end) if derivatives else []
+    if derivatives:
+        write_instrument_table(out, contracts, end)
     con = duckdb.connect()
     for di, d in enumerate(ds):
         frames = []
@@ -113,10 +175,11 @@ def write_demo(out: Path, days: int = 3, end: date | None = None, seed: int = 11
             drift = 1 + 0.004 * ((d.toordinal() % 5) - 2)                         # a different starting level per date
             frames.append(simulate(sym, p0 * drift, act, vol, size, widen, d, rng))
         if derivatives:
-            for di2, (sym, p0, act, vol, size, widen, oi0) in enumerate(DERIVATIVES):
-                rng = np.random.default_rng([seed, d.toordinal(), 100 + di2])
-                f = simulate(sym, p0 * (1 + 0.004 * ((d.toordinal() % 5) - 2)), act, vol, size, widen, d, rng)
-                frames.append(add_open_interest(f, oi0, rng))
+            for ci, c in enumerate(contracts):
+                rng = np.random.default_rng([seed, d.toordinal(), 1000 + ci])
+                f = simulate(c["symbol"], c["price0"] * (1 + 0.004 * ((d.toordinal() % 5) - 2)), c["activity"], c["vol"],
+                             c["size"], c["widen"], d, rng)
+                frames.append(add_open_interest(f, c["oi0"], rng))
         df = pd.concat(frames).sort_values(["symbol", "ts"]).reset_index(drop=True)
         for c in ("n_ticks", "bid_qty", "ask_qty") + (("oi",) if derivatives else ()):
             df[c] = df[c].astype("Int64")
@@ -134,7 +197,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("lake_demo"))
     ap.add_argument("--days", type=int, default=3)
     ap.add_argument("--end", type=date.fromisoformat, default=None)
-    ap.add_argument("--with-derivatives", action="store_true", help="add a demo future and option with open interest")
+    ap.add_argument("--with-derivatives", action="store_true", help="add demo futures and option chains (NIFTY, BANKNIFTY) with open interest")
     a = ap.parse_args()
     ds = write_demo(a.out, a.days, a.end, derivatives=a.with_derivatives)
     print(f"wrote {len(ds)} synthetic days ({ds[0]} to {ds[-1]}) for {len(STOCKS)} stocks to {a.out}")

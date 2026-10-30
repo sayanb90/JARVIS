@@ -99,6 +99,15 @@ def demo_lake(tmp_path_factory):
     return out
 
 
+@pytest.fixture(scope="session")
+def demo_lake_fo(tmp_path_factory):
+    """The synthetic lake plus futures and option chains for NIFTY and BANKNIFTY (for the real-browser test)."""
+    from webapp.demo import write_demo
+    out = tmp_path_factory.mktemp("demo_lake_fo")
+    write_demo(out, days=3, derivatives=True)
+    return out
+
+
 @pytest.fixture(autouse=True)
 def _isolated_env_file(tmp_path, monkeypatch):
     """No test may read or write a developer's real .env: point every ENV_FILE at a path that does not exist."""

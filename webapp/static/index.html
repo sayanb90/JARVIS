@@ -2,92 +2,192 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>JARVIS Intraday Viewer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>JARVIS Intraday</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div id="demo-banner" class="banner" hidden>SYNTHETIC DEMO DATA &mdash; not market data</div>
-<header>
-  <h1>JARVIS <span>Intraday</span></h1>
-  <nav role="tablist">
-    <button role="tab" id="tab-instrument" aria-selected="true">Equities</button>
-    <button role="tab" id="tab-overview" aria-selected="false">Market overview</button>
-    <button role="tab" id="tab-fo" aria-selected="false">F&amp;O</button>
-  </nav>
+<div id="demo-banner" class="banner" hidden>Synthetic demo data &mdash; not market data</div>
+
+<header class="appbar">
+  <div class="appbar-inner">
+    <div class="brand">JARVIS <span>Intraday</span></div>
+    <nav class="primary" role="tablist" aria-label="Sections">
+      <button role="tab" id="tab-instrument" data-tab="instrument" aria-selected="true">Equities</button>
+      <button role="tab" id="tab-overview" data-tab="overview" aria-selected="false">Market</button>
+      <button role="tab" id="tab-fo" data-tab="fo" aria-selected="false">Derivatives</button>
+    </nav>
+    <div class="spacer"></div>
+    <label class="day"><span>Trading day</span><select id="date" aria-label="Trading day"></select></label>
+  </div>
 </header>
-
-<section class="hero"><h2>Every second, in focus.</h2><p>Volume, book, spread and volatility for NSE equities, futures and options.</p></section>
-
-<section class="controls" aria-label="Selection">
-  <label>Date <select id="date"></select></label>
-  <label>Equity <select id="symbol"></select></label>
-  <label>Bar width <select id="width"></select></label>
-  <label>Volatility window <select id="volwin"></select></label>
-  <label>Underlying <select id="underlying"></select></label>
-  <label>Expiry <select id="expiry"></select></label>
-  <label>Contract <select id="fo-contract"></select></label>
-  <span id="status" role="status" aria-live="polite"></span>
-</section>
+<div id="context" class="context busy" role="status" aria-live="polite"><i class="dot"></i><span id="status">Loading…</span></div>
 
 <main>
   <div id="empty" class="empty" hidden>
     <h2>No intraday data yet</h2>
     <p>The viewer reads <code>lake/bars/interval=1s/</code>. Start the collector during a market session, or try the
-    synthetic demo: <code>python -m webapp.demo</code> then <code>python -m webapp --lake lake_demo</code>.</p>
+    synthetic demo: <code>python -m webapp.demo --with-derivatives</code> then <code>python -m webapp --lake lake_demo</code>.</p>
   </div>
 
-  <section id="view-instrument">
-    <div id="cards" class="cards"></div>
-    <div class="chart-row">
-      <div id="chart" class="chart" aria-label="Price, volume, book, spread and volatility over the day"></div>
-      <aside id="book" class="book" aria-label="Book snapshot at the cursor">
-        <h3>Book at cursor</h3>
-        <div id="book-body" class="muted">Hover the chart to see the best bid and ask at that second.</div>
-      </aside>
+  <!-- ===================== Equities ===================== -->
+  <section id="view-instrument" class="view">
+    <div class="page-head">
+      <div><h1 id="eq-title">Equities</h1><p class="sub" id="eq-sub"></p></div>
+      <div class="toolbar">
+        <label class="field wide"><span>Instrument</span><select id="symbol"></select></label>
+        <label class="field"><span>Bar width</span><select id="width"></select></label>
+        <label class="field"><span>Volatility window</span><select id="volwin"></select></label>
+      </div>
     </div>
-    <p class="note" id="note"></p>
-  </section>
-
-  <section id="view-overview" hidden>
-    <div class="grid2">
-      <div id="chart-vol" class="chart small"></div>
-      <div id="chart-scatter" class="chart small"></div>
+    <div id="cards" class="kpis"></div>
+    <nav class="subtabs" role="tablist" aria-label="Equity views" data-tab="instrument">
+      <button role="tab" data-sub="price">Price &amp; volume</button>
+      <button role="tab" data-sub="book">Order book</button>
+      <button role="tab" data-sub="vol">Volatility</button>
+    </nav>
+    <div class="subview stack" data-sub="price">
+      <div class="panel"><header><h3>Price<span class="hint">IST</span></h3><div class="legend" data-for="eq-price"></div></header>
+        <div class="body"><div id="eq-price" class="plot h-lg" aria-label="Price over the day"></div></div></div>
+      <div class="panel"><header><h3>Volume</h3><div class="legend" data-for="eq-volume"></div></header>
+        <div class="body"><div id="eq-volume" class="plot h-sm" aria-label="Volume over the day"></div></div></div>
     </div>
-    <div class="table-wrap"><table id="table"></table></div>
-    <p class="note">Realised volatility = sqrt(sum of squared 1-second log returns &times; 250), annualised. At 1-second sampling the bid-ask bounce inflates it relative to 1-minute estimates, so compare instruments with each other rather than with published figures.</p>
-  </section>
-
-  <section id="view-fo" hidden>
-    <div id="fo-empty" class="empty" hidden>
-      <h2>No futures or options yet</h2>
-      <p>Run <code>fo_instruments import</code> and <code>select</code>, then collect bars with <code>feed --segment fo</code> (runbook section 17) &mdash; or try the demo:
-      <code>python -m webapp.demo --with-derivatives</code> then <code>python -m webapp --lake lake_demo</code>.</p>
-    </div>
-    <div id="fo-body" hidden>
-      <div id="fo-cards" class="cards"></div>
-      <div class="chart-row">
-        <div id="chart-oi" class="chart" aria-label="Open interest by strike, calls vs. puts"></div>
-        <aside class="book" aria-label="Futures">
-          <h3>Futures</h3>
-          <div class="table-wrap"><table id="fo-futures"></table></div>
+    <div class="subview" data-sub="book" hidden>
+      <div class="split">
+        <div class="stack">
+          <div class="panel"><header><h3>Size at best<span class="hint">bid above, ask below</span></h3><div class="legend" data-for="eq-depth"></div></header>
+            <div class="body"><div id="eq-depth" class="plot h-md"></div></div></div>
+          <div class="panel"><header><h3>Book imbalance</h3><div class="legend" data-for="eq-imb"></div></header>
+            <div class="body"><div id="eq-imb" class="plot h-sm"></div></div></div>
+          <div class="panel"><header><h3>Spread</h3><div class="legend" data-for="eq-spread"></div></header>
+            <div class="body"><div id="eq-spread" class="plot h-sm"></div></div></div>
+        </div>
+        <aside class="panel book" aria-label="Book snapshot at the cursor">
+          <h3>Book at cursor</h3>
+          <div id="book-body" class="muted">Hover a chart to see the best bid and ask at that second.</div>
         </aside>
       </div>
-      <h3 class="section-h">Option chain &mdash; <span id="fo-chain-title"></span></h3>
-      <div class="table-wrap"><table id="fo-chain"></table></div>
-      <p class="note">Spot is a proxy (last close of the nearest future); no index LTP is collected. ATM row is highlighted. Click a price, or pick a contract above, for its full intraday chart below.</p>
+      <p class="note" id="note"></p>
+    </div>
+    <div class="subview stack" data-sub="vol" hidden>
+      <div class="panel"><header><h3>Realised volatility<span class="hint">rolling, annualised</span></h3><div class="legend" data-for="eq-vol"></div></header>
+        <div class="body"><div id="eq-vol" class="plot h-lg"></div></div></div>
+      <p class="note">Realised volatility = sqrt(sum of squared 1-second log returns over the window, scaled to a trading year). At 1-second sampling the bid-ask bounce inflates it relative to 1-minute estimates, so compare instruments with each other rather than with published figures.</p>
+    </div>
+  </section>
 
-      <h3 class="section-h">Contract detail</h3>
-      <div id="fo-contract-empty" class="empty">
-        <p>Pick a contract above &mdash; the same price, volume, book, spread, imbalance and volatility chart as the Equities tab, for whichever future or option you choose.</p>
+  <!-- ===================== Market ===================== -->
+  <section id="view-overview" class="view" hidden>
+    <div class="page-head">
+      <div><h1>Market</h1><p class="sub" id="mk-sub"></p></div>
+      <div class="toolbar">
+        <label class="field"><span>Show</span><select id="heat-n"><option value="10">Top 10</option><option value="20" selected>Top 20</option><option value="50">Top 50</option><option value="0">All</option></select></label>
+        <label class="field"><span>Colour by</span><select id="heat-metric"><option value="realised_vol_pct">Volatility</option><option value="return_pct">Return</option><option value="median_spread_bps">Spread</option></select></label>
       </div>
-      <div id="fo-contract-body" hidden>
-        <div id="fo-contract-cards" class="cards"></div>
-        <div class="chart-row">
-          <div id="fo-contract-chart" class="chart" aria-label="Price, volume, book, spread and volatility for the selected contract"></div>
-          <aside id="fo-contract-book" class="book" aria-label="Book snapshot at the cursor">
+    </div>
+    <div id="mk-cards" class="kpis"></div>
+    <nav class="subtabs" role="tablist" aria-label="Market views" data-tab="overview">
+      <button role="tab" data-sub="heat">Heat map</button>
+      <button role="tab" data-sub="liq">Liquidity</button>
+      <button role="tab" data-sub="table">All instruments</button>
+    </nav>
+    <div class="subview" data-sub="heat">
+      <div class="split wide">
+        <div class="panel"><header><h3 id="heat-title">Most volatile</h3><span class="legend muted" id="heat-legend">Tile size = traded value</span></header>
+          <div class="body"><div id="chart-heat" class="plot h-xl"></div></div></div>
+        <div class="stack">
+          <div class="panel"><header><h3>Most volatile</h3></header><div class="body"><ol id="lead-vol" class="rank"></ol></div></div>
+          <div class="panel"><header><h3>Biggest moves</h3></header><div class="body"><ol id="lead-move" class="rank"></ol></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="subview" data-sub="liq" hidden>
+      <div class="panel"><header><h3>Spread vs volatility<span class="hint">bubble size = traded value</span></h3></header>
+        <div class="body"><div id="chart-scatter" class="plot h-xl"></div></div></div>
+    </div>
+    <div class="subview" data-sub="table" hidden>
+      <div class="panel"><div class="table-wrap"><table id="table" class="sortable clickable"></table></div></div>
+      <p class="note">Click a column to sort, a row to open the instrument. Realised volatility is annualised from 1-second returns.</p>
+    </div>
+  </section>
+
+  <!-- ===================== Derivatives ===================== -->
+  <section id="view-fo" class="view" hidden>
+    <div class="page-head">
+      <div><h1 id="fo-title">Derivatives</h1><p class="sub" id="fo-sub"></p></div>
+      <div class="toolbar">
+        <label class="field"><span>Underlying</span><select id="underlying"></select></label>
+        <label class="field"><span>Option expiry</span><select id="expiry"></select></label>
+      </div>
+    </div>
+    <div id="fo-empty" class="empty" hidden>
+      <h2>No futures or options for this day</h2>
+      <p>Import the instrument file, select contracts and collect them with <code>feed --segment fo</code> (runbook section 17),
+      or try the demo: <code>python -m webapp.demo --with-derivatives</code>.</p>
+    </div>
+    <div id="fo-body" hidden>
+      <div id="fo-cards" class="kpis"></div>
+      <nav class="subtabs" role="tablist" aria-label="Derivatives views" data-tab="fo">
+        <button role="tab" data-sub="summary">Summary</button>
+        <button role="tab" data-sub="chain">Option chain</button>
+        <button role="tab" data-sub="oi">Open interest</button>
+        <button role="tab" data-sub="contract">Contract</button>
+      </nav>
+
+      <div class="subview" data-sub="summary">
+        <div class="split wide">
+          <div class="panel"><header><h3>Futures</h3></header>
+            <div class="table-wrap"><table id="fo-futures" class="clickable"></table></div></div>
+          <div class="panel"><header><h3>Key strikes<span class="hint">largest open interest</span></h3></header>
+            <div class="body" id="fo-keys"></div></div>
+        </div>
+        <p class="note">Spot is a proxy: the last price of the nearest future (the index itself is not collected). Max pain is the strike at which option buyers' total payoff at expiry would be smallest, from today's open interest.</p>
+      </div>
+
+      <div class="subview" data-sub="chain" hidden>
+        <div class="panel">
+          <header><h3 id="fo-chain-title">Option chain</h3>
+            <label class="field"><span class="sr">Strikes shown</span><select id="chain-range">
+              <option value="5">ATM &plusmn; 5</option><option value="10" selected>ATM &plusmn; 10</option><option value="20">ATM &plusmn; 20</option><option value="0">All strikes</option></select></label></header>
+          <div class="table-wrap scroll-y"><table id="fo-chain" class="chain"></table></div>
+        </div>
+        <p class="note">Tap a price or open-interest cell to open that contract. Shaded bars show open interest relative to the largest on each side; the highlighted row is at the money.</p>
+      </div>
+
+      <div class="subview stack" data-sub="oi" hidden>
+        <div class="panel">
+          <header><h3>Open interest by strike</h3><div class="legend" data-for="chart-oi"></div>
+            <label class="field"><span class="sr">Strikes</span><select id="oi-focus">
+              <option value="active">Most active 15</option><option value="atm">ATM &plusmn; 10</option><option value="all">All strikes</option></select></label></header>
+          <div class="body" id="oi-scroll"><div id="chart-oi" class="plot h-xl"></div></div>
+        </div>
+        <div class="panel">
+          <header><h3>Change in open interest today</h3><div class="legend" data-for="chart-oichg"></div></header>
+          <div class="body"><div id="chart-oichg" class="plot h-lg"></div></div>
+        </div>
+      </div>
+
+      <div class="subview" data-sub="contract" hidden>
+        <div class="toolbar" style="margin-bottom:14px">
+          <label class="field wide"><span>Contract</span><select id="fo-contract"></select></label>
+          <label class="field"><span>Bar width</span><select id="fo-width"></select></label>
+          <label class="field"><span>Volatility window</span><select id="fo-volwin"></select></label>
+        </div>
+        <p class="sub muted" id="fo-contract-meta" style="margin:-4px 0 14px"></p>
+        <div id="fo-contract-cards" class="kpis"></div>
+        <div class="split">
+          <div class="stack">
+            <div class="panel"><header><h3>Price and open interest</h3><div class="legend" data-for="fc-price"></div></header>
+              <div class="body"><div id="fc-price" class="plot h-lg"></div></div></div>
+            <div class="panel"><header><h3>Volume</h3><div class="legend" data-for="fc-volume"></div></header>
+              <div class="body"><div id="fc-volume" class="plot h-sm"></div></div></div>
+            <div class="panel"><header><h3>Spread</h3><div class="legend" data-for="fc-spread"></div></header>
+              <div class="body"><div id="fc-spread" class="plot h-sm"></div></div></div>
+          </div>
+          <aside class="panel book" aria-label="Book snapshot at the cursor">
             <h3>Book at cursor</h3>
-            <div id="fo-contract-book-body" class="muted">Hover the chart to see the best bid and ask at that second.</div>
+            <div id="fo-contract-book-body" class="muted">Hover a chart to see the best bid and ask at that second.</div>
           </aside>
         </div>
         <p class="note" id="fo-contract-note"></p>

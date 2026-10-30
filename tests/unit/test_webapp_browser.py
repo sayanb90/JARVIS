@@ -26,13 +26,13 @@ def node_path():
 
 
 @pytest.mark.browser
-def test_viewer_in_a_real_browser(demo_lake):
+def test_viewer_in_a_real_browser(demo_lake_fo):
     found = node_path()
     if not found:
         pytest.skip("Node + Playwright with Chromium not installed")
     node, root = found
     s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
-    server = uvicorn.Server(uvicorn.Config(create_app(demo_lake), host="127.0.0.1", port=port, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(create_app(demo_lake_fo), host="127.0.0.1", port=port, log_level="warning"))
     t = threading.Thread(target=server.run, daemon=True); t.start()
     for _ in range(100):
         if server.started:

@@ -140,10 +140,19 @@ def test_demo_derivatives_have_open_interest_and_default_demo_is_unchanged(tmp_p
     demo.write_demo(tmp_path / "d2", days=1, derivatives=True)
     q = Lake(tmp_path / "d2")
     syms = set(q.sql("SELECT DISTINCT symbol FROM bars_1s").symbol)
-    assert {"NIFTY_FUT_26_NOV_26", "NIFTY_24500_CE_26_NOV_26"} <= syms and len(syms) == 12
-    oi = q.sql("SELECT symbol, count(oi) n, min(oi) lo FROM bars_1s GROUP BY symbol")
-    assert oi.set_index("symbol").loc["NIFTY_FUT_26_NOV_26", "n"] > 1000
-    assert oi.set_index("symbol").loc["RELIANCE.NS", "n"] == 0
+    contracts = demo.derivative_contracts(date(2026, 10, 23))
+    assert {"NIFTY_FUT_24_NOV_26", "NIFTY_24500_CE_27_OCT_26", "BANKNIFTY_54900_PE_24_NOV_26"} <= syms
+    assert len(syms) == 10 + len(contracts)
+    oi = q.sql("SELECT symbol, count(oi) n, min(oi) lo FROM bars_1s GROUP BY symbol").set_index("symbol")
+    assert oi.loc["NIFTY_FUT_24_NOV_26", "n"] > 1000 and oi.loc["RELIANCE.NS", "n"] == 0
+    # the demo writes an instrument table, so the derivatives views work on it like on real data
+    assert q.fo_underlyings("2026-10-23") == ["BANKNIFTY", "NIFTY"]
+    chain = q.fo_chain("2026-10-23", "NIFTY")
+    assert chain["expiries"] == ["2026-10-27", "2026-11-24"] and chain["lot_size"] == 75 and len(chain["futures"]) == 2
+    assert len(chain["chain"]) == 25 and all(r["ce_oi"] and r["pe_oi"] for r in chain["chain"])
+    atm = next(r for r in chain["chain"] if r["strike"] == chain["atm_strike"])
+    far = chain["chain"][0]
+    assert atm["ce_oi"] + atm["pe_oi"] > far["ce_oi"] + far["pe_oi"]          # open interest is concentrated near the money
     sys.argv = ["demo", "--out", str(tmp_path / "d3"), "--days", "1", "--with-derivatives"]
     demo.main()
     assert (tmp_path / "d3" / "DEMO").exists()
@@ -209,7 +218,7 @@ def test_fo_api_meta_and_chain_endpoints(tmp_path):
     c = TestClient(create_app(tmp_path))
     assert c.get("/api/fo/meta", params={"date": "2026-10-23"}).json() == {"underlyings": ["NIFTY"]}
     r = c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "NIFTY"})
-    assert r.status_code == 200 and r.json()["atm_strike"] == 24500
+    assert r.status_code == 200 and r.json()["atm_strike"] == 24500 and "lot_size" in r.json()
     assert c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "NOSUCH"}).status_code == 404
     assert c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "../etc"}).status_code == 422
     assert c.get("/api/fo/chain", params={"date": "2026-10-23", "underlying": "NIFTY", "expiry": "bad"}).status_code == 422
