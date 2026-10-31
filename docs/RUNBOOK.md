@@ -37,7 +37,7 @@ What has to happen on the VPS before the current code is called live. Work top t
   ```
   SCRUM-77
 - [ ] Disk: `du -sh lake/ticks lake` after a full session; expect about 90 MB a day of ticks at 500 equities + ~350 contracts (SCRUM-77). Check that the backup target has room for the same growth (section 7).
-- [ ] **F&O sizing run (one full session, option C).** The watchlist is now 4 futures + 4 option expiries, all strikes, and every option tick stores IV, delta, theta, gamma, vega and rho. Leave `JARVIS_TICK_STORE=full` and `JARVIS_GREEKS=all` (the defaults) and run the whole session, then measure and decide:
+- [ ] **F&O sizing run (one full session, option C).** SCRUM-94 (storage policy), SCRUM-93 (Greeks stored), SCRUM-78 (4+4 expiries, PR #11); if `data/fo_universe.csv` has more than ~2,000 rows see SCRUM-96 (split across connections). The watchlist is now 4 futures + 4 option expiries, all strikes, and every option tick stores IV, delta, theta, gamma, vega and rho. Leave `JARVIS_TICK_STORE=full` and `JARVIS_GREEKS=all` (the defaults) and run the whole session, then measure and decide:
   ```
   du -sh lake/ticks/date=$(date -u +%F)
   python - <<'PY'
@@ -857,7 +857,7 @@ Three sections in the top bar (**Equities**, **Market**, **Derivatives**) and on
 | Market (show top 10/20/50/all, colour by volatility, return or spread) | **Heat map**: the most volatile instruments as tiles sized by traded value, plus "most volatile" and "biggest moves" lists. **Liquidity**: spread against volatility, bubble size = traded value. **All instruments**: sortable table. Clicking any tile, row or bubble opens that instrument |
 | Derivatives (underlying, option expiry) | **Summary**: spot proxy, ATM strike, put/call OI ratio, max pain, call and put OI; futures with basis and OI change; key strikes by OI. **Option chain**: calls and puts by strike with OI bars, ATM highlighted, ATM ± 5/10/20 or all strikes. **Open interest**: OI by strike (most active 15, ATM ± 10 or all strikes, scrollable) and today's OI change by strike. **Contract**: any future or option with price and open interest, volume, spread and the book card |
 
-Signals and other future tools are added as a sub-tab (one button and one panel) in the relevant section. Layouts are checked at phone (390 px), tablet (820 px) and desktop (1440 px) widths with no sideways scrolling. Demo data with futures and option chains: `python -m webapp.demo --with-derivatives`.
+Signals and other future tools are added as a sub-tab (one button and one panel) in the relevant section. Planned, not built: an **Order book** sub-tab on the futures/options contract view (SCRUM-95) and option Greeks/IV charts (SCRUM-97); both wait for the owner's go-ahead. Layouts are checked at phone (390 px), tablet (820 px) and desktop (1440 px) widths with no sideways scrolling. Demo data with futures and option chains: `python -m webapp.demo --with-derivatives`.
 
 ### 16.2 Definitions (so the numbers can be checked)
 | Measure | Definition |
