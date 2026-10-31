@@ -23,7 +23,7 @@ Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · 
 | SCRUM-96 Split F&O subscription across connections | To Do | none (only if the list exceeds 2,000 keys) | C "F&O sizing run" |
 | SCRUM-59, 62, 72, 73 | In Progress | no merged PR in this window | D "Prove it on live data" |
 
-Built, not verified: everything above except the planning items. Nothing on this list has been run against live Upstox data since the F&O and Greeks changes.
+Built, not verified: every ticket above that is not To Do. Nothing on this list has been run against live Upstox data since the F&O and Greeks changes.
 <!-- agent:status:end -->
 
 ---
