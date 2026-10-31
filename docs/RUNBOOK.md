@@ -5,6 +5,27 @@ proven *on the VPS*, not on a dev box. Last reviewed: 2026-10-30.
 
 Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · `[ ]` not started
 
+<!-- agent:status:start -->
+**Engineering status** (maintained by `/sync-docs`; edit by PR only). Last synced: 2026-10-31 at `ee933ab`. Active sprint: SCRUM Sprint 1 (30 Oct to 6 Nov 2026). Project rule: done means proven on the VPS, so a merged PR with the ticket In Review is expected.
+
+| Ticket | Jira | Repo evidence | Runbook item |
+|---|---|---|---|
+| SCRUM-71 F&O ingestion | In Review | PR #6 merged 2026-10-30 | Section 17; not yet run against Upstox |
+| SCRUM-76 Viewer for futures and options | In Review | PR #8 merged 2026-10-30 | Section 16; D "Viewer" |
+| SCRUM-77 Raw tick feed | In Review | commit `a885c61`, PR #9 | Section 13.5; D "Health" |
+| SCRUM-79 JARVIS admin | In Review | PR #9 merged 2026-10-30 | Section 18; B "Configure", D "Admin" |
+| SCRUM-78 Wider F&O coverage (4 + 4 expiries) | Done | PR #11 merged 2026-10-31 | Section 17.6; C "F&O sizing run" |
+| SCRUM-93 Option Greeks stored on ticks | Done | PR #11 | C "F&O sizing run" |
+| SCRUM-94 Configurable tick storage and sizing decision | In Review | PR #11 (code); live run pending | C "F&O sizing run" |
+| SCRUM-95 Size and imbalance on contract view | Done | PR #11 | Section 16 |
+| SCRUM-97 Greeks in the viewer | Done | PR #11 | Section 16 |
+| SCRUM-98 Live five-level book (not stored) | In Review | PR #11 (code); live check pending | Section 16 "Live depth" |
+| SCRUM-96 Split F&O subscription across connections | To Do | none (only if the list exceeds 2,000 keys) | C "F&O sizing run" |
+| SCRUM-59, 62, 72, 73 | In Progress | no merged PR in this window | D "Prove it on live data" |
+
+Built, not verified: every ticket above that is not To Do. Nothing on this list has been run against live Upstox data since the F&O and Greeks changes.
+<!-- agent:status:end -->
+
 ---
 
 ## Before the next launch (to-do, 2026-10-30)
@@ -423,6 +444,8 @@ Decisions 1–8 recorded, one source chosen with a documented cost, a sizing est
 | 2026-10-25 | Daily OHLC re-extended to India+US+UK+EU (5y, Yahoo); intraday, ticks and fundamentals stay India only; `--backfill` for deepest Yahoo intraday window; `currency` column added to universe (ADR-3). Earlier same day: scope narrowed to NSE only; US removed from universe, fetchers, scheduler, lake and tests. Upstox v2 WebSocket chosen for live tick/L1 (ADR-2); tick model, bar aggregator and segment storage built | Adapter blocked on proto/docs access (section 13) |
 | 2026-10-25 | Runbook created; intraday bars collector, `bars5m` schema and loader added | Not yet run on the VPS |
 | 2026-10-25 | `yf_client` universe now read from `data/universe.csv` (previously a hardcoded 20-ticker US fallback) | |
+| 2026-10-31 | Agent contract and dev-kit pointers (PR #10): ticket keys, status map, and runbook ownership (agents edit only between the `agent:status` markers) | Documentation only |
+| 2026-10-31 | PR #11: F&O collection widened to 4 futures and 4 option expiries per index, all strikes (SCRUM-78); option Greeks and IV stored on every tick (SCRUM-93); config-selectable tick storage full, throttle or changes (SCRUM-94); live five-level book kept in memory and shown in the viewer, never stored (SCRUM-98); viewer Greeks tab, chain IV and delta, size-at-best and imbalance on contracts (SCRUM-95, SCRUM-97); feed warns above the Upstox 2,000-key cap | Not yet run against Upstox; live checks in "Before the next launch" C and D (SCRUM-94, SCRUM-98) |
 
 ## 11. Open decisions for the owner
 
