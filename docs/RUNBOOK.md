@@ -12,7 +12,7 @@ Legend: `[x]` done and verified · `[~]` built, **not yet verified in prod** · 
 What has to happen on the VPS before the current code is called live. Work top to bottom; each line names its Jira ticket (all in SCRUM Sprint 1). Tick here and move the ticket when it is proven on the VPS.
 
 ### A. Deploy the code
-- [ ] **Merge PR #9** (JARVIS admin, feed re-reads the subscription list each session, tick-compaction fix). SCRUM-79, SCRUM-77
+- [x] **Merge PR #9** (JARVIS admin, feed re-reads the subscription list each session, tick-compaction fix). SCRUM-79, SCRUM-77 — merged to `master`
 - [ ] On the VPS, after the close (the feed restart drops nothing outside the session):
   ```bash
   cd ~/JARVIS && git checkout master && git pull && .venv/bin/pip install -r requirements.txt   # no new packages
