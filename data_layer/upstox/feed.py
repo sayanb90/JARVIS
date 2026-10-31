@@ -6,7 +6,7 @@ Upstox v3 live market-data collector: WebSocket -> raw ticks -> Parquet.
   python -m data_layer.upstox.feed --once          # run one session now (until close)
   python -m data_layer.upstox.feed --limit 20              # subscribe only the first N universe symbols
 
-Every tick/L1 update is persisted as-is (full raw-tick precision; see SCRUM-77 and docs/RUNBOOK.md
+Every tick/L1 update is persisted as-is (full raw-tick precision; see SCRUM-77 and the JARVIS Runbook (Notion)
 section 2.2/16). There is no 1-second bar aggregation in this path any more: that discarded real
 sub-second detail that Upstox actually sends (ltt is epoch milliseconds, pushed per update, not per
 second). 1-minute+ bars built from the REST candle API (data_layer/upstox/candles.py) are a separate,
