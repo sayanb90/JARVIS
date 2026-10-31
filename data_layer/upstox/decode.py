@@ -29,14 +29,23 @@ def _ts(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).replace(tzinfo=None)
 
 
-def _tick(symbol: str, ltpc, vtt: Optional[int], quote, oi: Optional[float]) -> Optional[Tick]:
+def _greeks(holder) -> dict:
+    """iv, delta, theta, gamma, vega, rho from a feed message that carries `optionGreeks` (options only)."""
+    if not holder.HasField("optionGreeks"):
+        return {}
+    g = holder.optionGreeks
+    return {"iv": holder.iv or None, "delta": g.delta, "theta": g.theta, "gamma": g.gamma, "vega": g.vega, "rho": g.rho}
+
+
+def _tick(symbol: str, ltpc, vtt: Optional[int], quote, oi: Optional[float], greeks: Optional[dict] = None
+          ) -> Optional[Tick]:
     if not ltpc.ltt or not ltpc.ltp:                 # no trade yet today
         return None
     bid = ask = bq = aq = None
     if quote is not None:
         bid, bq, ask, aq = quote.bidP or None, quote.bidQ, quote.askP or None, quote.askQ
     return Tick(_ts(ltpc.ltt), symbol, ltpc.ltp, vtt, bid, bq, ask, aq,
-                int(oi) if oi else None)
+                int(oi) if oi else None, **(greeks or {}))
 
 
 def ticks_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str]
@@ -52,12 +61,12 @@ def ticks_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str]
             if ff.HasField("marketFF"):
                 m = ff.marketFF
                 q = m.marketLevel.bidAskQuote[0] if m.marketLevel.bidAskQuote else None
-                t = _tick(sym, m.ltpc, m.vtt, q, m.oi)
+                t = _tick(sym, m.ltpc, m.vtt, q, m.oi, _greeks(m))
             elif ff.HasField("indexFF"):
                 t = _tick(sym, ff.indexFF.ltpc, None, None, None)
         elif feed.HasField("firstLevelWithGreeks"):
             g = feed.firstLevelWithGreeks
-            t = _tick(sym, g.ltpc, g.vtt, g.firstDepth if g.HasField("firstDepth") else None, g.oi)
+            t = _tick(sym, g.ltpc, g.vtt, g.firstDepth if g.HasField("firstDepth") else None, g.oi, _greeks(g))
         elif feed.HasField("ltpc"):
             t = _tick(sym, feed.ltpc, None, None, None)
         if t is not None:

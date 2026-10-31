@@ -332,3 +332,39 @@ def test_candles_main_segment_fo(world, monkeypatch):
     with pytest.raises(SystemExit, match="fo_instruments import"):
         candles.main()
     assert seen["seg"] == "fo"
+
+
+# -- option Greeks ---------------------------------------------------------------
+def _greeks_frame(key, with_greeks=True):
+    r = pb.FeedResponse(type=pb.live_feed)
+    m = r.feeds[key].fullFeed.marketFF
+    m.ltpc.ltp, m.ltpc.ltt, m.oi, m.vtt = 120.5, ms(4, 0, 0), 5000, 100
+    q = m.marketLevel.bidAskQuote.add()
+    q.bidP, q.bidQ, q.askP, q.askQ = 120.4, 50, 120.6, 75
+    if with_greeks:
+        m.iv = 14.25
+        m.optionGreeks.delta, m.optionGreeks.theta, m.optionGreeks.gamma = 0.52, -8.1, 0.0021
+        m.optionGreeks.vega, m.optionGreeks.rho = 11.3, 4.2
+    return r.SerializeToString()
+
+
+def test_decode_reads_all_greeks_and_iv_from_a_full_frame():
+    key = "NSE_FO|1"
+    t = list(decode.ticks_from_response(decode.parse_frame(_greeks_frame(key)), {key: "OPT"}))[0]
+    assert (t.iv, t.delta, t.theta, t.gamma, t.vega, t.rho) == pytest.approx((14.25, 0.52, -8.1, 0.0021, 11.3, 4.2))
+    assert (t.bid, t.bid_qty, t.ask, t.ask_qty, t.oi) == (120.4, 50, 120.6, 75, 5000)    # level one still kept
+
+
+def test_frames_without_greeks_leave_them_empty_and_storage_round_trips(tmp_path):
+    key = "NSE_FO|1"
+    ticks = [list(decode.ticks_from_response(decode.parse_frame(_greeks_frame(key, g)), {key: s}))[0]
+             for s, g in (("OPT", True), ("EQ.NS", False))]
+    assert ticks[1].delta is None and ticks[1].iv is None
+    tick_store.write_ticks(ticks, tmp_path)
+    tick_store.write_ticks(ticks[1:], tmp_path)                      # an equity-only segment unions cleanly
+    day = ticks[0].ts.date()
+    assert tick_store.compact_ticks_day(day, tmp_path) == 3
+    import duckdb
+    rows = duckdb.sql(f"SELECT symbol, delta, iv FROM read_parquet('{tmp_path}/ticks/date={day}/ticks.parquet') ORDER BY symbol, delta").fetchall()
+    assert rows[0][0] == "EQ.NS" and rows[0][1] is None
+    assert rows[-1][1] == pytest.approx(0.52, rel=1e-4) and rows[-1][2] == pytest.approx(14.25, rel=1e-4)
