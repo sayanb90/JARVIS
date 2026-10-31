@@ -13,12 +13,15 @@ when volatility rises, a book imbalance that weakly predicts the next move) so e
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timedelta
+import math
+import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
 import numpy as np
 import pandas as pd
+from fastapi import HTTPException
 
 SESSION = 22_500
 TICK = 0.05
@@ -160,6 +163,85 @@ def simulate(symbol, price0, activity, ann_vol, size, widen, day: date, rng: np.
         "bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "src": "demo"})
 
 
+def _norm_cdf(x: np.ndarray) -> np.ndarray:
+    return 0.5 * (1.0 + np.vectorize(math.erf)(x / math.sqrt(2.0)))
+
+
+def demo_greeks(typ: str, spot: np.ndarray, strike: float, t_years: float, iv: np.ndarray, r: float = 0.07) -> dict:
+    """Black-Scholes IV (percent), delta, theta (per day), gamma, vega (per vol point), rho (per rate point)."""
+    sig = iv / 100.0
+    sq = sig * math.sqrt(t_years)
+    d1 = (np.log(spot / strike) + (r + sig * sig / 2) * t_years) / sq
+    d2 = d1 - sq
+    pdf = np.exp(-d1 * d1 / 2) / math.sqrt(2 * math.pi)
+    disc = math.exp(-r * t_years)
+    if typ == "CE":
+        delta = _norm_cdf(d1)
+        theta = -spot * pdf * sig / (2 * math.sqrt(t_years)) - r * strike * disc * _norm_cdf(d2)
+        rho = strike * t_years * disc * _norm_cdf(d2) / 100
+    else:
+        delta = _norm_cdf(d1) - 1
+        theta = -spot * pdf * sig / (2 * math.sqrt(t_years)) + r * strike * disc * _norm_cdf(-d2)
+        rho = -strike * t_years * disc * _norm_cdf(-d2) / 100
+    return {"iv": iv, "delta": delta, "theta": theta / 365, "gamma": pdf / (spot * sq), "vega": spot * pdf * math.sqrt(t_years) / 100, "rho": rho}
+
+
+def write_demo_ticks(out: Path, df: pd.DataFrame, contracts: list[dict], day: date, seed: int) -> None:
+    """Greeks-only rows for the demo options (every 5th bar), written to greeks/date=<day>/ so the demo's bars are not
+    replaced by a partial tick file; the Greeks views and the chain read them from there."""
+    opts = {c["symbol"]: c for c in contracts if c["instrument_type"] in ("CE", "PE")}
+    spot0 = {u[0]: u[1] for u in UNDERLYINGS}
+    parts = []
+    futs = {}                                            # nearest future's close per underlying drives the option Greeks
+    for c in sorted((c for c in contracts if c["instrument_type"] == "FUT"), key=lambda c: c["expiry"]):
+        if c["underlying"] not in futs:
+            g = df[df["symbol"] == c["symbol"]]
+            if not g.empty:
+                futs[c["underlying"]] = g.drop_duplicates("ts").set_index("ts")["close"].astype("float64")
+    for si, (sym, c) in enumerate(sorted(opts.items())):
+        f = df[df["symbol"] == sym].iloc[::5]
+        if f.empty:
+            continue
+        rng = np.random.default_rng([seed, day.toordinal(), 5000 + si])
+        n = len(f)
+        fut = futs.get(c["underlying"])
+        spot = (fut.reindex(f["ts"]).ffill().bfill().to_numpy() if fut is not None
+                else spot0[c["underlying"]] * np.exp(np.cumsum(rng.normal(0, 0.00012, n))))
+        t_years = max((c["expiry"] - day).days, 1) / 365
+        m = math.log(c["strike"] / float(np.mean(spot))) / (0.14 * math.sqrt(t_years))
+        iv = 14.0 + 3.0 * m * m + np.cumsum(rng.normal(0, 0.03, n))
+        g = demo_greeks(c["instrument_type"], spot, c["strike"], t_years, np.clip(iv, 5.0, 80.0))
+        t = pd.DataFrame({"ts": f["ts"].to_numpy(), "symbol": sym})
+        for k, v in g.items():
+            t[k] = np.asarray(v, dtype="float32")
+        parts.append(t)
+    if not parts:
+        return
+    folder = out / "greeks" / f"date={day}"
+    folder.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.register("t", pd.concat(parts).sort_values(["symbol", "ts"]))
+    con.execute(f"COPY (SELECT * FROM t) TO '{folder / 'greeks.parquet'}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+
+
+def demo_book(lake, symbol: str) -> dict:
+    """A synthetic five-level book around the instrument's last demo quote, different on every call so the live
+    ladder visibly updates.  Demo lakes only: real books come from the running collector."""
+    days = lake.bar_days("1s")
+    df = lake.day_bars(days[0], symbol, "1s", 1) if days else pd.DataFrame()
+    if df.empty:
+        raise HTTPException(404, "no such instrument in the demo lake")
+    last = df.dropna(subset=["close"]).iloc[-1]
+    rng = np.random.default_rng(int(time.time() * 2))
+    mid = float(last["close"]) + rng.normal(0, TICK)
+    best_bid = math.floor(mid / TICK) * TICK
+    size = float(last["bid_qty"]) if pd.notna(last.get("bid_qty")) else 500.0
+    lv = lambda start, sign: [[round(start + sign * i * TICK, 2), int(max(1, size * rng.lognormal(0, 0.5) * (1 + 0.25 * i)))]  # noqa: E731
+                              for i in range(5)]
+    return {"symbol": symbol, "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "age_s": 0.0, "ltp": round(mid, 2), "bids": lv(best_bid, -1), "asks": lv(best_bid + TICK, 1)}
+
+
 def write_demo(out: Path, days: int = 3, end: date | None = None, seed: int = 11,
                derivatives: bool = False) -> list[date]:
     end = end or date(2026, 10, 23)
@@ -181,6 +263,8 @@ def write_demo(out: Path, days: int = 3, end: date | None = None, seed: int = 11
                              c["size"], c["widen"], d, rng)
                 frames.append(add_open_interest(f, c["oi0"], rng))
         df = pd.concat(frames).sort_values(["symbol", "ts"]).reset_index(drop=True)
+        if derivatives:
+            write_demo_ticks(out, df, contracts, d, seed)
         for c in ("n_ticks", "bid_qty", "ask_qty") + (("oi",) if derivatives else ()):
             df[c] = df[c].astype("Int64")
         folder = out / "bars" / "interval=1s" / f"date={d}"

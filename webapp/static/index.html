@@ -64,7 +64,7 @@
             <div class="body"><div id="eq-spread" class="plot h-sm"></div></div></div>
         </div>
         <aside class="panel book" aria-label="Book snapshot at the cursor">
-          <h3>Book at cursor</h3>
+          <div class="book-head"><h3>Book</h3><div class="seg" data-book="eq" role="group" aria-label="Book view"><button type="button" data-mode="cursor" aria-pressed="true">At cursor</button><button type="button" data-mode="live" aria-pressed="false">Live depth</button></div></div>
           <div id="book-body" class="muted">Hover a chart to see the best bid and ask at that second.</div>
         </aside>
       </div>
@@ -133,6 +133,7 @@
         <button role="tab" data-sub="chain">Option chain</button>
         <button role="tab" data-sub="oi">Open interest</button>
         <button role="tab" data-sub="contract">Contract</button>
+      <button role="tab" data-sub="greeks">Greeks</button>
       </nav>
 
       <div class="subview" data-sub="summary">
@@ -182,15 +183,37 @@
               <div class="body"><div id="fc-price" class="plot h-lg"></div></div></div>
             <div class="panel"><header><h3>Volume</h3><div class="legend" data-for="fc-volume"></div></header>
               <div class="body"><div id="fc-volume" class="plot h-sm"></div></div></div>
+            <div class="panel"><header><h3>Size at best<span class="hint">bid above, ask below</span></h3><div class="legend" data-for="fc-depth"></div></header>
+              <div class="body"><div id="fc-depth" class="plot h-md"></div></div></div>
+            <div class="panel"><header><h3>Book imbalance</h3><div class="legend" data-for="fc-imb"></div></header>
+              <div class="body"><div id="fc-imb" class="plot h-sm"></div></div></div>
             <div class="panel"><header><h3>Spread</h3><div class="legend" data-for="fc-spread"></div></header>
               <div class="body"><div id="fc-spread" class="plot h-sm"></div></div></div>
           </div>
           <aside class="panel book" aria-label="Book snapshot at the cursor">
-            <h3>Book at cursor</h3>
+            <div class="book-head"><h3>Book</h3><div class="seg" data-book="fc" role="group" aria-label="Book view"><button type="button" data-mode="cursor" aria-pressed="true">At cursor</button><button type="button" data-mode="live" aria-pressed="false">Live depth</button></div></div>
             <div id="fo-contract-book-body" class="muted">Hover a chart to see the best bid and ask at that second.</div>
           </aside>
         </div>
         <p class="note" id="fo-contract-note"></p>
+      </div>
+
+      <div class="subview" data-sub="greeks" hidden>
+        <div class="toolbar" style="margin-bottom:14px">
+          <label class="field wide"><span>Option</span><select id="fo-greeks-contract"></select></label>
+          <label class="field"><span>Bar width</span><select id="fo-greeks-width"></select></label>
+        </div>
+        <p class="sub muted" id="fo-greeks-meta" style="margin:-4px 0 14px"></p>
+        <div id="fo-greeks-cards" class="kpis"></div>
+        <div class="grid2" id="fo-greeks-grid">
+          <div class="panel"><header><h3>Implied volatility</h3><div class="legend" data-for="gk-iv"></div></header><div class="body"><div id="gk-iv" class="plot h-md"></div></div></div>
+          <div class="panel"><header><h3>Delta</h3><div class="legend" data-for="gk-delta"></div></header><div class="body"><div id="gk-delta" class="plot h-md"></div></div></div>
+          <div class="panel"><header><h3>Gamma</h3><div class="legend" data-for="gk-gamma"></div></header><div class="body"><div id="gk-gamma" class="plot h-md"></div></div></div>
+          <div class="panel"><header><h3>Theta<span class="hint">per day</span></h3><div class="legend" data-for="gk-theta"></div></header><div class="body"><div id="gk-theta" class="plot h-md"></div></div></div>
+          <div class="panel"><header><h3>Vega<span class="hint">per vol point</span></h3><div class="legend" data-for="gk-vega"></div></header><div class="body"><div id="gk-vega" class="plot h-md"></div></div></div>
+          <div class="panel"><header><h3>Rho<span class="hint">per rate point</span></h3><div class="legend" data-for="gk-rho"></div></header><div class="body"><div id="gk-rho" class="plot h-md"></div></div></div>
+        </div>
+        <p class="note" id="fo-greeks-note"></p>
       </div>
     </div>
   </section>

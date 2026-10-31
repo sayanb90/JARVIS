@@ -47,6 +47,13 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   await page.waitForTimeout(400);
   const book = await page.textContent('#book-body');
   if (!/Bid/.test(book) || !/Ask/.test(book) || !/IST/.test(book)) fail('book card not updated: ' + book.slice(0, 80));
+  // live depth: the card switches to a five-level ladder (demo lakes serve a synthetic one) and back
+  await page.click('.seg[data-book="eq"] button[data-mode="live"]');
+  await page.waitForSelector('#book-body .ladder5', { timeout: 10000 });
+  if ((await page.$$eval('#book-body .ladder5 tr.ask', (r) => r.length)) !== 5 || (await page.$$eval('#book-body .ladder5 tr.bid', (r) => r.length)) !== 5) fail('live ladder should show 5 ask and 5 bid levels');
+  if (!/live, not stored/.test(await page.textContent('#book-body'))) fail('live ladder should say it is not stored');
+  await page.click('.seg[data-book="eq"] button[data-mode="cursor"]');
+  await page.waitForFunction(() => !document.querySelector('#book-body .ladder5'));
   await page.click('.subtabs[data-tab="instrument"] button[data-sub="vol"]');
   await page.waitForSelector('#eq-vol .main-svg');
   if (!/sub=vol/.test(page.url())) fail('sub-tab not in the URL: ' + page.url());
@@ -93,6 +100,10 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   const chainRows = await fo.$$eval('#fo-chain tbody tr', (r) => r.length);
   if (chainRows !== 21) fail('ATM ± 10 should show 21 strikes, got ' + chainRows);
   if ((await fo.$$eval('#fo-chain tr.atm', (r) => r.length)) !== 1) fail('exactly one at-the-money row');
+  const heads = await fo.$$eval('#fo-chain thead th', (h) => h.map((x) => x.textContent.trim()));
+  if (!heads.includes('IV') || !heads.includes('\u0394') || heads.length !== 13) fail('chain should carry IV and delta columns: ' + heads);
+  const atmDelta = await fo.$eval('#fo-chain tr.atm td.ce.gk:nth-child(5)', (td) => parseFloat(td.textContent));
+  if (!(atmDelta > 0.3 && atmDelta < 0.7)) fail('at-the-money call delta should be near 0.5, got ' + atmDelta);
   await fo.selectOption('#chain-range', '0');
   if ((await fo.$$eval('#fo-chain tbody tr', (r) => r.length)) !== 25) fail('all strikes should show 25 rows');
   await fo.click('.subtabs[data-tab="fo"] button[data-sub="oi"]');
@@ -108,13 +119,24 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   const oiTrace = await fo.evaluate(() => document.getElementById('fc-price').data.some((t) => t.name === 'Open interest'));
   if (!oiTrace) fail('contract chart has no open-interest series');
   if (!/sub=contract/.test(fo.url()) || !/contract=NIFTY_/.test(fo.url())) fail('contract not in the URL: ' + fo.url());
+  for (const id of ['fc-depth', 'fc-imb']) if (!(await plotted(fo, id))) fail('contract view is missing ' + id);
+  await fo.click('.seg[data-book="fc"] button[data-mode="live"]');
+  await fo.waitForSelector('#fo-contract-book-body .ladder5');
+  if ((await fo.$$eval('#fo-contract-book-body .ladder5 tr.bid', (r) => r.length)) !== 5) fail('contract live ladder should show 5 bid levels');
+  // Greeks tab for an option: six charts, six figures; a future has none
+  await fo.click('.subtabs[data-tab="fo"] button[data-sub="greeks"]');
+  await fo.waitForSelector('#gk-iv .main-svg', { timeout: 20000 });
+  for (const k of ['iv', 'delta', 'gamma', 'theta', 'vega', 'rho']) if (!(await plotted(fo, 'gk-' + k))) fail('Greeks chart missing: ' + k);
+  if ((await fo.$$eval('#fo-greeks-cards .kpi', (c) => c.length)) !== 6) fail('Greeks key figures');
+  if (!/_CE_/.test(await fo.$eval('#fo-greeks-contract', (s) => s.value))) fail('Greeks tab should hold the clicked call');
   // deep link straight to a contract
   const fo2 = await open(1400, 1000, '#tab=fo&sub=contract&underlying=BANKNIFTY&contract=BANKNIFTY_FUT_24_NOV_26');
   await fo2.waitForFunction(() => /BANKNIFTY_FUT_24_NOV_26/.test(document.getElementById('status').textContent), null, { timeout: 20000 });
 
   // ---------------- every section on a phone: no sideways scrolling ----------------
   const views = ['#tab=instrument&sub=price', '#tab=instrument&sub=book', '#tab=overview&sub=heat', '#tab=overview&sub=table',
-                 '#tab=fo&sub=summary&underlying=NIFTY', '#tab=fo&sub=chain&underlying=NIFTY', '#tab=fo&sub=oi&underlying=NIFTY'];
+                 '#tab=fo&sub=summary&underlying=NIFTY', '#tab=fo&sub=chain&underlying=NIFTY', '#tab=fo&sub=oi&underlying=NIFTY',
+                 '#tab=fo&sub=contract&underlying=NIFTY&contract=NIFTY_FUT_27_OCT_26', '#tab=fo&sub=greeks&underlying=NIFTY'];
   for (const h of views) {
     const ph = await open(390, 844, h);
     await ph.waitForFunction(() => !document.getElementById('context').classList.contains('busy'), null, { timeout: 20000 });

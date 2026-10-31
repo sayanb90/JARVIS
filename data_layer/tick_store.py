@@ -59,6 +59,8 @@ def write_ticks(ticks: Iterable[Tick], lake_dir: Path | None = None) -> int:
     df = pd.DataFrame([{s: getattr(t, s) for s in Tick.__slots__} for t in ticks])
     if df.empty:
         return 0
+    for c in ("iv", "delta", "theta", "gamma", "vega", "rho"):   # stable type so equity-only and option segments union
+        df[c] = df[c].astype("float32")
     for day, part in df.groupby(df["ts"].dt.date):
         _write_segment((lake_dir or LAKE_DIR) / "ticks" / f"date={day}", part)
     return len(df)

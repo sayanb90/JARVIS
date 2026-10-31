@@ -91,6 +91,18 @@ main{max-width:var(--maxw);margin:0 auto;padding:6px var(--gut) 64px}
 .book{padding:16px}
 .book h3{margin:0 0 10px;font-size:13.5px;font-weight:600}
 .book .ts{color:var(--muted);font-size:12px;margin-bottom:8px}
+.book-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.book-head h3{margin:0}
+.seg{display:inline-flex;background:var(--panel2);border-radius:999px;padding:2px}
+.seg button{background:none;border:0;color:var(--muted);padding:3px 10px;border-radius:999px;cursor:pointer;font-size:12px;white-space:nowrap}
+.seg button[aria-pressed=true]{background:var(--raise);color:var(--fg)}
+.ladder5{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;margin-bottom:8px}
+.ladder5 td{padding:5px 6px;position:relative}
+.ladder5 td.px{text-align:right;font-weight:600;width:42%}.ladder5 td.q{text-align:left}
+.ladder5 tr.ask td.q{background:linear-gradient(to right,rgba(255,69,58,.28) var(--w),transparent var(--w))}.ladder5 tr.ask td.px{color:var(--down)}
+.ladder5 tr.bid td.q{background:linear-gradient(to right,rgba(48,209,88,.28) var(--w),transparent var(--w))}.ladder5 tr.bid td.px{color:var(--up)}
+.ladder5 tr.mid td{text-align:center;color:var(--fg2);font-size:12px;border-top:1px solid var(--line2);border-bottom:1px solid var(--line2);padding:6px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .ladder{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;margin-bottom:10px}
 .ladder td{padding:7px 4px;border-top:1px solid var(--line2)}.ladder tr:first-child td{border-top:0;color:var(--muted);font-size:12px}
 .ladder td+td{text-align:right}.ladder .bid{color:var(--up)}.ladder .ask{color:var(--down)}
@@ -123,6 +135,7 @@ table.clickable tbody tr:hover td{background:var(--panel2)}
 .chain tr.itm-ce td.ce:not(.oi),.chain tr.itm-pe td.pe:not(.oi){background:rgba(255,255,255,.025)}
 .chain tr.atm td{border-top:1px solid var(--accent);border-bottom:1px solid var(--accent)}
 .chain tr.atm td.strike{background:var(--accent);color:#fff}
+.chain td.gk{color:var(--fg2);font-size:12.5px}
 .chain td.na{color:#48484a}
 
 /* lists */
@@ -166,6 +179,7 @@ table.clickable tbody tr:hover td{background:var(--panel2)}
   .panel>header{padding:12px 12px 2px}.panel .body{padding:2px 10px 12px}
   .h-xl{height:360px}.h-lg{height:300px}.h-md{height:220px}.h-sm{height:180px}
   .chain .opt{display:none}
+  .grid2{grid-template-columns:1fr}
   .subtabs{gap:0}.subtabs button{padding:10px 9px 11px;font-size:13.5px}
   th,td{padding:8px 9px}
 }

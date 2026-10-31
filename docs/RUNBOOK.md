@@ -37,6 +37,16 @@ What has to happen on the VPS before the current code is called live. Work top t
   ```
   SCRUM-77
 - [ ] Disk: `du -sh lake/ticks lake` after a full session; expect about 90 MB a day of ticks at 500 equities + ~350 contracts (SCRUM-77). Check that the backup target has room for the same growth (section 7).
+- [ ] **F&O sizing run (one full session, option C).** SCRUM-94 (storage policy), SCRUM-93 (Greeks stored), SCRUM-78 (4+4 expiries, PR #11); if `data/fo_universe.csv` has more than ~2,000 rows see SCRUM-96 (split across connections). The watchlist is now 4 futures + 4 option expiries, all strikes, and every option tick stores IV, delta, theta, gamma, vega and rho. Leave `JARVIS_TICK_STORE=full` and `JARVIS_GREEKS=all` (the defaults) and run the whole session, then measure and decide:
+  ```
+  du -sh lake/ticks/date=$(date -u +%F)
+  python - <<'PY'
+  import duckdb, datetime as d
+  day = d.datetime.utcnow().date()
+  print(duckdb.sql(f"SELECT (delta IS NOT NULL) AS option, count(*) rows, count(DISTINCT symbol) symbols FROM read_parquet('lake/ticks/date={day}/*.parquet', hive_partitioning=false, union_by_name=true) GROUP BY 1").df())
+  PY
+  ```
+  Estimates (synthetic, ~12 B per equity row, ~35 B per option row with Greeks; ~248 trading days a year): A ~0.23 GB/day (~57 GB/yr), B ~0.6 GB/day (~155 GB/yr), C up to ~1.6 GB/day (~400 GB/yr). The real option rows per day decide it. If too big, change one line in `.env` and restart the feed (it only affects ticks written from then on): `JARVIS_TICK_STORE_FO=throttle` (option B, one tick per contract per `JARVIS_TICK_MIN_INTERVAL_S`), `changes` (option A, drops Greeks-only updates), and/or `JARVIS_GREEKS=iv` or `JARVIS_GREEKS_DECIMALS=4`. See `data_layer/tick_policy.py`. Decide the final setting after seeing which of your signals need the precision.
 
 ### D. Prove it on live data (one full session after A–C)
 - [ ] **Equities:** `python -m data_layer.verify bars --date <day>` (bars now derived from ticks) prints no FAIL; then close the first-session ticket. SCRUM-59
@@ -512,7 +522,7 @@ RestartSec=10
 - [ ] **U0:** developer-console app created, `auth exchange` succeeds, `auth check` shows which token the feed accepts and I record the extended token's real lifetime here: ______
 - [ ] Token obtained and the feed accepts it (HTTP 101, not 401)
 - [ ] One captured real frame saved as a test fixture; confirm `ltt` is epoch **milliseconds** (the processor warns if timestamps look wrong)
-- [ ] `full` mode for the whole universe works; find the real per-connection and per-user subscription limits and set `SUBSCRIBE_BATCH` and the connection count accordingly (not documented in the SDK)
+- [ ] `full` mode for the whole universe works; per-connection limits are now documented (Upstox V3 spec, Plus tier): `full` 2,000 keys, `ltpc` 5,000, `option_greeks` 3,000, `full_d30` 50, up to 5 connections; `feed` warns when a list exceeds the cap. Check the F&O list size after `select` (4 futures + 4 option expiries with all strikes may exceed 2,000 in `full`); if so lower `strikes` or split the list across connections (not yet built)
 - [ ] Bars for a full session match a second source (open, high, low, close; volume differs slightly because bars are built from tick deltas)
 - [ ] First bar 03:45 UTC, last bar 09:59 UTC, no duplicate `(symbol, ts)` after `compact_day`
 - [ ] Behaviour on an NSE holiday (connection works, no ticks; the watchdog will reconnect every 2 minutes, harmless but noisy)
@@ -847,7 +857,11 @@ Three sections in the top bar (**Equities**, **Market**, **Derivatives**) and on
 | Market (show top 10/20/50/all, colour by volatility, return or spread) | **Heat map**: the most volatile instruments as tiles sized by traded value, plus "most volatile" and "biggest moves" lists. **Liquidity**: spread against volatility, bubble size = traded value. **All instruments**: sortable table. Clicking any tile, row or bubble opens that instrument |
 | Derivatives (underlying, option expiry) | **Summary**: spot proxy, ATM strike, put/call OI ratio, max pain, call and put OI; futures with basis and OI change; key strikes by OI. **Option chain**: calls and puts by strike with OI bars, ATM highlighted, ATM ± 5/10/20 or all strikes. **Open interest**: OI by strike (most active 15, ATM ± 10 or all strikes, scrollable) and today's OI change by strike. **Contract**: any future or option with price and open interest, volume, spread and the book card |
 
-Signals and other future tools are added as a sub-tab (one button and one panel) in the relevant section. Layouts are checked at phone (390 px), tablet (820 px) and desktop (1440 px) widths with no sideways scrolling. Demo data with futures and option chains: `python -m webapp.demo --with-derivatives`.
+Signals and other future tools are added as a sub-tab (one button and one panel) in the relevant section.
+
+**Live depth (not stored).** The `Book` card on the Equities order-book view and on the futures/options Contract view has an *At cursor / Live depth* switch. Live depth shows the latest five bid and five ask levels from the running collector, refreshed every second; nothing is written to the lake (only level one is stored). The collector keeps the latest book per instrument in memory and serves it on a local-only port (`JARVIS_BOOK_PORT_EQ`, default 8771; `JARVIS_BOOK_PORT_FO`, default 8772; `0` turns it off); the viewer, behind its own login, reads it through `/api/live_book`. It works only while the feed runs during market hours; otherwise the card says the feed is not running. Indices have no depth. Demo lakes show a synthetic ladder. (SCRUM-98)
+
+**Greeks.** The Derivatives section has a *Greeks* sub-tab (IV, delta, gamma, theta, vega, rho for one option, one chart each) and the option chain gains IV and delta columns per side (hidden on phones). Values are the last reading in each bar as delivered by Upstox, from the stored ticks (SCRUM-93); days collected before Greeks were stored show a note instead. The Contract view also gained size-at-best and book-imbalance charts. (SCRUM-95, SCRUM-97) Layouts are checked at phone (390 px), tablet (820 px) and desktop (1440 px) widths with no sideways scrolling. Demo data with futures and option chains: `python -m webapp.demo --with-derivatives`.
 
 ### 16.2 Definitions (so the numbers can be checked)
 | Measure | Definition |

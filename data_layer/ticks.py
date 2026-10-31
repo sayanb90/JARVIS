@@ -31,6 +31,12 @@ class Tick:
     ask: Optional[float] = None
     ask_qty: Optional[int] = None
     oi: Optional[int] = None
+    iv: Optional[float] = None       # option Greeks as delivered by the feed (options only)
+    delta: Optional[float] = None
+    theta: Optional[float] = None
+    gamma: Optional[float] = None
+    vega: Optional[float] = None
+    rho: Optional[float] = None
 
 
 @dataclass(slots=True)

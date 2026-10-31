@@ -332,3 +332,194 @@ def test_candles_main_segment_fo(world, monkeypatch):
     with pytest.raises(SystemExit, match="fo_instruments import"):
         candles.main()
     assert seen["seg"] == "fo"
+
+
+# -- option Greeks ---------------------------------------------------------------
+def _greeks_frame(key, with_greeks=True):
+    r = pb.FeedResponse(type=pb.live_feed)
+    m = r.feeds[key].fullFeed.marketFF
+    m.ltpc.ltp, m.ltpc.ltt, m.oi, m.vtt = 120.5, ms(4, 0, 0), 5000, 100
+    q = m.marketLevel.bidAskQuote.add()
+    q.bidP, q.bidQ, q.askP, q.askQ = 120.4, 50, 120.6, 75
+    if with_greeks:
+        m.iv = 14.25
+        m.optionGreeks.delta, m.optionGreeks.theta, m.optionGreeks.gamma = 0.52, -8.1, 0.0021
+        m.optionGreeks.vega, m.optionGreeks.rho = 11.3, 4.2
+    return r.SerializeToString()
+
+
+def test_decode_reads_all_greeks_and_iv_from_a_full_frame():
+    key = "NSE_FO|1"
+    t = list(decode.ticks_from_response(decode.parse_frame(_greeks_frame(key)), {key: "OPT"}))[0]
+    assert (t.iv, t.delta, t.theta, t.gamma, t.vega, t.rho) == pytest.approx((14.25, 0.52, -8.1, 0.0021, 11.3, 4.2))
+    assert (t.bid, t.bid_qty, t.ask, t.ask_qty, t.oi) == (120.4, 50, 120.6, 75, 5000)    # level one still kept
+
+
+def test_frames_without_greeks_leave_them_empty_and_storage_round_trips(tmp_path):
+    key = "NSE_FO|1"
+    ticks = [list(decode.ticks_from_response(decode.parse_frame(_greeks_frame(key, g)), {key: s}))[0]
+             for s, g in (("OPT", True), ("EQ.NS", False))]
+    assert ticks[1].delta is None and ticks[1].iv is None
+    tick_store.write_ticks(ticks, tmp_path)
+    tick_store.write_ticks(ticks[1:], tmp_path)                      # an equity-only segment unions cleanly
+    day = ticks[0].ts.date()
+    assert tick_store.compact_ticks_day(day, tmp_path) == 3
+    import duckdb
+    rows = duckdb.sql(f"SELECT symbol, delta, iv FROM read_parquet('{tmp_path}/ticks/date={day}/ticks.parquet') ORDER BY symbol, delta").fetchall()
+    assert rows[0][0] == "EQ.NS" and rows[0][1] is None
+    assert rows[-1][1] == pytest.approx(0.52, rel=1e-4) and rows[-1][2] == pytest.approx(14.25, rel=1e-4)
+
+
+# -- what the feed keeps (tick policy) ---------------------------------------------
+from data_layer.tick_policy import TickPolicy, policy_from_env  # noqa: E402
+
+
+def _opt(sec_ms, px=100.0, bid=99.9, delta=0.5, iv=14.0, oi=1000, sym="OPT"):
+    return Tick(OPEN + timedelta(milliseconds=sec_ms), sym, px, 10, bid, 5, bid + 0.2, 6, oi,
+                iv=iv, delta=delta, theta=-1.23456789, gamma=0.00123456, vega=9.87654321, rho=2.3456789)
+
+
+def test_full_keeps_every_tick_even_duplicates():
+    p = TickPolicy()
+    assert [p.apply(_opt(i * 100)) is not None for i in range(5)] == [True] * 5 and p.dropped == 0
+
+
+def test_throttle_keeps_one_per_symbol_per_interval():
+    p = TickPolicy("throttle", min_interval_s=1.0)
+    kept = [p.apply(_opt(ms_)) is not None for ms_ in (0, 300, 999, 1000, 1500, 2100)]
+    assert kept == [True, False, False, True, False, True]
+    assert p.apply(_opt(100, sym="OTHER")) is not None               # per symbol, not global
+
+
+def test_changes_ignores_greeks_only_updates():
+    p = TickPolicy("a")
+    assert p.apply(_opt(0)) is not None
+    assert p.apply(_opt(100, delta=0.51, iv=14.1)) is None           # only Greeks moved
+    assert p.apply(_opt(200, px=100.05)) is not None                 # price moved
+    assert p.apply(_opt(300, px=100.05, oi=1010)) is not None        # open interest moved
+    assert p.dropped == 1 and p.kept == 3
+
+
+def test_greeks_selection_and_rounding():
+    t = TickPolicy(greeks="iv", decimals=2).apply(_opt(0))
+    assert t.iv == 14.0 and t.delta is t.theta is t.gamma is t.vega is t.rho is None
+    t = TickPolicy(greeks="none").apply(_opt(0))
+    assert t.iv is None and t.delta is None and t.bid == 99.9
+    t = TickPolicy(decimals=3).apply(_opt(0))
+    assert (t.theta, t.gamma, t.vega) == (-1.235, 0.001, 9.877)
+
+
+def test_policy_from_env_precedence_and_validation():
+    env = {"JARVIS_TICK_STORE": "b", "JARVIS_TICK_STORE_FO": "changes", "JARVIS_TICK_MIN_INTERVAL_S": "2",
+           "JARVIS_GREEKS": "iv", "JARVIS_GREEKS_DECIMALS": "4"}
+    fo, eq = policy_from_env("fo", env), policy_from_env("eq", env)
+    assert (fo.mode, eq.mode, eq.min_interval_s, fo.greeks, fo.decimals) == ("changes", "throttle", 2.0, "iv", 4)
+    assert policy_from_env("fo", {}).describe() == "mode=full greeks=all"
+    with pytest.raises(ValueError):
+        TickPolicy("sometimes")
+    with pytest.raises(ValueError):
+        TickPolicy(greeks="most")
+
+
+def test_processor_applies_the_policy_before_storage():
+    key = "NSE_FO|1"
+    for mode, expect in (("full", 2), ("changes", 1)):
+        p = feed.FeedProcessor({key: "OPT"}, TickPolicy(mode))
+        for _ in range(2):
+            p.handle(_greeks_frame(key), datetime(2026, 10, 23, 5, 0))
+        assert len(p.drain()) == expect
+
+
+# -- live five-level book (memory only) ----------------------------------------------
+import asyncio  # noqa: E402
+
+from data_layer import live_book  # noqa: E402
+
+
+def _depth_frame(key, levels=5, with_depth=True):
+    r = pb.FeedResponse(type=pb.live_feed)
+    m = r.feeds[key].fullFeed.marketFF
+    m.ltpc.ltp, m.ltpc.ltt, m.vtt = 100.0, ms(4, 0, 0), 10
+    if with_depth:
+        for i in range(levels):
+            q = m.marketLevel.bidAskQuote.add()
+            q.bidP, q.bidQ, q.askP, q.askQ = 99.95 - i * 0.05, 100 + i, 100.05 + i * 0.05, 200 + i
+        q = m.marketLevel.bidAskQuote.add()                                  # an empty level is dropped
+    return r.SerializeToString()
+
+
+def test_decode_keeps_all_five_levels_best_first_and_drops_empty_levels():
+    key = "NSE_EQ|X"
+    out = list(decode.books_from_response(decode.parse_frame(_depth_frame(key)), {key: "X.NS"}))
+    sym, ts, ltp, bids, asks = out[0]
+    assert sym == "X.NS" and ltp == 100.0 and len(bids) == 5 and len(asks) == 5
+    assert bids[0] == [pytest.approx(99.95), 100] and bids[4][1] == 104 and asks[0][1] == 200
+    assert list(decode.books_from_response(decode.parse_frame(_depth_frame(key, with_depth=False)), {key: "X.NS"})) == []
+    assert list(decode.books_from_response(decode.parse_frame(_depth_frame(key)), {"other": "Y"})) == []
+
+
+def test_processor_updates_the_live_book_even_when_the_storage_policy_drops_the_tick():
+    key = "NSE_EQ|X"
+    p = feed.FeedProcessor({key: "X.NS"}, TickPolicy("changes"))
+    for _ in range(2):
+        p.handle(_depth_frame(key), datetime(2026, 10, 23, 5, 0))
+    assert len(p.drain()) == 1                                               # second identical tick not stored ...
+    book = p.books.get("X.NS")
+    assert len(book["bids"]) == 5 and book["ltp"] == 100.0                   # ... but the live book is current
+
+
+def test_live_book_endpoint_serves_local_json_and_rejects_bad_symbols():
+    async def go():
+        store = live_book.BookStore()
+        store.update("X.NS", datetime(2026, 10, 23, 5, 0), 100.0, [[99.95, 10]], [[100.05, 20]])
+        server = await live_book.serve(store, 0 or 18771)
+        try:
+            got = await asyncio.to_thread(live_book.fetch, "X.NS", [18771])
+            miss = await asyncio.to_thread(live_book.fetch, "NOPE.NS", [18771])
+            bad = await asyncio.to_thread(live_book.fetch, "../etc/passwd", [18771])
+            off = await asyncio.to_thread(live_book.fetch, "X.NS", [18772])      # nothing listening there
+        finally:
+            server.close(); await server.wait_closed()
+        return got, miss, bad, off
+    got, miss, bad, off = asyncio.run(go())
+    assert got["bids"] == [[99.95, 10]] and got["asks"] == [[100.05, 20]] and got["symbol"] == "X.NS" and got["age_s"] >= 0
+    assert miss is None and bad is None and off is None
+    assert live_book.port_for("eq", {}) == 8771 and live_book.port_for("fo", {"JARVIS_BOOK_PORT_FO": "9000"}) == 9000
+    assert asyncio.run(live_book.serve(live_book.BookStore(), 0)) is None
+
+
+# -- Greeks in the viewer API and chain --------------------------------------------
+def test_greeks_series_chain_columns_and_live_book_api_on_the_demo_lake(demo_lake_fo):
+    c = TestClient(create_app(demo_lake_fo))
+    day = c.get("/api/meta").json()["days"][0]
+    chain = c.get("/api/fo/chain", params={"date": day, "underlying": "NIFTY"}).json()
+    atm = next(r for r in chain["chain"] if r["strike"] == chain["atm_strike"])
+    assert 0.3 < atm["ce_delta"] < 0.7 and -0.7 < atm["pe_delta"] < -0.3 and 5 < atm["ce_iv"] < 40
+    g = c.get("/api/fo/greeks", params={"date": day, "symbol": atm["ce_symbol"], "width": 60}).json()
+    assert g["available"] and set(g["series"]) == {"ts", "iv", "delta", "theta", "gamma", "vega", "rho"}
+    assert len(g["series"]["ts"]) > 100 and all(len(v) == len(g["series"]["ts"]) for v in g["series"].values())
+    assert g["series"]["gamma"][0] > 0 and g["series"]["theta"][0] < 0 and g["series"]["vega"][0] > 0
+    fut = next(f["symbol"] for f in chain["futures"])
+    assert c.get("/api/fo/greeks", params={"date": day, "symbol": fut}).json()["available"] is False     # futures have none
+    assert c.get("/api/fo/greeks", params={"date": day, "symbol": "bad symbol!"}).status_code == 422
+    b = c.get("/api/live_book", params={"symbol": "RELIANCE.NS"}).json()                                   # demo lake: synthetic
+    assert len(b["bids"]) == 5 and len(b["asks"]) == 5 and b["bids"][0][0] < b["asks"][0][0]
+    assert c.get("/api/live_book", params={"symbol": "NOPE.NS"}).status_code == 404
+
+
+def test_viewer_live_book_is_503_without_a_running_feed(tmp_path, monkeypatch):
+    from data_layer import live_book as lb
+    monkeypatch.setattr(lb, "fetch", lambda symbol, ports=None, timeout=1.0: None)
+    (tmp_path / "bars").mkdir()
+    c = TestClient(create_app(tmp_path))
+    assert c.get("/api/live_book", params={"symbol": "X.NS"}).status_code == 503
+
+
+def test_greeks_absent_on_days_stored_before_greeks_existed(tmp_path):
+    tick_store.write_ticks([Tick(datetime(2026, 10, 23, 4, 0), "OLD", 1.0, 1)], tmp_path)
+    folder = tmp_path / "ticks" / "date=2026-10-23"
+    for f in folder.glob("*.parquet"):                                       # simulate a file written before the six columns existed
+        import duckdb
+        duckdb.sql(f"COPY (SELECT * EXCLUDE (iv, delta, theta, gamma, vega, rho) FROM read_parquet('{f}')) TO '{f}.new' (FORMAT PARQUET)")
+        f.unlink(); (folder / (f.name + ".new")).rename(f)
+    assert Lake(tmp_path).greeks_series("2026-10-23", "OLD").empty
