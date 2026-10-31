@@ -428,3 +428,98 @@ def test_processor_applies_the_policy_before_storage():
         for _ in range(2):
             p.handle(_greeks_frame(key), datetime(2026, 10, 23, 5, 0))
         assert len(p.drain()) == expect
+
+
+# -- live five-level book (memory only) ----------------------------------------------
+import asyncio  # noqa: E402
+
+from data_layer import live_book  # noqa: E402
+
+
+def _depth_frame(key, levels=5, with_depth=True):
+    r = pb.FeedResponse(type=pb.live_feed)
+    m = r.feeds[key].fullFeed.marketFF
+    m.ltpc.ltp, m.ltpc.ltt, m.vtt = 100.0, ms(4, 0, 0), 10
+    if with_depth:
+        for i in range(levels):
+            q = m.marketLevel.bidAskQuote.add()
+            q.bidP, q.bidQ, q.askP, q.askQ = 99.95 - i * 0.05, 100 + i, 100.05 + i * 0.05, 200 + i
+        q = m.marketLevel.bidAskQuote.add()                                  # an empty level is dropped
+    return r.SerializeToString()
+
+
+def test_decode_keeps_all_five_levels_best_first_and_drops_empty_levels():
+    key = "NSE_EQ|X"
+    out = list(decode.books_from_response(decode.parse_frame(_depth_frame(key)), {key: "X.NS"}))
+    sym, ts, ltp, bids, asks = out[0]
+    assert sym == "X.NS" and ltp == 100.0 and len(bids) == 5 and len(asks) == 5
+    assert bids[0] == [pytest.approx(99.95), 100] and bids[4][1] == 104 and asks[0][1] == 200
+    assert list(decode.books_from_response(decode.parse_frame(_depth_frame(key, with_depth=False)), {key: "X.NS"})) == []
+    assert list(decode.books_from_response(decode.parse_frame(_depth_frame(key)), {"other": "Y"})) == []
+
+
+def test_processor_updates_the_live_book_even_when_the_storage_policy_drops_the_tick():
+    key = "NSE_EQ|X"
+    p = feed.FeedProcessor({key: "X.NS"}, TickPolicy("changes"))
+    for _ in range(2):
+        p.handle(_depth_frame(key), datetime(2026, 10, 23, 5, 0))
+    assert len(p.drain()) == 1                                               # second identical tick not stored ...
+    book = p.books.get("X.NS")
+    assert len(book["bids"]) == 5 and book["ltp"] == 100.0                   # ... but the live book is current
+
+
+def test_live_book_endpoint_serves_local_json_and_rejects_bad_symbols():
+    async def go():
+        store = live_book.BookStore()
+        store.update("X.NS", datetime(2026, 10, 23, 5, 0), 100.0, [[99.95, 10]], [[100.05, 20]])
+        server = await live_book.serve(store, 0 or 18771)
+        try:
+            got = await asyncio.to_thread(live_book.fetch, "X.NS", [18771])
+            miss = await asyncio.to_thread(live_book.fetch, "NOPE.NS", [18771])
+            bad = await asyncio.to_thread(live_book.fetch, "../etc/passwd", [18771])
+            off = await asyncio.to_thread(live_book.fetch, "X.NS", [18772])      # nothing listening there
+        finally:
+            server.close(); await server.wait_closed()
+        return got, miss, bad, off
+    got, miss, bad, off = asyncio.run(go())
+    assert got["bids"] == [[99.95, 10]] and got["asks"] == [[100.05, 20]] and got["symbol"] == "X.NS" and got["age_s"] >= 0
+    assert miss is None and bad is None and off is None
+    assert live_book.port_for("eq", {}) == 8771 and live_book.port_for("fo", {"JARVIS_BOOK_PORT_FO": "9000"}) == 9000
+    assert asyncio.run(live_book.serve(live_book.BookStore(), 0)) is None
+
+
+# -- Greeks in the viewer API and chain --------------------------------------------
+def test_greeks_series_chain_columns_and_live_book_api_on_the_demo_lake(demo_lake_fo):
+    c = TestClient(create_app(demo_lake_fo))
+    day = c.get("/api/meta").json()["days"][0]
+    chain = c.get("/api/fo/chain", params={"date": day, "underlying": "NIFTY"}).json()
+    atm = next(r for r in chain["chain"] if r["strike"] == chain["atm_strike"])
+    assert 0.3 < atm["ce_delta"] < 0.7 and -0.7 < atm["pe_delta"] < -0.3 and 5 < atm["ce_iv"] < 40
+    g = c.get("/api/fo/greeks", params={"date": day, "symbol": atm["ce_symbol"], "width": 60}).json()
+    assert g["available"] and set(g["series"]) == {"ts", "iv", "delta", "theta", "gamma", "vega", "rho"}
+    assert len(g["series"]["ts"]) > 100 and all(len(v) == len(g["series"]["ts"]) for v in g["series"].values())
+    assert g["series"]["gamma"][0] > 0 and g["series"]["theta"][0] < 0 and g["series"]["vega"][0] > 0
+    fut = next(f["symbol"] for f in chain["futures"])
+    assert c.get("/api/fo/greeks", params={"date": day, "symbol": fut}).json()["available"] is False     # futures have none
+    assert c.get("/api/fo/greeks", params={"date": day, "symbol": "bad symbol!"}).status_code == 422
+    b = c.get("/api/live_book", params={"symbol": "RELIANCE.NS"}).json()                                   # demo lake: synthetic
+    assert len(b["bids"]) == 5 and len(b["asks"]) == 5 and b["bids"][0][0] < b["asks"][0][0]
+    assert c.get("/api/live_book", params={"symbol": "NOPE.NS"}).status_code == 404
+
+
+def test_viewer_live_book_is_503_without_a_running_feed(tmp_path, monkeypatch):
+    from data_layer import live_book as lb
+    monkeypatch.setattr(lb, "fetch", lambda symbol, ports=None, timeout=1.0: None)
+    (tmp_path / "bars").mkdir()
+    c = TestClient(create_app(tmp_path))
+    assert c.get("/api/live_book", params={"symbol": "X.NS"}).status_code == 503
+
+
+def test_greeks_absent_on_days_stored_before_greeks_existed(tmp_path):
+    tick_store.write_ticks([Tick(datetime(2026, 10, 23, 4, 0), "OLD", 1.0, 1)], tmp_path)
+    folder = tmp_path / "ticks" / "date=2026-10-23"
+    for f in folder.glob("*.parquet"):                                       # simulate a file written before the six columns existed
+        import duckdb
+        duckdb.sql(f"COPY (SELECT * EXCLUDE (iv, delta, theta, gamma, vega, rho) FROM read_parquet('{f}')) TO '{f}.new' (FORMAT PARQUET)")
+        f.unlink(); (folder / (f.name + ".new")).rename(f)
+    assert Lake(tmp_path).greeks_series("2026-10-23", "OLD").empty

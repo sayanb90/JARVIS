@@ -73,6 +73,24 @@ def ticks_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str]
             yield t
 
 
+def books_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str]
+                       ) -> Iterator[tuple[str, datetime, float, list, list]]:
+    """(symbol, exchange time, last price, bids, asks) for every `full` frame that carries market depth.
+    bids/asks are [[price, quantity], ...] best first, empty levels dropped.  Live display only: never stored."""
+    for key, feed in resp.feeds.items():
+        sym = key_to_symbol.get(key)
+        if sym is None or not feed.HasField("fullFeed") or not feed.fullFeed.HasField("marketFF"):
+            continue
+        m = feed.fullFeed.marketFF
+        quotes = m.marketLevel.bidAskQuote
+        if not quotes:
+            continue
+        bids = [[q.bidP, q.bidQ] for q in quotes if q.bidP]
+        asks = [[q.askP, q.askQ] for q in quotes if q.askP]
+        if bids or asks:
+            yield sym, _ts(m.ltpc.ltt) if m.ltpc.ltt else datetime.utcnow(), m.ltpc.ltp or None, bids, asks
+
+
 def market_status(resp: "pb.FeedResponse") -> dict[str, str]:
     """{segment: status name} from a market_info frame (empty otherwise)."""
     return {k: _MARKET_STATUS.get(v, str(v)) for k, v in resp.marketInfo.segmentStatus.items()}

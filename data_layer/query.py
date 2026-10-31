@@ -287,6 +287,49 @@ class Lake:
         df["oi_change"] = df["oi_last"] - df["oi_first"] if "oi" in have else None
         return df
 
+    # -- option Greeks (stored on raw ticks only; absent on days collected before they were stored) -------
+    GREEKS = ("iv", "delta", "theta", "gamma", "vega", "rho")
+
+    def _greek_source(self, day: str) -> str | None:
+        """SQL source (a read_parquet expression) for the day's rows that carry Greeks, or None.  Reads the raw tick
+        files and, if present, `greeks/date=<day>/*.parquet` (Greeks-only rows: ts, symbol and the six columns;
+        the demo lake keeps its synthetic Greeks there so its bars stay untouched)."""
+        files = [str(f) for sub in ("ticks", "greeks") for f in sorted((self.dir / sub / f"date={day}").glob("*.parquet"))]
+        if not files:
+            return None
+        src = "read_parquet([" + ", ".join(f"'{f}'" for f in files) + "], union_by_name=true, hive_partitioning=false)"
+        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        return src if set(self.GREEKS) <= cols else None
+
+    def greeks_series(self, day: str, symbol: str, width_s: int = 1) -> pd.DataFrame:
+        """IV, delta, theta, gamma, vega, rho of one option, last value per bar of `width_s` seconds (bars aligned
+        to the 03:45 UTC open like every other series).  Empty when the day has no Greeks."""
+        src = self._greek_source(day)
+        if src is None:
+            return pd.DataFrame(columns=["ts", *self.GREEKS])
+        last = ", ".join(f"arg_max({g}, ts) FILTER (WHERE {g} IS NOT NULL) AS {g}" for g in self.GREEKS)
+        return self.con.execute(f"""
+            WITH t AS (SELECT * FROM {src} WHERE symbol = ?),
+                 b AS (SELECT *, date_trunc('day', ts) + to_seconds(13500 + CAST(floor(
+                              (epoch(ts - date_trunc('day', ts)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
+                            ) AS bucket FROM t)
+            SELECT bucket AS ts, {last} FROM b GROUP BY bucket ORDER BY bucket""", [symbol]).df()
+
+    def greeks_last(self, day: str, symbols: list[str]) -> dict[str, dict]:
+        """{symbol: {iv, delta, ...}} -- the last non-null value of each Greek that day, for chain columns."""
+        src = self._greek_source(day)
+        if src is None or not symbols:
+            return {}
+        last = ", ".join(f"arg_max({g}, ts) FILTER (WHERE {g} IS NOT NULL) AS {g}" for g in self.GREEKS)
+        self.con.register("_g_wanted", pd.DataFrame({"symbol": symbols}))
+        try:
+            df = self.con.execute(f"""
+                SELECT symbol, {last} FROM {src}
+                WHERE symbol IN (SELECT symbol FROM _g_wanted) GROUP BY symbol""").df()
+        finally:
+            self.con.unregister("_g_wanted")
+        return {r["symbol"]: {g: (None if pd.isna(r[g]) else float(r[g])) for g in self.GREEKS} for r in df.to_dict("records")}
+
     def fo_chain(self, day: str, underlying: str, expiry: str | None = None,
                 interval: str = "1s") -> dict:
         """
@@ -329,8 +372,11 @@ class Lake:
             pe = exp_opts[exp_opts["instrument_type"] == "PE"].set_index("strike")
             strikes = sorted(set(ce.index) | set(pe.index))
             atm = min(strikes, key=lambda k: abs(k - spot)) if spot and strikes else None
+            gk = self.greeks_last(day, exp_opts["symbol"].tolist())
             side = lambda row: {"symbol": row.symbol, "close": num(row.close), "oi": num(row.oi_last),  # noqa: E731
-                                "oi_change": num(row.oi_change), "volume": num(row.volume)} if row is not None else {}
+                                "oi_change": num(row.oi_change), "volume": num(row.volume),
+                                "iv": (gk.get(row.symbol) or {}).get("iv"),
+                                "delta": (gk.get(row.symbol) or {}).get("delta")} if row is not None else {}
             for k in strikes:
                 c = ce.loc[k] if k in ce.index else None
                 p = pe.loc[k] if k in pe.index else None

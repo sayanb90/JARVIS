@@ -27,11 +27,13 @@ from datetime import date
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from analytics.microstructure import day_summary, series_payload
+from analytics.microstructure import day_summary, series_payload, to_ist_strings
+from data_layer import live_book
 from data_layer.lake import LAKE_DIR
 from data_layer.query import Lake
 
@@ -169,6 +171,32 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         if not data:
             raise HTTPException(404, f"no derivatives for {underlying} on {date}")
         return JSONResponse(_json_safe(data))
+
+    @app.get("/api/fo/greeks")
+    def fo_greeks(date: str, symbol: str, width: int = Query(1)):
+        _check_date(date); _check_symbol(symbol)
+        if width not in WIDTHS:
+            raise HTTPException(422, f"width must be one of {WIDTHS}")
+        df = lake().greeks_series(date, symbol, width)
+        if df.empty:
+            return {"symbol": symbol, "date": date, "width": width, "available": False, "series": {}}
+        series = {"ts": to_ist_strings(df["ts"])}
+        for g in Lake.GREEKS:
+            series[g] = [None if pd.isna(v) else round(float(v), 6) for v in df[g]]
+        return JSONResponse(_json_safe({"symbol": symbol, "date": date, "width": width, "available": True,
+                                        "series": series}))
+
+    @app.get("/api/live_book")
+    def live_book_api(symbol: str):
+        """Latest five bid and ask levels from the running collector (memory only, never stored)."""
+        _check_symbol(symbol)
+        if (lake_path / "DEMO").exists():
+            from . import demo
+            return demo.demo_book(lake(), symbol)
+        book = live_book.fetch(symbol)
+        if book is None:
+            raise HTTPException(503, "no live book: the feed is not running, or this instrument is not subscribed")
+        return JSONResponse(_json_safe(book))
 
     @app.get("/vendor/plotly.min.js", include_in_schema=False)
     def plotly_js():

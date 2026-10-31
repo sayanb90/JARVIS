@@ -40,6 +40,7 @@ from dotenv import load_dotenv
 
 from .. import tick_policy, tick_store
 from ..lake import ENV_FILE
+from ..live_book import BookStore, port_for, serve as serve_books
 from ..tick_policy import TickPolicy, policy_from_env
 from ..ticks import SESSION_CLOSE_UTC, SESSION_OPEN_UTC, Tick
 from . import decode
@@ -63,8 +64,10 @@ def utcnow() -> datetime:
 class FeedProcessor:
     """Synchronous core: frame bytes in, raw ticks out.  The async runner only moves data."""
 
-    def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None) -> None:
+    def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None,
+                 books: BookStore | None = None) -> None:
         self.key_map = key_map
+        self.books = books if books is not None else BookStore()   # live five-level books, memory only
         self.policy = policy or TickPolicy()             # default: keep every tick, every Greek
         self._ticks: list[Tick] = []
         self.status: dict[str, str] = {}
@@ -78,6 +81,8 @@ class FeedProcessor:
             if st != self.status:
                 log.info("market status: %s", st)
             self.status = st
+        for sym, ts, ltp, bids, asks in decode.books_from_response(resp, self.key_map):
+            self.books.update(sym, ts, ltp, bids, asks)
         for t in decode.ticks_from_response(resp, self.key_map):
             if t.ts.date() != now.date():                # last trade from an earlier day
                 self.dropped_stale += 1
@@ -104,14 +109,15 @@ class UpstoxFeed:
                  lake_dir: Path | None = None, flush_s: float = 2.0, write_s: float = 15.0,
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None,
-                 token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None) -> None:
+                 token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None,
+                 books: BookStore | None = None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
         # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
         self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
-        self.proc = FeedProcessor(key_map, policy)
+        self.proc = FeedProcessor(key_map, policy, books)
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.clock = clock
         self.dump_left, self.dump_dir = dump_frames, dump_dir or Path("logs/frames")
@@ -335,8 +341,17 @@ def main() -> None:
             log.info("subscription list changed: %d -> %d instruments", len(key_map), len(fresh))
             key_map = fresh
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
-                          token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy())
-    asyncio.run(run_forever(make, once=a.once))
+                          token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books)
+    books = BookStore()
+
+    async def runner() -> None:
+        server = await serve_books(books, port_for(a.segment))
+        try:
+            await run_forever(make, once=a.once)
+        finally:
+            if server is not None:
+                server.close()
+    asyncio.run(runner())
 
 
 if __name__ == "__main__":

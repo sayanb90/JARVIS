@@ -17,13 +17,13 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 const niceDate = (d) => (d ? new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
 const WIDTH_LABEL = { 1: '1 second', 5: '5 seconds', 15: '15 seconds', 30: '30 seconds', 60: '1 minute', 300: '5 minutes' };
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
-const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract'] };
+const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'] };
 
 const state = {
   meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary' },
   symbol: null, width: 1, volwin: 300, data: null,
   overview: [], sort: ['volume', -1], heatN: 20, heatMetric: 'realised_vol_pct',
-  underlying: null, expiry: null, foData: null, foContract: null, foContractData: null, range: 10, focus: 'active',
+  underlying: null, expiry: null, foData: null, foContract: null, foContractData: null, greeksData: null, range: 10, focus: 'active',
 };
 let reqId = 0, foReq = 0, fcReq = 0;
 const phone = () => window.innerWidth < 640;
@@ -155,6 +155,7 @@ function showSub(tab, sub, rerender = true) {
 document.querySelectorAll('.subtabs').forEach((nav) => nav.querySelectorAll('button').forEach((b) => b.onclick = () => {
   showSub(nav.dataset.tab, b.dataset.sub);
   if (nav.dataset.tab === 'fo' && b.dataset.sub === 'contract' && !state.foContractData && state.foContract) loadFoContract(state.foContract);
+  if (nav.dataset.tab === 'fo' && b.dataset.sub === 'greeks') loadGreeks();
 }));
 
 /* ---------------------------------------------------------------- start-up */
@@ -166,7 +167,7 @@ async function init() {
   const wins = state.meta.vol_windows.map((w) => [w, VOLWIN_LABEL[w] || w + ' s']);
   state.width = state.meta.widths.includes(+h.width) ? +h.width : 1;
   state.volwin = state.meta.vol_windows.includes(+h.volwin) ? +h.volwin : 300;
-  for (const id of ['width', 'fo-width']) fillSelect($(id), widths, state.width);
+  for (const id of ['width', 'fo-width', 'fo-greeks-width']) fillSelect($(id), widths, state.width);
   for (const id of ['volwin', 'fo-volwin']) fillSelect($(id), wins, state.volwin);
   if (!state.meta.days.length) {
     $('empty').hidden = false; document.querySelectorAll('.view').forEach((v) => { v.hidden = true; }); setStatus('No data yet', 'err'); return;
@@ -224,8 +225,8 @@ function equityKpis(s) {
 }
 
 /* chart ids per group: Equities (EQ) and the derivatives Contract sub-tab (FC) use the same renderer */
-const EQ = { group: 'eq', price: 'eq-price', volume: 'eq-volume', depth: 'eq-depth', imb: 'eq-imb', spread: 'eq-spread', vol: 'eq-vol', book: 'book-body', note: 'note' };
-const FC = { group: 'fc', price: 'fc-price', volume: 'fc-volume', spread: 'fc-spread', book: 'fo-contract-book-body', note: 'fo-contract-note' };
+const EQ = { key: 'eq', group: 'eq', price: 'eq-price', volume: 'eq-volume', depth: 'eq-depth', imb: 'eq-imb', spread: 'eq-spread', vol: 'eq-vol', book: 'book-body', note: 'note' };
+const FC = { key: 'fc', group: 'fc', price: 'fc-price', volume: 'fc-volume', depth: 'fc-depth', imb: 'fc-imb', spread: 'fc-spread', book: 'fo-contract-book-body', note: 'fo-contract-note' };
 
 function renderSeries(d, ids) {
   const s = d.series, S = d.summary, t = s.ts, T = theme(), step = d.width <= 5 ? 'hv' : 'linear', win = VOLWIN_LABEL[d.vol_window];
@@ -316,6 +317,7 @@ function renderSeries(d, ids) {
 
 function bookAt(d, i, ids) {
   const s = d.series;
+  if (bookMode[ids.key] === 'live') return;            // the live ladder owns the card while it is switched on
   if (i == null || s.ts[i] == null) return;
   const row = (cls, label, px, q) => `<tr class="${cls}"><td>${label}</td><td>${px == null ? '–' : fmt(px)}</td><td>${q == null ? '–' : fmtInt(q)}</td></tr>`;
   const kv = [['Spread', s.spread[i] == null ? '–' : `${fmt(s.spread[i])} · ${fmt(s.spread_bps[i], 2)} bps`], ['Mid', fmt(s.mid[i])],
@@ -531,21 +533,24 @@ function renderChain(d) {
   $('fo-chain-title').innerHTML = `Option chain<span class="hint">${esc(d.underlying)} · ${d.expiry ? niceDate(d.expiry) : 'no option expiry collected'}</span>`;
   const rows = strikesAround(d, state.range);
   const mxc = Math.max(...rows.map((r) => r.ce_oi || 0), 1), mxp = Math.max(...rows.map((r) => r.pe_oi || 0), 1);
+  const hasGk = rows.some((r) => r.ce_iv != null || r.pe_iv != null || r.ce_delta != null || r.pe_delta != null);
   const cell = (sym, html, cls) => sym ? `<td class="${cls}" data-s="${esc(sym)}">${html}</td>` : `<td class="${cls} na">–</td>`;
   const body = rows.map((r) => {
     const itm = (d.spot != null ? (r.strike < d.spot ? ' itm-ce' : r.strike > d.spot ? ' itm-pe' : '') : '');
     return `<tr class="${r.strike === d.atm_strike ? 'atm' : ''}${itm}">` +
       cell(r.ce_symbol, fmtBig(r.ce_oi), 'ce oi" style="--w:' + ((r.ce_oi || 0) / mxc * 100).toFixed(1) + '%') +
       cell(r.ce_symbol, r.ce_oi_change == null ? '–' : signed(r.ce_oi_change, fmtBig), 'ce opt') +
-      cell(r.ce_symbol, fmtBig(r.ce_volume), 'ce opt') + cell(r.ce_symbol, fmt(r.ce_close), 'ce') +
+      cell(r.ce_symbol, fmtBig(r.ce_volume), 'ce opt') +
+      (hasGk ? cell(r.ce_symbol, fmt(r.ce_iv, 1), 'ce opt gk') + cell(r.ce_symbol, fmt(r.ce_delta, 2), 'ce opt gk') : '') + cell(r.ce_symbol, fmt(r.ce_close), 'ce') +
       `<td class="strike">${fmtInt(r.strike)}</td>` +
-      cell(r.pe_symbol, fmt(r.pe_close), 'pe') + cell(r.pe_symbol, fmtBig(r.pe_volume), 'pe opt') +
+      cell(r.pe_symbol, fmt(r.pe_close), 'pe') +
+      (hasGk ? cell(r.pe_symbol, fmt(r.pe_delta, 2), 'pe opt gk') + cell(r.pe_symbol, fmt(r.pe_iv, 1), 'pe opt gk') : '') + cell(r.pe_symbol, fmtBig(r.pe_volume), 'pe opt') +
       cell(r.pe_symbol, r.pe_oi_change == null ? '–' : signed(r.pe_oi_change, fmtBig), 'pe opt') +
       cell(r.pe_symbol, fmtBig(r.pe_oi), 'pe oi" style="--w:' + ((r.pe_oi || 0) / mxp * 100).toFixed(1) + '%') + '</tr>';
   }).join('');
-  $('fo-chain').innerHTML = `<thead><tr><th>Call OI</th><th class="opt">OI chg</th><th class="opt">Volume</th><th>Call last</th><th class="strike">Strike</th>
-    <th>Put last</th><th class="opt">Volume</th><th class="opt">OI chg</th><th>Put OI</th></tr></thead>
-    <tbody>${body || '<tr><td colspan="9" class="muted">No options collected for this expiry.</td></tr>'}</tbody>`;
+  $('fo-chain').innerHTML = `<thead><tr><th>Call OI</th><th class="opt">OI chg</th><th class="opt">Volume</th>${hasGk ? '<th class="opt">IV</th><th class="opt">&Delta;</th>' : ''}<th>Call last</th><th class="strike">Strike</th>
+    <th>Put last</th>${hasGk ? '<th class="opt">&Delta;</th><th class="opt">IV</th>' : ''}<th class="opt">Volume</th><th class="opt">OI chg</th><th>Put OI</th></tr></thead>
+    <tbody>${body || '<tr><td colspan="13" class="muted">No options collected for this expiry.</td></tr>'}</tbody>`;
   $('fo-chain').querySelectorAll('td[data-s]').forEach((td) => td.onclick = () => openContract(td.dataset.s));
   centreChain();
 }
@@ -620,8 +625,12 @@ function fillContracts(d) {
   const atmCe = (d.chain.find((r) => r.strike === d.atm_strike) || {}).ce_symbol;
   const sel = flat.includes(state.foContract) ? state.foContract : (d.futures[0] ? d.futures[0].symbol : atmCe || flat[0] || null);
   fillSelect($('fo-contract'), groupsOut, sel);
-  state.foContract = sel; state.foContractData = null;
+  const optGroups = groupsOut.filter((g) => g.group !== 'Futures');
+  const optFlat = optGroups.flatMap((g) => g.items.map(([v]) => v));
+  fillSelect($('fo-greeks-contract'), optGroups, optFlat.includes(sel) ? sel : (atmCe || optFlat[0] || null));
+  state.foContract = sel; state.foContractData = null; state.greeksData = null;
   if (sel && state.sub.fo === 'contract') loadFoContract(sel);
+  if (state.sub.fo === 'greeks') loadGreeks();
 }
 
 function openContract(sym) {
@@ -631,6 +640,13 @@ function openContract(sym) {
     const o = document.createElement('option'); o.value = sym; o.textContent = FO_TYPE(sym, state.foData).label; $('fo-contract').appendChild(o);
   }
   $('fo-contract').value = sym;
+  if (OPTION_RE.test(sym)) {
+    if (![...$('fo-greeks-contract').options].some((o) => o.value === sym)) {
+      const o = document.createElement('option'); o.value = sym; o.textContent = FO_TYPE(sym, state.foData).label; $('fo-greeks-contract').appendChild(o);
+    }
+    $('fo-greeks-contract').value = sym;
+  }
+  state.greeksData = null;
   showSub('fo', 'contract');
   loadFoContract(sym);
 }
@@ -659,10 +675,99 @@ async function loadFoContract(sym) {
   } catch (e) { if (id === fcReq) fail(e); }
 }
 
+/* ---------------------------------------------------------------- Greeks (options only) */
+const OPTION_RE = /_(CE|PE)_/;
+let gkReq = 0;
+function clearGreeks() { ['iv', 'delta', 'gamma', 'theta', 'vega', 'rho'].forEach((k) => { const el = $('gk-' + k); if (el.data) Plotly.purge(el); }); $('fo-greeks-cards').innerHTML = ''; }
+async function loadGreeks() {
+  const sym = $('fo-greeks-contract').value;            // always an option; the futures belong to the Contract view
+  if (!state.day) return;
+  if (!sym || !OPTION_RE.test(sym)) {
+    clearGreeks(); $('fo-greeks-meta').textContent = '';
+    $('fo-greeks-note').textContent = 'Greeks belong to options. Pick a call or put above, or click one in the option chain (this underlying has no options collected on this day).'; return;
+  }
+  const id = ++gkReq;
+  setStatus('Loading Greeks for ' + sym + '…', 'busy');
+  try {
+    const d = await api('/api/fo/greeks', { date: state.day, symbol: sym, width: state.width });
+    if (id !== gkReq) return;
+    state.greeksData = d;
+    $('fo-greeks-meta').textContent = FO_TYPE(sym, state.foData).label + ` · ${WIDTH_LABEL[d.width]} bars`;
+    if (!d.available || !d.series.ts || !d.series.ts.length) {
+      clearGreeks();
+      $('fo-greeks-note').textContent = 'No Greeks were stored for this option on this day. They are collected from the day the feed first ran with Greeks storage on (JARVIS_GREEKS), so earlier days have none.';
+      setStatus(`${sym} · ${state.day} · no Greeks stored`); return;
+    }
+    $('fo-greeks-note').textContent = 'Values are the last reading in each bar, as delivered by the exchange feed (not recomputed here).';
+    renderGreeks(d);
+    setStatus(`${sym} · ${state.day} · ${fmtInt(d.series.ts.length)} bars of ${WIDTH_LABEL[d.width]} · times in IST`);
+  } catch (e) { if (id === gkReq) fail(e); }
+}
+function renderGreeks(d) {
+  const s = d.series, t = s.ts, T = theme(), step = d.width <= 5 ? 'hv' : 'linear';
+  const defs = [['iv', 'IV', T.purple, '%', ',.2f'], ['delta', 'Delta', T.acc, '', '.3f'], ['gamma', 'Gamma', T.teal, '', '.5f'],
+                ['theta', 'Theta', T.down, '', ',.2f'], ['vega', 'Vega', T.yellow, '', ',.2f'], ['rho', 'Rho', T.orange, '', ',.2f']];
+  const last = (a) => { for (let i = a.length - 1; i >= 0; i--) if (a[i] != null) return a[i]; return null; };
+  renderKpis('fo-greeks-cards', [['IV', fmt(last(s.iv), 1) + '%', 'implied volatility'], ['Delta', fmt(last(s.delta), 3), ''], ['Gamma', fmt(last(s.gamma), 5), ''],
+    ['Theta', fmt(last(s.theta), 2), 'per day'], ['Vega', fmt(last(s.vega), 2), 'per vol point'], ['Rho', fmt(last(s.rho), 2), 'per rate point']]);
+  const ids = [];
+  defs.forEach(([k, name, color, suffix, tf]) => {
+    const id = 'gk-' + k;
+    plot(id, [{ x: t, y: s[k], name, type: 'scattergl', mode: 'lines', line: { color, width: 1.6, shape: step } }],
+      baseLayout({ hovermode: 'x unified', xaxis: timeAxis(), yaxis: valAxis({ tickformat: tf, ticksuffix: suffix }) }),
+      [{ name, color, traces: [0] }]);
+    ids.push(id);
+  });
+  syncGroup('gk', ids);
+  requestAnimationFrame(resizeVisible);
+}
+
+/* ---------------------------------------------------------------- live five-level book (memory only, never stored) */
+const bookMode = { eq: 'cursor', fc: 'cursor' };
+const BOOKS = { eq: { body: 'book-body', symbol: () => state.symbol, data: () => state.data, ids: EQ },
+                fc: { body: 'fo-contract-book-body', symbol: () => state.foContract, data: () => state.foContractData, ids: FC } };
+const liveBusy = {};
+function ladderHtml(b) {
+  const mx = Math.max(1, ...b.bids.map((x) => x[1]), ...b.asks.map((x) => x[1]));
+  const row = (cls, [p, q]) => `<tr class="${cls}"><td class="q" style="--w:${(q / mx * 100).toFixed(0)}%">${fmtInt(q)}</td><td class="px">${fmt(p)}</td></tr>`;
+  const bb = b.bids[0], ba = b.asks[0];
+  const sum = (a) => a.reduce((t, x) => t + x[1], 0), tb = sum(b.bids), ta = sum(b.asks);
+  const kv = [['Spread', bb && ba ? `${fmt(ba[0] - bb[0])} · ${fmt((ba[0] - bb[0]) / ((ba[0] + bb[0]) / 2) * 1e4, 2)} bps` : '–'],
+              ['Bid size (5)', fmtInt(tb)], ['Ask size (5)', fmtInt(ta)], ['Imbalance (5)', tb + ta ? fmt((tb - ta) / (tb + ta), 2) : '–'], ['Last', fmt(b.ltp)]];
+  const at = new Date(b.ts).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
+  return `<div class="ts">${at} IST · ${b.age_s < 1 ? 'just now' : fmt(b.age_s, 0) + ' s ago'} · live, not stored</div>
+    <table class="ladder5"><tr class="hd"><td class="muted">Size</td><td class="px muted">Price</td></tr>${b.asks.slice(0, 5).reverse().map((x) => row('ask', x)).join('')}
+    <tr class="mid"><td colspan="2">${bb && ba ? 'spread ' + fmt(ba[0] - bb[0]) : ''}</td></tr>${b.bids.slice(0, 5).map((x) => row('bid', x)).join('')}</table>
+    <dl class="kv">${kv.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`;
+}
+async function pollLive(key) {
+  const B = BOOKS[key], sym = B.symbol(), el = $(B.body);
+  if (!sym || liveBusy[key]) return;
+  liveBusy[key] = true;
+  try {
+    const b = await api('/api/live_book', { symbol: sym });
+    if (bookMode[key] === 'live' && sym === B.symbol()) el.innerHTML = ladderHtml(b);
+  } catch (e) {
+    if (bookMode[key] === 'live') el.innerHTML = `<p class="muted">Live depth needs the feed to be running during market hours.<br>${esc(e.message)}</p>`;
+  } finally { liveBusy[key] = false; }
+}
+function setBookMode(key, mode) {
+  bookMode[key] = mode;
+  document.querySelectorAll(`.seg[data-book="${key}"] button`).forEach((b) => b.setAttribute('aria-pressed', b.dataset.mode === mode));
+  const B = BOOKS[key];
+  if (mode === 'live') { $(B.body).innerHTML = '<p class="muted">Waiting for the first update…</p>'; pollLive(key); }
+  else { const d = B.data(); if (d) bookAt(d, d.series.ts.length - 1, B.ids); else $(B.body).textContent = 'Hover a chart to see the best bid and ask at that second.'; }
+}
+document.querySelectorAll('.seg').forEach((seg) => seg.querySelectorAll('button').forEach((b) => b.onclick = () => setBookMode(seg.dataset.book, b.dataset.mode)));
+setInterval(() => {                                        // one timer; only cards that are on screen and switched to live poll
+  if (document.hidden) return;
+  for (const key of Object.keys(BOOKS)) if (bookMode[key] === 'live' && $(BOOKS[key].body).offsetParent !== null) pollLive(key);
+}, 1000);
+
 /* ---------------------------------------------------------------- wiring */
-$('date').onchange = (e) => { state.day = e.target.value; state.foContractData = null; setTab(state.tab); };
+$('date').onchange = (e) => { state.day = e.target.value; state.foContractData = null; state.greeksData = null; setTab(state.tab); };
 $('symbol').onchange = (e) => { state.symbol = e.target.value; refreshEquity(); };
-const setWidth = (v) => { state.width = +v; $('width').value = v; $('fo-width').value = v; };
+const setWidth = (v) => { state.width = +v; $('width').value = v; $('fo-width').value = v; $('fo-greeks-width').value = v; state.greeksData = null; };
 const setWin = (v) => { state.volwin = +v; $('volwin').value = v; $('fo-volwin').value = v; };
 $('width').onchange = (e) => { setWidth(e.target.value); refreshEquity(); };
 $('volwin').onchange = (e) => { setWin(e.target.value); refreshEquity(); };
@@ -674,7 +779,13 @@ $('underlying').onchange = (e) => { state.underlying = e.target.value; state.exp
 $('expiry').onchange = (e) => { state.expiry = e.target.value; refreshFo(); };
 $('chain-range').onchange = (e) => { state.range = +e.target.value; writeHash(); if (state.foData) renderChain(state.foData); };
 $('oi-focus').onchange = (e) => { state.focus = e.target.value; writeHash(); if (state.foData) renderOi(state.foData); };
-$('fo-contract').onchange = (e) => { state.foContract = e.target.value; loadFoContract(state.foContract); };
+$('fo-contract').onchange = (e) => { state.foContract = e.target.value; state.greeksData = null; loadFoContract(state.foContract); };
+$('fo-greeks-width').onchange = (e) => { setWidth(e.target.value); loadGreeks(); };
+$('fo-greeks-contract').onchange = (e) => {
+  state.foContract = e.target.value; state.foContractData = null; state.greeksData = null;
+  if ([...$('fo-contract').options].some((o) => o.value === state.foContract)) $('fo-contract').value = state.foContract;
+  loadGreeks();
+};
 for (const t of Object.keys(SUBS)) $('tab-' + t).onclick = () => setTab(t);
 let lastPhone = phone();
 window.addEventListener('resize', () => {                // re-layout charts when crossing the phone breakpoint
