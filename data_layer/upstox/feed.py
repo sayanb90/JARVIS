@@ -19,8 +19,8 @@ Protocol (from the official SDK, upstox-python-sdk 2.30.0):
                "mode": "ltpc" | "full" | "option_greeks" | "full_d30"}}
   responses  : binary Protobuf FeedResponse (see decode.py)
 
-Unverified against production (runbook Gate U1): per-connection subscription limits,
-that `ltt` is epoch milliseconds, and behaviour on NSE holidays.
+Per-connection caps (Upstox V3 spec, see MODE_CAP): full 2,000 keys, ltpc 5,000, option_greeks 3,000,
+full_d30 50; Plus accounts may open 5 connections.  Unverified against production (runbook Gate U1): that `ltt` is epoch milliseconds, and behaviour on NSE holidays.
 """
 
 from __future__ import annotations
@@ -47,7 +47,9 @@ log = logging.getLogger(__name__)
 
 FEED_URL = "wss://api.upstox.com/v3/feed/market-data-feed"
 MODES = ("ltpc", "full", "option_greeks", "full_d30")
-SUBSCRIBE_BATCH = 500            # keys per subscribe message (conservative; limit unverified)
+SUBSCRIBE_BATCH = 500            # keys per subscribe message (Upstox recommends 500 to 1,000)
+# Upstox V3 per-connection caps when a connection uses a single mode (Plus tier: up to 5 connections)
+MODE_CAP = {"ltpc": 5000, "option_greeks": 3000, "full": 2000, "full_d30": 50}
 START_EARLY = timedelta(minutes=5)
 STOP_LATE = timedelta(minutes=5)
 
@@ -124,6 +126,11 @@ class UpstoxFeed:
     async def _connect_once(self, stop: asyncio.Event) -> None:
         async with websockets.connect(self.url, additional_headers={"Authorization": f"Bearer {self.token}"},
                                       max_size=None, ping_interval=20) as ws:
+            cap = MODE_CAP.get(self.mode)
+            if cap and len(self.keys) > cap:
+                log.warning("%d instruments exceed the %d-key cap for mode %s on one connection; "
+                            "Upstox may refuse or drop the excess (shorten the list or split it)",
+                            len(self.keys), cap, self.mode)
             for m in self._subscribe_msgs():
                 await ws.send(m)                          # bytes -> binary frame, as the SDK does
             log.info("subscribed %d instruments in mode %s", len(self.keys), self.mode)

@@ -512,7 +512,7 @@ RestartSec=10
 - [ ] **U0:** developer-console app created, `auth exchange` succeeds, `auth check` shows which token the feed accepts and I record the extended token's real lifetime here: ______
 - [ ] Token obtained and the feed accepts it (HTTP 101, not 401)
 - [ ] One captured real frame saved as a test fixture; confirm `ltt` is epoch **milliseconds** (the processor warns if timestamps look wrong)
-- [ ] `full` mode for the whole universe works; find the real per-connection and per-user subscription limits and set `SUBSCRIBE_BATCH` and the connection count accordingly (not documented in the SDK)
+- [ ] `full` mode for the whole universe works; per-connection limits are now documented (Upstox V3 spec, Plus tier): `full` 2,000 keys, `ltpc` 5,000, `option_greeks` 3,000, `full_d30` 50, up to 5 connections; `feed` warns when a list exceeds the cap. Check the F&O list size after `select` (4 futures + 4 option expiries with all strikes may exceed 2,000 in `full`); if so lower `strikes` or split the list across connections (not yet built)
 - [ ] Bars for a full session match a second source (open, high, low, close; volume differs slightly because bars are built from tick deltas)
 - [ ] First bar 03:45 UTC, last bar 09:59 UTC, no duplicate `(symbol, ts)` after `compact_day`
 - [ ] Behaviour on an NSE holiday (connection works, no ticks; the watchdog will reconnect every 2 minutes, harmless but noisy)
