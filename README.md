@@ -218,7 +218,7 @@ Tested against a local fake server; not yet run against Upstox itself (runbook s
 
 **Admin:** set `ADMIN_USER` and `ADMIN_PASSWORD` to enable `/admin`, a password-protected data browser (tables grouped by service, paged), a read-only SQL console and the subscription list with ticker upload (runbook section 18).
 
-Go-live steps, daily ops, backups and the futures/options section are in [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+Go-live steps, daily ops, backups and the futures/options section are in [the JARVIS Runbook in Notion](https://app.notion.com/p/40a23f85984081c4bf1eff52ac4bfcd5).
 
 **Manual runs:**
 
@@ -251,7 +251,7 @@ lake/
 └── bars/interval=5m/date=YYYY-MM-DD/bars.parquet
 ```
 
-All tables carry a `market` column (`IN`, `US`, `UK`, `EU` for daily OHLC; India only for bars and fundamentals). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in `docs/RUNBOOK.md`.
+All tables carry a `market` column (`IN`, `US`, `UK`, `EU` for daily OHLC; India only for bars and fundamentals). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in the JARVIS Runbook (Notion).
 
 ---
 
@@ -263,13 +263,13 @@ python -m pytest --cov            # unit tests + Gherkin scenarios, no network o
 python -m pytest -m bdd           # only the Gherkin scenarios in tests/features
 ```
 
-About 220 tests, about 98% coverage; CI fails below 90%. Layout, scenario list and the limits of what they prove are in section 15 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+About 220 tests, about 98% coverage; CI fails below 90%. Layout, scenario list and the limits of what they prove are in section 15 of [the JARVIS Runbook in Notion](https://app.notion.com/p/40a23f85984081c4bf1eff52ac4bfcd5).
 
 ---
 
 ## Setting up the server
 
-Section 0 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md) takes you from a blank VPS to data flowing: hardening, install, `.env`, building the stock universe (`python -m data_layer.universe import-nse <NSE csv>`), the test day, going live with the files in `deploy/` (systemd services, cron, log rotation), backups (`python -m data_layer.backup`), and the daily routine (the morning token refresh is skippable once the Analytics Token is adopted, section 13.2). `python -m data_layer.health` is the two-minute daily check.
+Section 0 of [the JARVIS Runbook in Notion](https://app.notion.com/p/40a23f85984081c4bf1eff52ac4bfcd5) takes you from a blank VPS to data flowing: hardening, install, `.env`, building the stock universe (`python -m data_layer.universe import-nse <NSE csv>`), the test day, going live with the files in `deploy/` (systemd services, cron, log rotation), backups (`python -m data_layer.backup`), and the daily routine (the morning token refresh is skippable once the Analytics Token is adopted, section 13.2). `python -m data_layer.health` is the two-minute daily check.
 
 ---
 
@@ -283,5 +283,5 @@ python -m webapp --lake lake_demo             # open http://127.0.0.1:8000
 python -m webapp                              # on the real lake
 ```
 
-Set `WEBAPP_USER` and `WEBAPP_PASSWORD` to require a login, and put a TLS reverse proxy in front for phone access. Details, definitions and limits: section 16 of [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+Set `WEBAPP_USER` and `WEBAPP_PASSWORD` to require a login, and put a TLS reverse proxy in front for phone access. Details, definitions and limits: section 16 of [the JARVIS Runbook in Notion](https://app.notion.com/p/40a23f85984081c4bf1eff52ac4bfcd5).
 

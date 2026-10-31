@@ -1,7 +1,7 @@
 """
 Tick / L1 model and tick -> bar aggregator (protocol independent).
 
-A feed adapter (Upstox WebSocket, see docs/RUNBOOK.md section 13) turns each
+A feed adapter (Upstox WebSocket, see the JARVIS Runbook (Notion) section 13) turns each
 decoded message into `Tick`s; `BarAggregator` folds them into fixed-width bars
 aligned to the NSE session open, and `tick_store` persists them.
 

@@ -355,11 +355,6 @@ def test_start_limits_are_in_the_unit_section_where_systemd_reads_them():
     assert "StartLimitBurst" not in cp["Service"] and "StartLimitIntervalSec" not in cp["Service"]
 
 
-def test_ssh_hardening_dropin_sorts_before_cloud_init():
-    text = (REPO / "docs/RUNBOOK.md").read_text()
-    assert "sshd_config.d/00-jarvis.conf" in text and "99-jarvis.conf" not in text
-
-
 def test_feed_unit_stops_gracefully_and_viewer_binds_locally():
     feed = (REPO / "deploy/jarvis-feed.service").read_text()
     assert "KillSignal=SIGTERM" in feed and re.search(r"TimeoutStopSec=\d+", feed)
@@ -383,16 +378,3 @@ def test_backup_cli_reads_the_destination_from_the_env_file(src, tmp_path, monke
     assert backup.main(["run"]) == 0
     assert backup.list_snapshots(tmp_path / "from-env") == [date.today().isoformat()]
     assert "$JARVIS" not in (REPO / "deploy/crontab").read_text().split("backup")[1].split("\n")[0]
-
-
-def test_runbook_commands_name_real_modules_and_flags():
-    """Every `python -m <module>` in section 0 of the runbook must exist (guards against the docs drifting from the code)."""
-    text = (REPO / "docs/RUNBOOK.md").read_text()
-    section0 = text[text.index("## 0. Start here"):text.index("## 1. Scope")]
-    mods = set(re.findall(r"python -m ([\w.]+)", section0))
-    assert {"data_layer.universe", "data_layer.backup", "data_layer.health", "data_layer.upstox.auth", "data_layer.verify"} <= mods
-    for m in mods:
-        if m != "pytest":
-            assert importlib.util.find_spec(m) is not None, m
-    for f in re.findall(r"deploy/([\w.\-]+)", section0):
-        assert (REPO / "deploy" / f).exists(), f
