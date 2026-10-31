@@ -368,3 +368,63 @@ def test_frames_without_greeks_leave_them_empty_and_storage_round_trips(tmp_path
     rows = duckdb.sql(f"SELECT symbol, delta, iv FROM read_parquet('{tmp_path}/ticks/date={day}/ticks.parquet') ORDER BY symbol, delta").fetchall()
     assert rows[0][0] == "EQ.NS" and rows[0][1] is None
     assert rows[-1][1] == pytest.approx(0.52, rel=1e-4) and rows[-1][2] == pytest.approx(14.25, rel=1e-4)
+
+
+# -- what the feed keeps (tick policy) ---------------------------------------------
+from data_layer.tick_policy import TickPolicy, policy_from_env  # noqa: E402
+
+
+def _opt(sec_ms, px=100.0, bid=99.9, delta=0.5, iv=14.0, oi=1000, sym="OPT"):
+    return Tick(OPEN + timedelta(milliseconds=sec_ms), sym, px, 10, bid, 5, bid + 0.2, 6, oi,
+                iv=iv, delta=delta, theta=-1.23456789, gamma=0.00123456, vega=9.87654321, rho=2.3456789)
+
+
+def test_full_keeps_every_tick_even_duplicates():
+    p = TickPolicy()
+    assert [p.apply(_opt(i * 100)) is not None for i in range(5)] == [True] * 5 and p.dropped == 0
+
+
+def test_throttle_keeps_one_per_symbol_per_interval():
+    p = TickPolicy("throttle", min_interval_s=1.0)
+    kept = [p.apply(_opt(ms_)) is not None for ms_ in (0, 300, 999, 1000, 1500, 2100)]
+    assert kept == [True, False, False, True, False, True]
+    assert p.apply(_opt(100, sym="OTHER")) is not None               # per symbol, not global
+
+
+def test_changes_ignores_greeks_only_updates():
+    p = TickPolicy("a")
+    assert p.apply(_opt(0)) is not None
+    assert p.apply(_opt(100, delta=0.51, iv=14.1)) is None           # only Greeks moved
+    assert p.apply(_opt(200, px=100.05)) is not None                 # price moved
+    assert p.apply(_opt(300, px=100.05, oi=1010)) is not None        # open interest moved
+    assert p.dropped == 1 and p.kept == 3
+
+
+def test_greeks_selection_and_rounding():
+    t = TickPolicy(greeks="iv", decimals=2).apply(_opt(0))
+    assert t.iv == 14.0 and t.delta is t.theta is t.gamma is t.vega is t.rho is None
+    t = TickPolicy(greeks="none").apply(_opt(0))
+    assert t.iv is None and t.delta is None and t.bid == 99.9
+    t = TickPolicy(decimals=3).apply(_opt(0))
+    assert (t.theta, t.gamma, t.vega) == (-1.235, 0.001, 9.877)
+
+
+def test_policy_from_env_precedence_and_validation():
+    env = {"JARVIS_TICK_STORE": "b", "JARVIS_TICK_STORE_FO": "changes", "JARVIS_TICK_MIN_INTERVAL_S": "2",
+           "JARVIS_GREEKS": "iv", "JARVIS_GREEKS_DECIMALS": "4"}
+    fo, eq = policy_from_env("fo", env), policy_from_env("eq", env)
+    assert (fo.mode, eq.mode, eq.min_interval_s, fo.greeks, fo.decimals) == ("changes", "throttle", 2.0, "iv", 4)
+    assert policy_from_env("fo", {}).describe() == "mode=full greeks=all"
+    with pytest.raises(ValueError):
+        TickPolicy("sometimes")
+    with pytest.raises(ValueError):
+        TickPolicy(greeks="most")
+
+
+def test_processor_applies_the_policy_before_storage():
+    key = "NSE_FO|1"
+    for mode, expect in (("full", 2), ("changes", 1)):
+        p = feed.FeedProcessor({key: "OPT"}, TickPolicy(mode))
+        for _ in range(2):
+            p.handle(_greeks_frame(key), datetime(2026, 10, 23, 5, 0))
+        assert len(p.drain()) == expect

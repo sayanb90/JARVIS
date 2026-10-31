@@ -37,6 +37,16 @@ What has to happen on the VPS before the current code is called live. Work top t
   ```
   SCRUM-77
 - [ ] Disk: `du -sh lake/ticks lake` after a full session; expect about 90 MB a day of ticks at 500 equities + ~350 contracts (SCRUM-77). Check that the backup target has room for the same growth (section 7).
+- [ ] **F&O sizing run (one full session, option C).** The watchlist is now 4 futures + 4 option expiries, all strikes, and every option tick stores IV, delta, theta, gamma, vega and rho. Leave `JARVIS_TICK_STORE=full` and `JARVIS_GREEKS=all` (the defaults) and run the whole session, then measure and decide:
+  ```
+  du -sh lake/ticks/date=$(date -u +%F)
+  python - <<'PY'
+  import duckdb, datetime as d
+  day = d.datetime.utcnow().date()
+  print(duckdb.sql(f"SELECT (delta IS NOT NULL) AS option, count(*) rows, count(DISTINCT symbol) symbols FROM read_parquet('lake/ticks/date={day}/*.parquet', hive_partitioning=false, union_by_name=true) GROUP BY 1").df())
+  PY
+  ```
+  Estimates (synthetic, ~12 B per equity row, ~35 B per option row with Greeks; ~248 trading days a year): A ~0.23 GB/day (~57 GB/yr), B ~0.6 GB/day (~155 GB/yr), C up to ~1.6 GB/day (~400 GB/yr). The real option rows per day decide it. If too big, change one line in `.env` and restart the feed (it only affects ticks written from then on): `JARVIS_TICK_STORE_FO=throttle` (option B, one tick per contract per `JARVIS_TICK_MIN_INTERVAL_S`), `changes` (option A, drops Greeks-only updates), and/or `JARVIS_GREEKS=iv` or `JARVIS_GREEKS_DECIMALS=4`. See `data_layer/tick_policy.py`. Decide the final setting after seeing which of your signals need the precision.
 
 ### D. Prove it on live data (one full session after A–C)
 - [ ] **Equities:** `python -m data_layer.verify bars --date <day>` (bars now derived from ticks) prints no FAIL; then close the first-session ticket. SCRUM-59

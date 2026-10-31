@@ -36,9 +36,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import websockets
+from dotenv import load_dotenv
 
-from .. import tick_store
+from .. import tick_policy, tick_store
 from ..lake import ENV_FILE
+from ..tick_policy import TickPolicy, policy_from_env
 from ..ticks import SESSION_CLOSE_UTC, SESSION_OPEN_UTC, Tick
 from . import decode
 from .instruments import segment_key_map
@@ -61,8 +63,9 @@ def utcnow() -> datetime:
 class FeedProcessor:
     """Synchronous core: frame bytes in, raw ticks out.  The async runner only moves data."""
 
-    def __init__(self, key_map: dict[str, str]) -> None:
+    def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None) -> None:
         self.key_map = key_map
+        self.policy = policy or TickPolicy()             # default: keep every tick, every Greek
         self._ticks: list[Tick] = []
         self.status: dict[str, str] = {}
         self.frames = self.ticks = self.dropped_stale = self.dropped_future = 0
@@ -86,7 +89,9 @@ class FeedProcessor:
                                 "(is ltt really epoch ms?)", t.ts, now)
                 continue
             self.ticks += 1
-            self._ticks.append(t)
+            kept = self.policy.apply(t)
+            if kept is not None:
+                self._ticks.append(kept)
 
     def drain(self) -> list[Tick]:
         ticks, self._ticks = self._ticks, []
@@ -99,14 +104,14 @@ class UpstoxFeed:
                  lake_dir: Path | None = None, flush_s: float = 2.0, write_s: float = 15.0,
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None,
-                 token_provider=None, auth_retry_s: float | None = None) -> None:
+                 token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
         # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
         self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
-        self.proc = FeedProcessor(key_map)
+        self.proc = FeedProcessor(key_map, policy)
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.clock = clock
         self.dump_left, self.dump_dir = dump_frames, dump_dir or Path("logs/frames")
@@ -167,8 +172,8 @@ class UpstoxFeed:
             if (now - last_write).total_seconds() >= self.write_s:
                 n = self.persist()
                 last_write = now
-                log.info("frames=%d ticks=%d ticks_written=%d stale=%d future=%d",
-                         self.proc.frames, self.proc.ticks, n,
+                log.info("frames=%d ticks=%d ticks_written=%d policy_dropped=%d stale=%d future=%d",
+                         self.proc.frames, self.proc.ticks, n, self.proc.policy.dropped,
                          self.proc.dropped_stale, self.proc.dropped_future)
             if (now - self._last_frame).total_seconds() > self.stale_s:
                 log.warning("no frames for %.0fs, reconnecting", (now - self._last_frame).total_seconds())
@@ -288,8 +293,21 @@ def main() -> None:
     ap.add_argument("--dump-frames", type=int, default=0, metavar="N",
                     help="save the first N raw binary frames to logs/frames/ (test fixtures, market data only)")
     ap.add_argument("--url", default=FEED_URL)
+    ap.add_argument("--tick-store", choices=[*tick_policy.MODES, "c", "b", "a"], default=None,
+                    help="what to keep: full (every tick, default), throttle (one per symbol per interval), "
+                         "changes (only when price, volume, quote or OI change); overrides JARVIS_TICK_STORE")
+    ap.add_argument("--tick-min-interval", type=float, default=None, metavar="S", help="seconds for --tick-store throttle")
+    ap.add_argument("--greeks", choices=tick_policy.GREEKS, default=None, help="option Greeks to keep (default all)")
+    ap.add_argument("--greeks-decimals", type=int, default=None, metavar="N", help="round the Greeks to N digits")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    load_dotenv(ENV_FILE)
+    policy_args = dict(mode=a.tick_store, min_interval_s=a.tick_min_interval, greeks=a.greeks, decimals=a.greeks_decimals)
+    base = policy_from_env(a.segment)
+    def new_policy() -> TickPolicy:
+        return TickPolicy(**{**{"mode": base.mode, "min_interval_s": base.min_interval_s, "greeks": base.greeks,
+                                "decimals": base.decimals}, **{k: v for k, v in policy_args.items() if v is not None}})
+    log.info("tick storage: %s", new_policy().describe())
     token = current_token()
     if not token and a.once:
         raise SystemExit("no token: set UPSTOX_ACCESS_TOKEN (see python -m data_layer.upstox.auth)")
@@ -317,7 +335,7 @@ def main() -> None:
             log.info("subscription list changed: %d -> %d instruments", len(key_map), len(fresh))
             key_map = fresh
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
-                          token_provider=current_token, auth_retry_s=None if a.once else 60.0)
+                          token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy())
     asyncio.run(run_forever(make, once=a.once))
 
 
