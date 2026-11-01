@@ -285,3 +285,8 @@ python -m webapp                              # on the real lake
 
 Set `WEBAPP_USER` and `WEBAPP_PASSWORD` to require a login, and put a TLS reverse proxy in front for phone access. Details, definitions and limits: section 16 of [the JARVIS Runbook in Notion](https://app.notion.com/p/40a23f85984081c4bf1eff52ac4bfcd5).
 
+## Upstox probe
+
+`python -m data_layer.upstox.probe check` tests every Upstox dataset once; `... run` collects a full session of each into
+`probe_data/` and writes a report of what works, how far back it goes, what a day weighs on disk, and how much CPU, memory
+and disk the box used (`logs/probe/`). Details: the signal catalogue page in Notion.

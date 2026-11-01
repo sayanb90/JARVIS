@@ -27,6 +27,11 @@ from .lake import LAKE_DIR
 from .ticks import Bar, Tick
 
 
+# extended stream fields (see ticks.Tick): written only when a batch carries them, so output is unchanged while off
+EXT_COLUMNS = {"ltq": "Int64", "atp": "float64", "tbq": "Int64", "tsq": "Int64", "cp": "float64", "iep": "float64",
+               "ieq": "Int64", "iiq_total": "Int64", "iiq_market": "Int64", "ref_price": "float64", "cas_eligible": "boolean"}
+
+
 def _write_segment(folder: Path, df: pd.DataFrame) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"seg-{_time.time_ns() // 1_000_000:015d}.parquet"
@@ -61,8 +66,25 @@ def write_ticks(ticks: Iterable[Tick], lake_dir: Path | None = None) -> int:
         return 0
     for c in ("iv", "delta", "theta", "gamma", "vega", "rho"):   # stable type so equity-only and option segments union
         df[c] = df[c].astype("float32")
+    for c, dtype in EXT_COLUMNS.items():                         # extended stream fields: only when present in this batch
+        if df[c].notna().any():
+            df[c] = df[c].astype(dtype)
+        else:
+            df = df.drop(columns=c)
     for day, part in df.groupby(df["ts"].dt.date):
         _write_segment((lake_dir or LAKE_DIR) / "ticks" / f"date={day}", part)
+    return len(df)
+
+
+def write_events(events: Iterable[dict], lake_dir: Path | None = None) -> int:
+    """Session events (market_info changes: ts, kind, segment, status, updated) as segments, one folder per UTC day."""
+    df = pd.DataFrame(list(events))
+    if df.empty:
+        return 0
+    df["ts"] = pd.to_datetime(df["ts"])
+    df["updated"] = pd.to_datetime(df["updated"]) if "updated" in df else pd.NaT
+    for day, part in df.groupby(df["ts"].dt.date):
+        _write_segment((lake_dir or LAKE_DIR) / "events" / f"date={day}", part)
     return len(df)
 
 

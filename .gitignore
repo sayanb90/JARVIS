@@ -16,3 +16,6 @@ data/fo_universe.csv
 data/NSE.json*
 data/universe.local.csv
 data/universe_history/
+
+# Upstox probe output (SCRUM-99): collected data, samples and reports
+probe_data/

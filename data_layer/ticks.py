@@ -37,6 +37,19 @@ class Tick:
     gamma: Optional[float] = None
     vega: Optional[float] = None
     rho: Optional[float] = None
+    # extended stream fields: filled only when the feed runs with ext fields on (SCRUM-99 probe, SCRUM-100); a column
+    # that is empty in a batch is not written, so output is unchanged while the mode is off
+    ltq: Optional[int] = None           # last traded quantity
+    atp: Optional[float] = None         # average traded price of the day
+    tbq: Optional[int] = None           # total buy quantity on the book
+    tsq: Optional[int] = None           # total sell quantity on the book
+    cp: Optional[float] = None          # previous close
+    iep: Optional[float] = None         # indicative equilibrium price (pre-open and closing auction)
+    ieq: Optional[int] = None           # indicative equilibrium quantity
+    iiq_total: Optional[int] = None     # total indicative imbalance quantity
+    iiq_market: Optional[int] = None    # imbalance from market orders
+    ref_price: Optional[float] = None   # reference price for price bands
+    cas_eligible: Optional[bool] = None
 
 
 @dataclass(slots=True)
