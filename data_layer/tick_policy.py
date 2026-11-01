@@ -32,7 +32,7 @@ MODES = ("full", "throttle", "changes")
 GREEKS = ("all", "iv", "none")
 _LETTERS = {"c": "full", "b": "throttle", "a": "changes"}
 _GREEK_FIELDS = ("delta", "theta", "gamma", "vega", "rho")
-_MARKET_FIELDS = ("ltp", "vol_today", "bid", "bid_qty", "ask", "ask_qty", "oi")
+_MARKET_FIELDS = ("ltp", "vol_today", "bid", "bid_qty", "ask", "ask_qty", "oi", "ltq", "tbq", "tsq")
 
 
 @dataclass
