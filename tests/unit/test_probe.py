@@ -144,6 +144,13 @@ def test_probe_stream_collects_extended_ticks_events_and_reports_column_cost(tmp
     assert t["ext_share_pct"] > 0 and t["classes"]["equity"]["ext_bytes"] > 0 and t["classes"]["equity"]["scale_to_plan"] == 2.0
     assert t["classes"]["equity"]["gb_per_year"] > t["classes"]["equity"]["gb_per_year_without_ext"] > 0
     assert (tmp_path / "stream_eq" / "events").exists()
+    s.request_stop()                                                     # the loop is closed by now; stopping again must not raise
+
+
+def test_request_stop_before_the_stream_started_is_a_noop(tmp_path):
+    s = ProbeStream("stream_eq", {KEY: "A.NS"}, tmp_path, lambda: "TOK", start=datetime(2026, 10, 23, 3, 0), end=datetime(2026, 10, 23, 10, 0),
+                    guard=Guard(tmp_path, min_free_gb=0.0, max_gb=50.0, ttl=0))
+    s.request_stop()
 
 
 # ---------------------------------------------------------------------------------- disk guard

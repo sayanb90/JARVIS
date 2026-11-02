@@ -148,7 +148,10 @@ class ProbeStream:
 
     def request_stop(self) -> None:
         if self._loop and self._stop:
-            self._loop.call_soon_threadsafe(self._stop.set)
+            try:
+                self._loop.call_soon_threadsafe(self._stop.set)
+            except RuntimeError:                                         # the stream already finished and closed its loop
+                pass
 
     def join(self, timeout: float = 300.0) -> None:
         self._thread.join(timeout)
@@ -301,7 +304,10 @@ class ProbeRun:
             self.stop.wait(5.0)
         log.info("probe run: stopping streams")
         for s in self.streams.values():
-            s.request_stop()
+            try:
+                s.request_stop()
+            except Exception:                                            # noqa: BLE001 -- the final report matters more
+                log.exception("stopping stream %s failed", s.name)
         for s in self.streams.values():
             s.join()
         self.monitor.stop()
