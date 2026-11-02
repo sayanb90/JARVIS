@@ -81,6 +81,10 @@ CATALOG = [
     *[Table("fundamentals", n, n.replace("_", " ").capitalize(), f"FMP {n.replace('_', ' ')} (India).", "file", f"fundamentals/{n}.parquet",
             "date" if n in ("income_statement", "balance_sheet", "cash_flow", "ratios") else None)
       for n in ("income_statement", "balance_sheet", "cash_flow", "ratios", "pillar_metrics", "fund_meta")],
+    Table("fundamentals", "upstox_fundamentals", "Upstox fundamentals", "Every statement line, ratio, holding and corporate action Upstox returned, "
+          "with the day we first and last saw each value (a restated value is a new row).", "file", "upstox_fundamentals/versions.parquet"),
+    Table("fundamentals", "upstox_fundamentals_log", "Upstox fundamentals fetch log", "One row per call: company, endpoint, time, result and error code.",
+          "file", "upstox_fundamentals/fetch_log.parquet"),
 ]
 BY_KEY = {(t.service, t.name): t for t in CATALOG}
 
