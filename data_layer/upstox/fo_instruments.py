@@ -358,6 +358,63 @@ def fo_key_map(path: Path | None = None, day: date | None = None) -> dict[str, s
     return dict(zip(df["instrument_key"], df["symbol"]))
 
 
+# ---------------------------------------------------------------------------
+# Startup check for the F&O feed: the generated universe must match the tracked watchlist (SCRUM-106).  On 2026-11-02 a
+# stale data/fo_universe.csv held one expiry per index while the watchlist asked for more, and nothing noticed.
+def universe_generated(path: Path | None = None) -> date | None:
+    """The India date the universe file was last written (file modification time), or None if it does not exist."""
+    p = path or universe_path()
+    if not p.exists():
+        return None
+    return datetime.fromtimestamp(p.stat().st_mtime, tz=timezone(timedelta(hours=5, minutes=30))).date()
+
+
+def universe_summary(df: pd.DataFrame) -> list[str]:
+    """One line per underlying, expiry and contract type, then the total -- printed at feed startup."""
+    lines = []
+    for (under, exp, typ), g in df.groupby(["underlying", "expiry", "instrument_type"], sort=True):
+        lines.append(f"  {under:<10} {exp}  {typ:<3} {len(g):>5} contracts")
+    lines.append(f"  total {len(df)} contracts")
+    return lines
+
+
+def universe_problems(df: pd.DataFrame, watchlist: list[dict], day: date, generated: date | None = None) -> list[str]:
+    """What is wrong with the selected contracts compared with the watchlist; empty when they agree."""
+    problems = []
+    if generated is not None and generated < day:
+        problems.append(f"the universe file was last written on {generated}, not for {day}: run fo_instruments import and select")
+    for row in watchlist:
+        sub = df[df["underlying"] == row["underlying"]]
+        futs = sub[sub["instrument_type"] == "FUT"]["expiry"].nunique()
+        opts = sub[sub["instrument_type"] != "FUT"]["expiry"].nunique()
+        if futs < row["futures"]:
+            problems.append(f"{row['underlying']}: {futs} future expiries selected, the watchlist asks for {row['futures']}")
+        if not row["no_options"] and opts < row["option_expiries"]:
+            problems.append(f"{row['underlying']}: {opts} option expiries selected, the watchlist asks for {row['option_expiries']}")
+    return problems
+
+
+def check_universe(allow_stale: bool = False, universe: Path | None = None, watchlist: Path | None = None,
+                   day: date | None = None) -> pd.DataFrame:
+    """Read the universe, log what it holds and stop (SystemExit) when it does not match the watchlist.
+    `allow_stale` only logs the problems.  Returns the universe."""
+    day = day or ist_today()
+    df = read_universe(universe, day)
+    for line in universe_summary(df):
+        log.info("%s", line)
+    wl = watchlist or watchlist_path()
+    if not wl.exists():
+        log.warning("no watchlist at %s: universe not checked", wl)
+        return df
+    problems = universe_problems(df, read_watchlist(wl), day, universe_generated(universe))
+    if problems:
+        msg = "F&O universe does not match the watchlist: " + "; ".join(problems)
+        if not allow_stale:
+            raise SystemExit(msg + " (pass --allow-stale-universe to start anyway)")
+        log.error("%s -- continuing because --allow-stale-universe was given", msg)
+    return df
+
+
 def spot_from_lake(sel_table: pd.DataFrame, underlyings: list[str], day: date,
                    lake_dir: Path | None = None) -> dict[str, float]:
     """Last traded close of each underlying's nearest future in the lake's bars, if any were collected."""

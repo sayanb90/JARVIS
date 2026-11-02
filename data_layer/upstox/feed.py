@@ -65,8 +65,11 @@ class FeedProcessor:
     """Synchronous core: frame bytes in, raw ticks out.  The async runner only moves data."""
 
     def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None,
-                 books: BookStore | None = None) -> None:
+                 books: BookStore | None = None, ext: bool = False) -> None:
         self.key_map = key_map
+        self.ext = ext                                   # extended fields and session events (off in production for now)
+        self.events: list[dict] = []
+        self._event_state: dict[tuple, str] = {}
         self.books = books if books is not None else BookStore()   # live five-level books, memory only
         self.policy = policy or TickPolicy()             # default: keep every tick, every Greek
         self._ticks: list[Tick] = []
@@ -81,9 +84,15 @@ class FeedProcessor:
             if st != self.status:
                 log.info("market status: %s", st)
             self.status = st
+        if self.ext:
+            for e in decode.events_from_response(resp):
+                k = (e["kind"], e["segment"])
+                if self._event_state.get(k) != e["status"]:       # record changes only
+                    self._event_state[k] = e["status"]
+                    self.events.append(e)
         for sym, ts, ltp, bids, asks in decode.books_from_response(resp, self.key_map):
             self.books.update(sym, ts, ltp, bids, asks)
-        for t in decode.ticks_from_response(resp, self.key_map):
+        for t in decode.ticks_from_response(resp, self.key_map, ext=self.ext):
             if t.ts.date() != now.date():                # last trade from an earlier day
                 self.dropped_stale += 1
                 continue
@@ -102,6 +111,10 @@ class FeedProcessor:
         ticks, self._ticks = self._ticks, []
         return ticks
 
+    def drain_events(self) -> list[dict]:
+        ev, self.events = self.events, []
+        return ev
+
 
 class UpstoxFeed:
     def __init__(self, token: str, key_map: dict[str, str], *, url: str = FEED_URL,
@@ -110,14 +123,14 @@ class UpstoxFeed:
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None,
                  token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None,
-                 books: BookStore | None = None) -> None:
+                 books: BookStore | None = None, ext: bool = False) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
         # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
         self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
-        self.proc = FeedProcessor(key_map, policy, books)
+        self.proc = FeedProcessor(key_map, policy, books, ext=ext)
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.clock = clock
         self.dump_left, self.dump_dir = dump_frames, dump_dir or Path("logs/frames")
@@ -126,6 +139,8 @@ class UpstoxFeed:
     # -- persistence -------------------------------------------------------
     def persist(self, final: bool = False) -> int:
         ticks = self.proc.drain()
+        if self.proc.ext:
+            tick_store.write_events(self.proc.drain_events(), self.lake_dir)
         return tick_store.write_ticks(ticks, self.lake_dir)
 
     # -- one connection ----------------------------------------------------
@@ -288,6 +303,33 @@ def current_token() -> str:
     return os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN", "")
 
 
+def start_sysmon(segment: str, env=None, logs_dir: Path | None = None, now: datetime | None = None):
+    """With JARVIS_SYSMON=1, log CPU, memory, swap, disk and per-process use to logs/resources-<segment>-<date>.jsonl
+    (every JARVIS_SYSMON_INTERVAL_S seconds, default 60).  Returns the running monitor, or None when off (SCRUM-109)."""
+    env = os.environ if env is None else env
+    if (env.get("JARVIS_SYSMON") or "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    from ..lake import LAKE_DIR, ROOT
+    from ..sysmon import ResourceMonitor
+    now = now or datetime.now(timezone.utc)
+    out = (logs_dir or ROOT / "logs") / f"resources-{segment}-{now:%Y%m%d}.jsonl"
+    mon = ResourceMonitor(out, float(env.get("JARVIS_SYSMON_INTERVAL_S") or 60), watch_paths=[LAKE_DIR, ROOT],
+                          patterns=("data_layer.upstox.feed", "webapp", "uvicorn"))
+    log.info("resource log: %s", out)
+    return mon.start()
+
+
+def stop_sysmon(mon) -> None:
+    """Stop a monitor from start_sysmon and log its peaks."""
+    if mon is None:
+        return
+    s = mon.stop()
+    pk = s.get("peaks", {})
+    log.info("resource summary: cpu avg %s%% peak %s%%, lowest available memory %s GB, swap peak %s GB, process rss peaks (MB) %s, "
+             "lowest free disk (GB) %s", s.get("cpu_avg_pct"), pk.get("cpu_pct"), pk.get("mem_available_min_gb"), pk.get("swap_used_gb"),
+             pk.get("process_rss_mb"), pk.get("disk_free_min_gb"))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Upstox v3 live feed collector (India)")
     ap.add_argument("--once", action="store_true", help="run one session now instead of daemon mode")
@@ -296,6 +338,9 @@ def main() -> None:
                     help="eq: the NSE equity universe; fo: the futures and options chosen by fo_instruments select")
     ap.add_argument("--fo-file", default=None, help="contract list for --segment fo (default data/fo_universe.csv)")
     ap.add_argument("--limit", type=int, default=None, help="subscribe only the first N universe symbols")
+    ap.add_argument("--allow-stale-universe", action="store_true",
+                    help="start the fo feed even when data/fo_universe.csv is not from today or has fewer expiries than "
+                         "data/fo_watchlist.csv asks for (development only)")
     ap.add_argument("--dump-frames", type=int, default=0, metavar="N",
                     help="save the first N raw binary frames to logs/frames/ (test fixtures, market data only)")
     ap.add_argument("--url", default=FEED_URL)
@@ -305,6 +350,9 @@ def main() -> None:
     ap.add_argument("--tick-min-interval", type=float, default=None, metavar="S", help="seconds for --tick-store throttle")
     ap.add_argument("--greeks", choices=tick_policy.GREEKS, default=None, help="option Greeks to keep (default all)")
     ap.add_argument("--greeks-decimals", type=int, default=None, metavar="N", help="round the Greeks to N digits")
+    ap.add_argument("--ext-fields", action="store_true", default=None,
+                    help="also store trade size, average price, book totals, previous close, auction fields and session "
+                         "events (default off; or JARVIS_EXT_FIELDS=1)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv(ENV_FILE)
@@ -323,6 +371,9 @@ def main() -> None:
         km = segment_key_map(a.segment, a.fo_file)
         return dict(list(km.items())[: a.limit]) if a.limit else km
 
+    if a.segment == "fo" and not a.fo_file:
+        from .fo_instruments import check_universe
+        check_universe(allow_stale=a.allow_stale_universe)
     key_map = keys()
     if not key_map:
         raise SystemExit("no instruments to subscribe: " + ("run fo_instruments import and select" if a.segment == "fo"
@@ -341,14 +392,17 @@ def main() -> None:
             log.info("subscription list changed: %d -> %d instruments", len(key_map), len(fresh))
             key_map = fresh
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
-                          token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books)
+                          token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books,
+                          ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"))
     books = BookStore()
 
     async def runner() -> None:
         server = await serve_books(books, port_for(a.segment))
+        mon = start_sysmon(a.segment)
         try:
             await run_forever(make, once=a.once)
         finally:
+            stop_sysmon(mon)
             if server is not None:
                 server.close()
     asyncio.run(runner())

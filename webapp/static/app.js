@@ -698,7 +698,12 @@ async function loadGreeks() {
       $('fo-greeks-note').textContent = 'No Greeks were stored for this option on this day. They are collected from the day the feed first ran with Greeks storage on (JARVIS_GREEKS), so earlier days have none.';
       setStatus(`${sym} · ${state.day} · no Greeks stored`); return;
     }
-    $('fo-greeks-note').textContent = 'Values are the last reading in each bar, as delivered by the exchange feed (not recomputed here).';
+    const comp = d.computed || [];
+    $('fo-greeks-note').textContent = comp.length
+      ? `Values are the last reading in each bar. IV, delta and gamma are as delivered by the exchange feed; ${comp.join(', ')} ${comp.length > 1 ? 'are' : 'is'} computed here from IV and the underlying future's price (Black-Scholes, expiry 15:30 IST).`
+      : (['theta', 'vega', 'rho'].every((k) => d.series[k].every((v) => v == null))
+        ? 'IV, delta and gamma are as delivered by the exchange feed. Theta, vega and rho were not stored for this day and the underlying future has no bars to compute them from.'
+        : 'Values are the last reading in each bar, as delivered by the exchange feed (not recomputed here).');
     renderGreeks(d);
     setStatus(`${sym} · ${state.day} · ${fmtInt(d.series.ts.length)} bars of ${WIDTH_LABEL[d.width]} · times in IST`);
   } catch (e) { if (id === gkReq) fail(e); }
@@ -709,7 +714,7 @@ function renderGreeks(d) {
                 ['theta', 'Theta', T.down, '', ',.2f'], ['vega', 'Vega', T.yellow, '', ',.2f'], ['rho', 'Rho', T.orange, '', ',.2f']];
   const last = (a) => { for (let i = a.length - 1; i >= 0; i--) if (a[i] != null) return a[i]; return null; };
   renderKpis('fo-greeks-cards', [['IV', fmt(last(s.iv), 1) + '%', 'implied volatility'], ['Delta', fmt(last(s.delta), 3), ''], ['Gamma', fmt(last(s.gamma), 5), ''],
-    ['Theta', fmt(last(s.theta), 2), 'per day'], ['Vega', fmt(last(s.vega), 2), 'per vol point'], ['Rho', fmt(last(s.rho), 2), 'per rate point']]);
+    ['Theta', fmt(last(s.theta), 2), 'per day' + ((d.computed || []).includes('theta') ? ' · computed' : '')], ['Vega', fmt(last(s.vega), 2), 'per vol point' + ((d.computed || []).includes('vega') ? ' · computed' : '')], ['Rho', fmt(last(s.rho), 2), 'per rate point' + ((d.computed || []).includes('rho') ? ' · computed' : '')]]);
   const ids = [];
   defs.forEach(([k, name, color, suffix, tf]) => {
     const id = 'gk-' + k;
