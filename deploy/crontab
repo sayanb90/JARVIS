@@ -33,3 +33,9 @@ JARVIS=/home/jarvis/JARVIS
 # session closes and is compacted, so cron runs it fresh every weekday -- this is how the roll above
 # takes effect, since a long-lived process would keep the contract list it started with (section 17.6).
 40 3 * * 1-5   cd $JARVIS && python -m data_layer.upstox.feed --once --segment fo >> logs/fo-feed.log 2>&1
+
+# Upstox company fundamentals (SCRUM-103).  Key ratios are today's value only, so a daily snapshot builds their history.
+# Statements, shareholding, corporate actions, profile and peers: a weekly pass (Sunday 13:00 UTC, outside the feed window) that skips companies fetched in the last
+# 20 days (about monthly; a full pass over 500 companies is roughly 90 minutes at the Upstox rate limit).
+50 12 * * 1-5  cd $JARVIS && python -m data_layer.upstox.fundamentals run --set daily >> logs/fundamentals.log 2>&1
+0 13 * * 0     cd $JARVIS && python -m data_layer.upstox.fundamentals run --set full --max-age-days 20 >> logs/fundamentals.log 2>&1
