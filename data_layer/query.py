@@ -311,21 +311,23 @@ class Lake:
                          for g in self.GREEKS)
 
     def _underlying_price(self, day: str, symbol: str, ts: pd.Series, width_s: int) -> pd.Series | None:
-        """Price of the nearest live future of this option's underlying at each time in `ts` (sorted ascending): the last
-        bar at or before it.  None when the symbol is not an option or that future has no bars on the day."""
-        from .greeks_calc import parse_future, parse_option
+        """Spot implied by the nearest live future of this option's underlying at each time in `ts` (sorted ascending):
+        the last bar at or before it, less the future's carry (greeks_calc.spot_from_future).  None when the symbol is not
+        an option or that future has no bars on the day."""
+        from .greeks_calc import parse_future, parse_option, spot_from_future
         meta = parse_option(symbol)
         if meta is None:
             return None
         today = datetime.strptime(day, "%Y-%m-%d").date()
         cands = sorted((f[1], sym) for sym in self.fo_symbols() if (f := parse_future(sym)) and f[0] == meta[0] and f[1] >= today)
-        for _, sym in cands:
+        for fexp, sym in cands:
             bars = self.day_bars(day, sym, "1s", width_s)
             if bars.empty:
                 continue
             bars = bars[["ts", "close"]].dropna().sort_values("ts")
-            merged = pd.merge_asof(pd.DataFrame({"ts": pd.to_datetime(ts).to_numpy()}), bars, on="ts", direction="backward")
-            return merged["close"]
+            left = pd.DataFrame({"ts": pd.to_datetime(ts).to_numpy()})
+            merged = pd.merge_asof(left, bars, on="ts", direction="backward")
+            return pd.Series(spot_from_future(merged["close"], left["ts"], fexp), index=merged.index)
         return None
 
     def _with_computed(self, df: pd.DataFrame, day: str, symbol: str, width_s: int) -> pd.DataFrame:

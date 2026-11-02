@@ -56,15 +56,16 @@ def test_add_computed_fills_only_the_missing_greeks():
 
 
 # ---------------------------------------------------------------------------------- calibration
-def write_day(tmp_path, scale_theta=1.0, rate=0.065):
+def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0):
     """A fake all-Greeks day: Upstox-style values (per day, per vol point, per 1%) from a known rate."""
     rows = []
     start = pd.Timestamp("2026-11-02 04:00")
     rows.append({"ts": start - pd.Timedelta(minutes=1), "symbol": "NIFTY_FUT_24_NOV_26", "ltp": 25000.0})
     for i in range(20):
         ts = start + pd.Timedelta(minutes=10 * i)
-        under = 25000.0 + 5 * i
-        rows.append({"ts": ts - pd.Timedelta(seconds=1), "symbol": "NIFTY_FUT_24_NOV_26", "ltp": under})
+        fut = 25000.0 + 5 * i
+        under = fut * float(np.exp(-carry * gc.years_to_expiry([ts], date(2026, 11, 24))[0]))      # what Upstox prices off
+        rows.append({"ts": ts - pd.Timedelta(seconds=1), "symbol": "NIFTY_FUT_24_NOV_26", "ltp": fut})
         for k in range(24500, 25501, 100):
             for kind in ("CE", "PE"):
                 iv = 14.0 + (k - 25000) / 400.0
@@ -80,11 +81,18 @@ def write_day(tmp_path, scale_theta=1.0, rate=0.065):
 
 def test_calibration_recovers_the_rate_and_units_and_passes(tmp_path, capsys):
     res = gc.calibrate(write_day(tmp_path))
-    assert res["ok"] and res["rate"] == 0.065
+    assert res["ok"] and res["rate"] == 0.065 and res["carry"] == 0.0
+    assert "JARVIS_GREEKS_CARRY=0" in gc.render(res)
     assert {g: res["greeks"][g]["unit"] for g in ("theta", "vega", "rho")} == {"theta": "per day", "vega": "per vol point", "rho": "per 1%"}
     assert all(res["greeks"][g]["median_rel_error"] < 0.001 for g in ("delta", "gamma", "theta", "vega"))
     assert "PASS" in gc.render(res)
     assert gc.main(["calibrate", "--stream", str(tmp_path)]) == 0 and "PASS" in capsys.readouterr().out
+
+
+def test_calibration_recovers_the_future_carry(tmp_path):
+    res = gc.calibrate(write_day(tmp_path, carry=0.05))
+    assert res["ok"] and res["carry"] == 0.05 and res["rate"] == 0.065
+    assert "JARVIS_GREEKS_CARRY=0.05" in gc.render(res)
 
 
 def test_calibration_fails_when_a_greek_does_not_match(tmp_path, capsys):
@@ -128,7 +136,8 @@ def core_day(world, with_future=True):
     return Lake(world.lakedir), opt, ticks
 
 
-def test_viewer_computes_theta_vega_rho_when_only_core_greeks_were_stored(world):
+def test_viewer_computes_theta_vega_rho_when_only_core_greeks_were_stored(world, monkeypatch):
+    monkeypatch.setenv("JARVIS_GREEKS_CARRY", "0")                                       # the synthetic day prices off the future itself
     lake, opt, ticks = core_day(world)
     assert all(t.theta is None and t.vega is None and t.rho is None for t in ticks if t.symbol == opt)       # not stored
     df = lake.greeks_series("2026-11-02", opt, 60)
@@ -144,6 +153,16 @@ def test_viewer_leaves_greeks_empty_when_the_future_has_no_bars(world):
     lake, opt, _ = core_day(world, with_future=False)
     df = lake.greeks_series("2026-11-02", opt, 60)
     assert df.attrs["computed"] == [] and df["theta"].isna().all() and df["iv"].notna().all()
+
+
+def test_the_future_carry_lowers_the_spot_and_the_setting_is_read_from_the_environment(monkeypatch):
+    ts = [datetime(2026, 11, 2, 5, 0)]
+    monkeypatch.setenv("JARVIS_GREEKS_CARRY", "0.05")
+    spot = gc.spot_from_future([25000.0], ts, date(2026, 11, 24))
+    assert spot[0] == pytest.approx(25000.0 * np.exp(-0.05 * gc.years_to_expiry(ts, date(2026, 11, 24))[0]))
+    assert gc.carry() == 0.05 and gc.spot_from_future([25000.0], ts, date(2026, 11, 24), 0.0)[0] == 25000.0
+    monkeypatch.setenv("JARVIS_GREEKS_CARRY", "nonsense")
+    assert gc.carry() == gc.DEFAULT_CARRY
 
 
 def test_api_marks_which_greeks_were_computed(world):

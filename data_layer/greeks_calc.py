@@ -12,14 +12,17 @@ prints the median and 95th-percentile relative error of the best setting for eac
 gamma, theta or vega are off by more than the tolerance (default 2%).  If it fails, keep JARVIS_GREEKS=all.
 
 Conventions (what the webapp shows): IV in percent, theta per calendar day, vega per volatility point, rho per 1% of rate,
-expiry at 15:30 IST, underlying = price of the nearest future, continuous compounding, no dividend.
+expiry at 15:30 IST, continuous compounding, no dividend.  The underlying is the spot implied by the nearest future,
+spot = future * exp(-carry * time to the future's expiry), because a weekly option's moneyness is sensitive to the monthly
+future's carry.  The rate and the carry come from JARVIS_GREEKS_RATE and JARVIS_GREEKS_CARRY (environment or .env) when set,
+otherwise the defaults above; `calibrate` prints the values that fit Upstox's own numbers best.
 """
 
 from __future__ import annotations
 
 import argparse
-import itertools
 import math
+import os
 import re
 import sys
 from datetime import date, datetime, timedelta
@@ -31,6 +34,7 @@ import numpy as np
 import pandas as pd
 
 DEFAULT_RATE = 0.065                       # annual, continuously compounded; confirmed or replaced by `calibrate`
+DEFAULT_CARRY = 0.065                      # spot = future price * exp(-carry * years to the future's expiry); `calibrate` fits it
 EXPIRY_UTC = timedelta(hours=10)           # 15:30 IST
 YEAR_S = 365.0 * 86400.0
 MIN_T = 1e-6                               # years; keeps the formulas finite in the last seconds before expiry
@@ -48,6 +52,35 @@ def _ncdf(x) -> np.ndarray:
 def _npdf(x) -> np.ndarray:
     x = np.asarray(x, dtype=float)
     return np.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _setting(name: str, default: float) -> float:
+    v = os.environ.get(name)
+    if not v:
+        try:
+            from dotenv import dotenv_values
+            from .lake import ENV_FILE
+            v = dotenv_values(ENV_FILE).get(name)
+        except Exception:                                                     # noqa: BLE001 -- settings are optional
+            v = None
+    try:
+        return float(v) if v else default
+    except ValueError:
+        return default
+
+
+def rate() -> float:
+    return _setting("JARVIS_GREEKS_RATE", DEFAULT_RATE)
+
+
+def carry() -> float:
+    return _setting("JARVIS_GREEKS_CARRY", DEFAULT_CARRY)
+
+
+def spot_from_future(price, ts, fut_expiry: date, carry_rate: Optional[float] = None) -> np.ndarray:
+    """The spot implied by a future's price: price * exp(-carry * years to the future's expiry)."""
+    c = carry() if carry_rate is None else carry_rate
+    return np.asarray(price, dtype=float) * np.exp(-c * years_to_expiry(ts, fut_expiry))
 
 
 def parse_option(symbol: str) -> Optional[tuple[str, float, str, date]]:
@@ -112,10 +145,10 @@ def to_display(raw: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {g: v / DISPLAY[g] for g, v in raw.items()}
 
 
-def add_computed(df: pd.DataFrame, symbol: str, under: pd.Series, rate: float = DEFAULT_RATE) -> pd.DataFrame:
+def add_computed(df: pd.DataFrame, symbol: str, under: pd.Series, rate_: Optional[float] = None) -> pd.DataFrame:
     """
     Fill theta, vega and rho (and any other Greek that is entirely missing) in a Greeks series of one option.
-    `df` has ts, iv, delta, gamma, theta, vega, rho; `under` is the underlying price aligned to df's rows.  Values
+    `df` has ts, iv, delta, gamma, theta, vega, rho; `under` is the spot aligned to df's rows (see spot_from_future).  Values
     Upstox delivered are never overwritten.  Returns a copy with a `computed` list attribute in df.attrs.
     """
     out = df.copy()
@@ -126,7 +159,7 @@ def add_computed(df: pd.DataFrame, symbol: str, under: pd.Series, rate: float = 
         return out
     _, strike, kind, expiry = meta
     t = years_to_expiry(out["ts"], expiry)
-    raw = bs_greeks(kind == "CE", under.to_numpy(dtype=float), strike, t, out["iv"].to_numpy(dtype=float), rate)
+    raw = bs_greeks(kind == "CE", under.to_numpy(dtype=float), strike, t, out["iv"].to_numpy(dtype=float), rate() if rate_ is None else rate_)
     disp = to_display(raw)
     for g in ("delta", "gamma", "theta", "vega", "rho"):
         if g not in out.columns or out[g].isna().all():
@@ -168,14 +201,15 @@ def _prepare(opts: pd.DataFrame, futs: pd.DataFrame, near: float) -> pd.DataFram
     opts["call"], opts["exp"] = [m[2] == "CE" for m in meta], [m[3] for m in meta]
     fm = futs["symbol"].map(parse_future)
     futs = futs[fm.notna()].copy()
-    futs["u"] = [m[0] for m in fm[fm.notna()]]
-    futs = futs.sort_values("ts")[["ts", "u", "ltp"]].rename(columns={"ltp": "under"})
-    joined = pd.merge_asof(opts.sort_values("ts"), futs, on="ts", by="u", direction="backward").dropna(subset=["under"])
-    joined = joined[(joined["k"] / joined["under"] - 1.0).abs() <= near]
-    t = np.empty(len(joined))
-    for exp, idx in joined.groupby("exp").indices.items():
-        t[idx] = years_to_expiry(joined["ts"].iloc[idx], exp)
-    joined["t"] = t
+    futs["u"], futs["fexp"] = [m[0] for m in fm[fm.notna()]], [m[1] for m in fm[fm.notna()]]
+    futs = futs.sort_values("ts")[["ts", "u", "ltp", "fexp"]].rename(columns={"ltp": "fut"})
+    joined = pd.merge_asof(opts.sort_values("ts"), futs, on="ts", by="u", direction="backward").dropna(subset=["fut"])
+    joined = joined[(joined["k"] / joined["fut"] - 1.0).abs() <= near].reset_index(drop=True)
+    t, tf = np.empty(len(joined)), np.empty(len(joined))
+    for col, out in (("exp", t), ("fexp", tf)):
+        for e, idx in joined.groupby(col).indices.items():
+            out[idx] = years_to_expiry(joined["ts"].iloc[idx], e)
+    joined["t"], joined["tf"] = t, tf
     return joined[joined["t"] > 5.0 / 365.0 / 24.0 / 12.0].reset_index(drop=True)      # skip the last few minutes before expiry
 
 
@@ -191,20 +225,22 @@ def _errors(calc: np.ndarray, ref: np.ndarray) -> tuple[float, float, int]:
     return float(np.median(rel)), float(np.percentile(rel, 95)), int(big.sum())
 
 
-def calibrate(stream: Path, max_rows: int = 200_000, near: float = 0.05, tolerance: float = 0.02,
-              rates: tuple = (0.0, 0.05, 0.06, 0.065, 0.07, 0.08)) -> dict:
-    """Best (rate, units) per Greek against Upstox's own values.  Returns a dict with `ok`, `rate`, `greeks` and `rows`."""
+def calibrate(stream: Path, max_rows: int = 100_000, near: float = 0.05, tolerance: float = 0.02,
+              rates: tuple = (0.0, 0.05, 0.065, 0.08), carries: tuple = (0.0, 0.02, 0.04, 0.05, 0.06, 0.065, 0.07, 0.08, 0.1)) -> dict:
+    """Best (rate, carry, units) per Greek against Upstox's own values.  Returns a dict with `ok`, `rate`, `carry`, `greeks`, `rows`."""
     opts, futs = _read_rows(stream, max_rows)
     d = _prepare(opts, futs, near)
     if d.empty:
         raise SystemExit("no near-the-money option rows with a matching future price; check --stream and --near")
     best = None
-    for rate in rates:
-        raw = bs_greeks(d["call"].to_numpy(), d["under"].to_numpy(), d["k"].to_numpy(), d["t"].to_numpy(), d["iv"].to_numpy(), rate)
-        err = _errors(raw["delta"], d["delta"].to_numpy())[0] + _errors(raw["gamma"], d["gamma"].to_numpy())[0]
-        if best is None or err < best[0]:
-            best = (err, rate, raw)
-    _, rate, raw = best
+    for c in carries:
+        under = d["fut"].to_numpy() * np.exp(-c * d["tf"].to_numpy())
+        for r in rates:
+            raw = bs_greeks(d["call"].to_numpy(), under, d["k"].to_numpy(), d["t"].to_numpy(), d["iv"].to_numpy(), r)
+            err = _errors(raw["delta"], d["delta"].to_numpy())[0] + _errors(raw["gamma"], d["gamma"].to_numpy())[0]
+            if best is None or err < best[0]:
+                best = (err, r, c, raw)
+    _, rate, carry_, raw = best
     greeks = {}
     for g in ("delta", "gamma", "theta", "vega", "rho"):
         choices = [(1.0, "as is")] if g in ("delta", "gamma") else [
@@ -218,16 +254,18 @@ def calibrate(stream: Path, max_rows: int = 200_000, near: float = 0.05, toleran
         greeks[g] = {"median_rel_error": med, "p95_rel_error": p95, "rows": n, "unit": label, "scale": scale}
     judged = ("delta", "gamma", "theta", "vega")
     ok = all(greeks[g]["median_rel_error"] <= tolerance for g in judged)
-    return {"ok": ok, "rate": rate, "tolerance": tolerance, "greeks": greeks, "rows": len(d), "total_rows": opts.attrs["total_rows"]}
+    return {"ok": ok, "rate": rate, "carry": carry_, "tolerance": tolerance, "greeks": greeks, "rows": len(d),
+            "total_rows": opts.attrs["total_rows"]}
 
 
 def render(res: dict) -> str:
-    lines = [f"Calibration on {res['rows']:,} near-the-money rows (sampled from {res['total_rows']:,}); best rate {res['rate']:.3f}",
+    lines = [f"Calibration on {res['rows']:,} near-the-money rows (sampled from {res['total_rows']:,}); best rate {res['rate']:.3f}, future carry {res['carry']:.3f}",
              f"{'greek':<7}{'median error':>14}{'95th pct':>11}{'rows':>9}  unit that matched"]
     for g, r in res["greeks"].items():
         lines.append(f"{g:<7}{r['median_rel_error'] * 100:>13.2f}%{r['p95_rel_error'] * 100:>10.2f}%{r['rows']:>9,}  {r['unit']}")
     lines.append(f"\n{'PASS' if res['ok'] else 'FAIL'}: delta, gamma, theta and vega must each be within {res['tolerance'] * 100:.0f}% (median)."
-                 + ("" if res["ok"] else "  Keep JARVIS_GREEKS=all until this passes."))
+                 + (f"\nSet in .env: JARVIS_GREEKS_RATE={res['rate']:g}  JARVIS_GREEKS_CARRY={res['carry']:g}" if res["ok"]
+                    else "  Keep JARVIS_GREEKS=all until this passes."))
     return "\n".join(lines)
 
 
@@ -236,7 +274,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("calibrate", help="check theta, vega and rho (and delta, gamma) against a day that stored all six")
     c.add_argument("--stream", type=Path, required=True, help="directory holding ticks/ (for example probe_data/stream_fo) or the ticks folder itself")
-    c.add_argument("--max-rows", type=int, default=200_000)
+    c.add_argument("--max-rows", type=int, default=100_000)
     c.add_argument("--near", type=float, default=0.05, help="only strikes within this fraction of the future price")
     c.add_argument("--tolerance", type=float, default=0.02)
     a = ap.parse_args(argv)
