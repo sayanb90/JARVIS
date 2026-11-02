@@ -37,7 +37,7 @@ class Tick:
     gamma: Optional[float] = None
     vega: Optional[float] = None
     rho: Optional[float] = None
-    # extended stream fields: filled only when the feed runs with ext fields on (SCRUM-99 probe, SCRUM-100); a column
+    # extended stream fields: filled only when the feed runs with ext fields on (SCRUM-100); a column
     # that is empty in a batch is not written, so output is unchanged while the mode is off
     ltq: Optional[int] = None           # last traded quantity
     atp: Optional[float] = None         # average traded price of the day

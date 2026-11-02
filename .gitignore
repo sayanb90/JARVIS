@@ -17,5 +17,5 @@ data/NSE.json*
 data/universe.local.csv
 data/universe_history/
 
-# Upstox probe output (SCRUM-99): collected data, samples and reports
+# Output of the retired Phase 0 probe (SCRUM-99): kept on the VPS as the all-Greeks reference for SCRUM-108
 probe_data/

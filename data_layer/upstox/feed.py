@@ -303,6 +303,33 @@ def current_token() -> str:
     return os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN", "")
 
 
+def start_sysmon(segment: str, env=None, logs_dir: Path | None = None, now: datetime | None = None):
+    """With JARVIS_SYSMON=1, log CPU, memory, swap, disk and per-process use to logs/resources-<segment>-<date>.jsonl
+    (every JARVIS_SYSMON_INTERVAL_S seconds, default 60).  Returns the running monitor, or None when off (SCRUM-109)."""
+    env = os.environ if env is None else env
+    if (env.get("JARVIS_SYSMON") or "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    from ..lake import LAKE_DIR, ROOT
+    from ..sysmon import ResourceMonitor
+    now = now or datetime.now(timezone.utc)
+    out = (logs_dir or ROOT / "logs") / f"resources-{segment}-{now:%Y%m%d}.jsonl"
+    mon = ResourceMonitor(out, float(env.get("JARVIS_SYSMON_INTERVAL_S") or 60), watch_paths=[LAKE_DIR, ROOT],
+                          patterns=("data_layer.upstox.feed", "webapp", "uvicorn"))
+    log.info("resource log: %s", out)
+    return mon.start()
+
+
+def stop_sysmon(mon) -> None:
+    """Stop a monitor from start_sysmon and log its peaks."""
+    if mon is None:
+        return
+    s = mon.stop()
+    pk = s.get("peaks", {})
+    log.info("resource summary: cpu avg %s%% peak %s%%, lowest available memory %s GB, swap peak %s GB, process rss peaks (MB) %s, "
+             "lowest free disk (GB) %s", s.get("cpu_avg_pct"), pk.get("cpu_pct"), pk.get("mem_available_min_gb"), pk.get("swap_used_gb"),
+             pk.get("process_rss_mb"), pk.get("disk_free_min_gb"))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Upstox v3 live feed collector (India)")
     ap.add_argument("--once", action="store_true", help="run one session now instead of daemon mode")
@@ -311,6 +338,9 @@ def main() -> None:
                     help="eq: the NSE equity universe; fo: the futures and options chosen by fo_instruments select")
     ap.add_argument("--fo-file", default=None, help="contract list for --segment fo (default data/fo_universe.csv)")
     ap.add_argument("--limit", type=int, default=None, help="subscribe only the first N universe symbols")
+    ap.add_argument("--allow-stale-universe", action="store_true",
+                    help="start the fo feed even when data/fo_universe.csv is not from today or has fewer expiries than "
+                         "data/fo_watchlist.csv asks for (development only)")
     ap.add_argument("--dump-frames", type=int, default=0, metavar="N",
                     help="save the first N raw binary frames to logs/frames/ (test fixtures, market data only)")
     ap.add_argument("--url", default=FEED_URL)
@@ -341,6 +371,9 @@ def main() -> None:
         km = segment_key_map(a.segment, a.fo_file)
         return dict(list(km.items())[: a.limit]) if a.limit else km
 
+    if a.segment == "fo" and not a.fo_file:
+        from .fo_instruments import check_universe
+        check_universe(allow_stale=a.allow_stale_universe)
     key_map = keys()
     if not key_map:
         raise SystemExit("no instruments to subscribe: " + ("run fo_instruments import and select" if a.segment == "fo"
@@ -365,9 +398,11 @@ def main() -> None:
 
     async def runner() -> None:
         server = await serve_books(books, port_for(a.segment))
+        mon = start_sysmon(a.segment)
         try:
             await run_forever(make, once=a.once)
         finally:
+            stop_sysmon(mon)
             if server is not None:
                 server.close()
     asyncio.run(runner())

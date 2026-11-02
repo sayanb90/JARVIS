@@ -184,7 +184,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         for g in Lake.GREEKS:
             series[g] = [None if pd.isna(v) else round(float(v), 6) for v in df[g]]
         return JSONResponse(_json_safe({"symbol": symbol, "date": date, "width": width, "available": True,
-                                        "series": series}))
+                                        "series": series, "computed": list(df.attrs.get("computed", []))}))
 
     @app.get("/api/live_book")
     def live_book_api(symbol: str):

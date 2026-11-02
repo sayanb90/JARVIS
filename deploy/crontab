@@ -21,7 +21,13 @@ JARVIS=/home/jarvis/JARVIS
 30 11 * * 1-5  cd $JARVIS && python -m data_layer.health --after-close >> logs/health.log 2>&1
 
 # Futures and options (NSE_FO; runbook section 17): refresh the instrument master and roll the tracked
-# watchlist (data/fo_watchlist.csv) to today's nearest expiry before the session opens.
+# watchlist (data/fo_watchlist.csv: 1 future and 2 option expiries per index, all strikes) to today's nearest
+# expiries before the session opens.  The feed refuses to start if the universe file is not from today or has fewer
+# expiries than the watchlist asks for (--allow-stale-universe overrides it).
+# What is stored comes from .env, read by both the equity service and this job (production, from 2026-11-03):
+#   JARVIS_TICK_STORE=full  JARVIS_EXT_FIELDS=1  JARVIS_GREEKS=core  JARVIS_SYSMON=1
+# core keeps IV, delta and gamma; theta, vega and rho are computed by the viewer (data_layer/greeks_calc.py).
+# JARVIS_SYSMON=1 writes CPU, memory and disk samples to logs/resources-<segment>-<date>.jsonl.
 25 3 * * 1-5   cd $JARVIS && python -m data_layer.upstox.fo_instruments import --download >> logs/fo-select.log 2>&1 && python -m data_layer.upstox.fo_instruments select --watchlist data/fo_watchlist.csv >> logs/fo-select.log 2>&1
 # Run one full fo session (same 03:40 UTC start as the equity service). --once exits once that day's
 # session closes and is compacted, so cron runs it fresh every weekday -- this is how the roll above

@@ -169,3 +169,20 @@ def test_rest_does_not_retry_client_errors():
     c, sleeps = client(FakeResp(400, {"status": "error", "errors": [{"errorCode": "UDAPI1203", "message": "bad date"}]}))
     r = c.get("/x")
     assert r.status == 400 and r.attempts == 1 and sleeps == []
+
+
+# ---------------------------------------------------------------------------------- production feed resource log (SCRUM-109)
+def test_feed_starts_a_resource_log_only_when_enabled(tmp_path, caplog):
+    import time
+    from datetime import datetime
+    from data_layer.upstox import feed
+    assert feed.start_sysmon("fo", env={}, logs_dir=tmp_path) is None
+    feed.stop_sysmon(None)                                                   # stopping nothing is fine
+    mon = feed.start_sysmon("fo", env={"JARVIS_SYSMON": "1", "JARVIS_SYSMON_INTERVAL_S": "0.05"}, logs_dir=tmp_path,
+                            now=datetime(2026, 11, 3, 3, 40))
+    time.sleep(0.25)
+    with caplog.at_level("INFO"):
+        feed.stop_sysmon(mon)
+    out = tmp_path / "resources-fo-20261103.jsonl"
+    assert out.exists() and len(out.read_text().splitlines()) >= 2
+    assert "resource summary" in caplog.text

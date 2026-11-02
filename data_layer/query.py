@@ -14,6 +14,7 @@ Missing tables (e.g. no bars collected yet) simply do not exist as views.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -289,6 +290,7 @@ class Lake:
 
     # -- option Greeks (stored on raw ticks only; absent on days collected before they were stored) -------
     GREEKS = ("iv", "delta", "theta", "gamma", "vega", "rho")
+    CORE_GREEKS = ("iv", "delta", "gamma")        # what the production feed stores (JARVIS_GREEKS=core); theta, vega, rho are computed
 
     def _greek_source(self, day: str) -> str | None:
         """SQL source (a read_parquet expression) for the day's rows that carry Greeks, or None.  Reads the raw tick
@@ -299,7 +301,46 @@ class Lake:
             return None
         src = "read_parquet([" + ", ".join(f"'{f}'" for f in files) + "], union_by_name=true, hive_partitioning=false)"
         cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
-        return src if set(self.GREEKS) <= cols else None
+        return src if set(self.CORE_GREEKS) <= cols else None
+
+    def _greek_exprs(self, src: str) -> str:
+        """The last-value-per-group expression for each Greek; a Greek the files do not carry (theta, vega and rho under
+        JARVIS_GREEKS=core) is NULL here and computed afterwards."""
+        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        return ", ".join(f"arg_max({g}, ts) FILTER (WHERE {g} IS NOT NULL) AS {g}" if g in cols else f"CAST(NULL AS DOUBLE) AS {g}"
+                         for g in self.GREEKS)
+
+    def _underlying_price(self, day: str, symbol: str, ts: pd.Series, width_s: int) -> pd.Series | None:
+        """Price of the nearest live future of this option's underlying at each time in `ts` (sorted ascending): the last
+        bar at or before it.  None when the symbol is not an option or that future has no bars on the day."""
+        from .greeks_calc import parse_future, parse_option
+        meta = parse_option(symbol)
+        if meta is None:
+            return None
+        today = datetime.strptime(day, "%Y-%m-%d").date()
+        cands = sorted((f[1], sym) for sym in self.fo_symbols() if (f := parse_future(sym)) and f[0] == meta[0] and f[1] >= today)
+        for _, sym in cands:
+            bars = self.day_bars(day, sym, "1s", width_s)
+            if bars.empty:
+                continue
+            bars = bars[["ts", "close"]].dropna().sort_values("ts")
+            merged = pd.merge_asof(pd.DataFrame({"ts": pd.to_datetime(ts).to_numpy()}), bars, on="ts", direction="backward")
+            return merged["close"]
+        return None
+
+    def _with_computed(self, df: pd.DataFrame, day: str, symbol: str, width_s: int) -> pd.DataFrame:
+        """Fill the Greeks the feed did not store (theta, vega, rho under the core setting) from IV and the underlying."""
+        from .greeks_calc import add_computed
+        df.attrs["computed"] = []
+        if df.empty or not any(df[g].isna().all() for g in ("theta", "vega", "rho")):
+            return df
+        under = self._underlying_price(day, symbol, df["ts"], width_s)
+        if under is None:
+            return df
+        out = add_computed(df.sort_values("ts").reset_index(drop=True), symbol, under)
+        keep = [g for g in out.attrs.get("computed", []) if out[g].notna().any()]
+        out.attrs["computed"] = keep
+        return out
 
     def greeks_series(self, day: str, symbol: str, width_s: int = 1) -> pd.DataFrame:
         """IV, delta, theta, gamma, vega, rho of one option, last value per bar of `width_s` seconds (bars aligned
@@ -307,20 +348,21 @@ class Lake:
         src = self._greek_source(day)
         if src is None:
             return pd.DataFrame(columns=["ts", *self.GREEKS])
-        last = ", ".join(f"arg_max({g}, ts) FILTER (WHERE {g} IS NOT NULL) AS {g}" for g in self.GREEKS)
-        return self.con.execute(f"""
+        last = self._greek_exprs(src)
+        df = self.con.execute(f"""
             WITH t AS (SELECT * FROM {src} WHERE symbol = ?),
                  b AS (SELECT *, date_trunc('day', ts) + to_seconds(13500 + CAST(floor(
                               (epoch(ts - date_trunc('day', ts)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
                             ) AS bucket FROM t)
             SELECT bucket AS ts, {last} FROM b GROUP BY bucket ORDER BY bucket""", [symbol]).df()
+        return self._with_computed(df, day, symbol, width_s)
 
     def greeks_last(self, day: str, symbols: list[str]) -> dict[str, dict]:
         """{symbol: {iv, delta, ...}} -- the last non-null value of each Greek that day, for chain columns."""
         src = self._greek_source(day)
         if src is None or not symbols:
             return {}
-        last = ", ".join(f"arg_max({g}, ts) FILTER (WHERE {g} IS NOT NULL) AS {g}" for g in self.GREEKS)
+        last = self._greek_exprs(src)
         self.con.register("_g_wanted", pd.DataFrame({"symbol": symbols}))
         try:
             df = self.con.execute(f"""

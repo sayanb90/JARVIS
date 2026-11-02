@@ -6,14 +6,20 @@ What the live feed keeps of the ticks it receives -- one setting, chosen by conf
   changes   (option A)           a tick only when price, volume, quote or open interest differ from the last one kept
                                  (a tick that only carries new Greeks is dropped)
 
-Orthogonal to the mode, `greeks` says which option Greeks are kept (all | iv | none) and `decimals` rounds them
+Orthogonal to the mode, `greeks` says which option Greeks are kept and `decimals` rounds them
 (None keeps the float32 the feed delivers; fewer digits compress much better).
+
+  all    IV, delta, gamma, theta, vega, rho (the code default)
+  core   IV, delta, gamma -- production setting from 2026-11-03: theta, vega and rho are about 27% of an F&O tick file and
+         are recomputed from IV when needed (data_layer/greeks_calc.py; SCRUM-107, SCRUM-108)
+  iv     IV only
+  none   nothing
 
 Config (`.env` or the process environment; the command line of `python -m data_layer.upstox.feed` overrides it):
   JARVIS_TICK_STORE            full | throttle | changes      (also accepts the letters c | b | a)
   JARVIS_TICK_STORE_EQ / _FO   the same, for one segment only (wins over JARVIS_TICK_STORE)
   JARVIS_TICK_MIN_INTERVAL_S   seconds for `throttle`, default 1
-  JARVIS_GREEKS                all | iv | none, default all
+  JARVIS_GREEKS                all | core | iv | none, default all
   JARVIS_GREEKS_DECIMALS       digits to round the Greeks to, default: no rounding
 
 Changing it only affects ticks written from then on; stored days are never rewritten.
@@ -29,9 +35,10 @@ from typing import Mapping, Optional
 from .ticks import Tick
 
 MODES = ("full", "throttle", "changes")
-GREEKS = ("all", "iv", "none")
+GREEKS = ("all", "core", "iv", "none")
 _LETTERS = {"c": "full", "b": "throttle", "a": "changes"}
 _GREEK_FIELDS = ("delta", "theta", "gamma", "vega", "rho")
+_NOT_CORE = ("theta", "vega", "rho")           # recomputed from IV, so not stored under greeks=core
 _MARKET_FIELDS = ("ltp", "vol_today", "bid", "bid_qty", "ask", "ask_qty", "oi", "ltq", "tbq", "tsq")
 
 
@@ -86,7 +93,10 @@ class TickPolicy:
         return t
 
     def _shape_greeks(self, t: Tick) -> None:
-        if self.greeks != "all":
+        if self.greeks == "core":
+            for f in _NOT_CORE:
+                setattr(t, f, None)
+        elif self.greeks != "all":
             for f in _GREEK_FIELDS:
                 setattr(t, f, None)
             if self.greeks == "none":

@@ -338,3 +338,57 @@ def test_cli_select_with_no_underlying_and_no_watchlist_file_errors(world, tmp_p
     fo.main(["import", "--file", str(f)])
     with pytest.raises(SystemExit, match="not found"):
         fo.main(["select", "--day", "2026-10-23"])
+
+
+# -- production watchlist and the startup check (SCRUM-106) --------------------
+def test_tracked_watchlist_asks_for_one_future_and_two_option_expiries_per_index():
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    rows = {r["underlying"]: r for r in fo.read_watchlist(root / "data" / "fo_watchlist.csv")}
+    assert set(rows) == {"NIFTY", "BANKNIFTY"}
+    assert all(r["futures"] == 1 and r["option_expiries"] == 2 and r["strikes"] >= 10**6 and not r["no_options"] for r in rows.values())
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "data/fo_watchlist.csv"], cwd=root, capture_output=True)
+    assert tracked.returncode == 0                                       # the watchlist is in git, the generated universe is not
+
+
+def test_select_picks_exactly_the_watchlist_expiries(table):
+    wl = [{"underlying": "NIFTY", "futures": 1, "option_expiries": 2, "strikes": 10**6, "no_options": False}]
+    sel, _ = fo.select_from_watchlist(table, wl, DAY)
+    nifty = sel[sel.underlying == "NIFTY"]
+    assert nifty[nifty.instrument_type == "FUT"].expiry.nunique() == 1
+    assert nifty[nifty.instrument_type != "FUT"].expiry.nunique() == 2
+    assert fo.universe_problems(sel, wl, DAY) == []
+    assert any("3 future" in p or "asks for 3" in p for p in fo.universe_problems(sel, [{**wl[0], "futures": 3}], DAY))
+
+
+def test_universe_problems_name_a_stale_file_and_missing_expiries(table):
+    wl = [{"underlying": "NIFTY", "futures": 1, "option_expiries": 2, "strikes": 10**6, "no_options": False}]
+    one, _ = fo.select_from_watchlist(table, [{**wl[0], "option_expiries": 1}], DAY)
+    problems = fo.universe_problems(one, wl, DAY, generated=DAY - timedelta(days=1))
+    assert any("last written on" in p for p in problems)
+    assert any("NIFTY: 1 option expiries selected, the watchlist asks for 2" in p for p in problems)
+    assert fo.universe_problems(one, [{**wl[0], "no_options": True}], DAY, generated=DAY) == []     # futures only: options not required
+    summary = fo.universe_summary(one)
+    assert summary[-1] == f"  total {len(one)} contracts" and any("NIFTY" in line and "FUT" in line for line in summary)
+
+
+def test_check_universe_stops_on_a_mismatch_unless_allowed(world, tmp_path, caplog):
+    import os
+    import time
+    f = tmp_path / "m.json"
+    f.write_text(json.dumps(master_records()))
+    fo.main(["import", "--file", str(f)])
+    wl = world.data / "fo_watchlist.csv"
+    wl.write_text("underlying,futures,option_expiries,strikes,no_options\nNIFTY,1,1,all,false\n")
+    fo.main(["select", "--day", "2026-10-23"])
+    uni = fo.universe_path()
+    now = time.time()
+    os.utime(uni, (now, now))
+    assert len(fo.check_universe(day=date(2026, 10, 23))) > 0         # matches: starts
+    wl.write_text("underlying,futures,option_expiries,strikes,no_options\nNIFTY,1,2,all,false\n")
+    with pytest.raises(SystemExit, match="asks for 2"):
+        fo.check_universe(day=date(2026, 10, 23))
+    with caplog.at_level("ERROR"):
+        assert len(fo.check_universe(allow_stale=True, day=date(2026, 10, 23))) > 0
+    assert "continuing because --allow-stale-universe" in caplog.text

@@ -400,6 +400,35 @@ def test_changes_ignores_greeks_only_updates():
     assert p.dropped == 1 and p.kept == 3
 
 
+def test_core_greeks_keep_iv_delta_gamma_and_drop_theta_vega_rho():
+    t = TickPolicy(greeks="core").apply(_opt(0))
+    assert t.iv == 14.0 and t.delta is not None and t.gamma is not None
+    assert t.theta is None and t.vega is None and t.rho is None and t.bid == 99.9
+    assert TickPolicy().greeks == "all" and TickPolicy(greeks="core").describe() == "mode=full greeks=core"
+    assert policy_from_env("fo", {"JARVIS_GREEKS": "core"}).greeks == "core"
+
+
+def test_core_greeks_files_are_smaller_and_the_dropped_columns_cost_nothing(tmp_path):
+    import pyarrow.parquet as pq
+    rng = np.random.default_rng(7)
+    def day(policy, folder):
+        ticks = []
+        for i in range(3000):
+            t = _opt(i)
+            t.iv, t.delta, t.gamma = 14 + rng.normal(), rng.random(), rng.random() / 100
+            t.theta, t.vega, t.rho = -rng.random() * 5, rng.random() * 20, rng.random() * 8
+            ticks.append(policy.apply(t))
+        tick_store.write_ticks(ticks, tmp_path / folder)
+        tick_store.compact_ticks_day(ticks[0].ts.date(), tmp_path / folder)
+        return next((tmp_path / folder / "ticks").rglob("ticks.parquet"))
+    full, core = day(TickPolicy(greeks="all"), "all"), day(TickPolicy(greeks="core"), "core")
+    assert core.stat().st_size < 0.85 * full.stat().st_size
+    meta = pq.ParquetFile(core).metadata
+    sizes = {meta.row_group(0).column(i).path_in_schema: meta.row_group(0).column(i).total_compressed_size
+             for i in range(meta.num_columns)}
+    assert max(sizes["theta"], sizes["vega"], sizes["rho"]) < 1500 < sizes["delta"]       # null columns are almost free
+
+
 def test_greeks_selection_and_rounding():
     t = TickPolicy(greeks="iv", decimals=2).apply(_opt(0))
     assert t.iv == 14.0 and t.delta is t.theta is t.gamma is t.vega is t.rho is None
