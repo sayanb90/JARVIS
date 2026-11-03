@@ -132,13 +132,20 @@ def installed_crontab() -> Optional[str]:
     return r.stdout if r.returncode == 0 else None
 
 
-def service_state(name: str) -> str:
+def service_state(name: str, user_units: bool = True) -> str:
+    """systemd state of a unit.  Units installed for a user (systemctl --user) are found too; the answer then reads
+    "active (user)"."""
     out = _run(["systemctl", "is-active", name])
-    return "unknown (no systemctl)" if out is None else (out or "inactive")
+    if out is None:
+        return "unknown (no systemctl)"
+    if out == "active" or not user_units:
+        return out or "inactive"
+    user = _run(["systemctl", "--user", "is-active", name])
+    return "active (user)" if user == "active" else (out or "inactive")
 
 
 def cron_daemon_state() -> str:
-    states = [service_state(n) for n in ("cron", "crond")]
+    states = [service_state(n, user_units=False) for n in ("cron", "crond")]
     return "active" if "active" in states else ("unknown (no systemctl)" if all(s.startswith("unknown") for s in states) else "not running")
 
 

@@ -44,7 +44,7 @@ def test_symbol_parsing_and_time_to_expiry():
 
 def test_add_computed_fills_only_the_missing_greeks():
     ts = pd.date_range("2026-11-02 05:00", periods=3, freq="min")
-    df = pd.DataFrame({"ts": ts, "iv": [15.0, 15.5, 16.0], "delta": [0.5, 0.51, 0.52], "gamma": [0.001] * 3,
+    df = pd.DataFrame({"ts": ts, "iv": [0.15, 0.155, 0.16], "delta": [0.5, 0.51, 0.52], "gamma": [0.001] * 3,
                        "theta": np.nan, "vega": np.nan, "rho": np.nan})
     out = gc.add_computed(df, "NIFTY_25000_CE_03_NOV_26", pd.Series([25000.0, 25010.0, 25020.0]))
     assert out.attrs["computed"] == ["theta", "vega", "rho"]
@@ -56,8 +56,8 @@ def test_add_computed_fills_only_the_missing_greeks():
 
 
 # ---------------------------------------------------------------------------------- calibration
-def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0):
-    """A fake all-Greeks day: Upstox-style values (per day, per vol point, per 1%) from a known rate."""
+def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0, iv_percent=False):
+    """A fake all-Greeks day: Upstox-style values (IV as a fraction, theta per day, vega per vol point, rho per 1%) from a known rate."""
     rows = []
     start = pd.Timestamp("2026-11-02 04:00")
     rows.append({"ts": start - pd.Timedelta(minutes=1), "symbol": "NIFTY_FUT_24_NOV_26", "ltp": 25000.0})
@@ -71,8 +71,8 @@ def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0):
                 iv = 14.0 + (k - 25000) / 400.0
                 t = gc.years_to_expiry([ts], date(2026, 11, 3))[0]
                 g = gc.to_display(gc.bs_greeks(kind == "CE", under, k, t, iv, rate))
-                rows.append({"ts": ts, "symbol": f"NIFTY_{k}_{kind}_03_NOV_26", "ltp": 120.0, "iv": iv, "delta": g["delta"].item(),
-                             "gamma": g["gamma"].item(), "theta": g["theta"].item() * scale_theta, "vega": g["vega"].item(), "rho": g["rho"].item()})
+                rows.append({"ts": ts, "symbol": f"NIFTY_{k}_{kind}_03_NOV_26", "ltp": 120.0, "iv": iv if iv_percent else iv / 100.0, "delta": g["delta"].item(),
+                             "gamma": round(g["gamma"].item(), 4), "theta": g["theta"].item() * scale_theta, "vega": g["vega"].item(), "rho": g["rho"].item()})
     folder = tmp_path / "ticks" / "date=2026-11-02"
     folder.mkdir(parents=True)
     pd.DataFrame(rows).to_parquet(folder / "ticks.parquet")
@@ -81,12 +81,28 @@ def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0):
 
 def test_calibration_recovers_the_rate_and_units_and_passes(tmp_path, capsys):
     res = gc.calibrate(write_day(tmp_path))
-    assert res["ok"] and res["rate"] == 0.065 and res["carry"] == 0.0
-    assert "JARVIS_GREEKS_CARRY=0" in gc.render(res)
+    assert res["ok"] and res["rate"] == 0.065 and res["carry"] == 0.0 and res["iv_scale"] == 1.0
+    assert "JARVIS_GREEKS_CARRY=0" in gc.render(res) and "JARVIS_GREEKS_IV_SCALE=1" in gc.render(res) and "IV stored as a fraction" in gc.render(res)
+    assert res["stored"]["iv"]["max"] < 1.0 and res["stored"]["delta"]["distinct"] > 10
     assert {g: res["greeks"][g]["unit"] for g in ("theta", "vega", "rho")} == {"theta": "per day", "vega": "per vol point", "rho": "per 1%"}
-    assert all(res["greeks"][g]["median_rel_error"] < 0.001 for g in ("delta", "gamma", "theta", "vega"))
+    assert all(res["greeks"][g]["median_rel_error"] < 0.001 for g in ("delta", "theta", "vega"))
+    assert res["greeks"]["gamma"]["median_abs_error"] <= gc.GAMMA_ABS_TOLERANCE                   # gamma is stored with four decimals
+    assert "judged by absolute error" in gc.render(res)
     assert "PASS" in gc.render(res)
     assert gc.main(["calibrate", "--stream", str(tmp_path)]) == 0 and "PASS" in capsys.readouterr().out
+
+
+def test_calibration_finds_out_whether_iv_is_stored_as_a_fraction_or_a_percent(tmp_path):
+    frac = gc.calibrate(write_day(tmp_path / "frac"))
+    pct = gc.calibrate(write_day(tmp_path / "pct", iv_percent=True))
+    assert frac["ok"] and frac["iv_scale"] == 1.0 and pct["ok"] and pct["iv_scale"] == 0.01
+    assert "IV stored as a percent" in gc.render(pct) and "JARVIS_GREEKS_IV_SCALE=0.01" in gc.render(pct)
+
+
+def test_iv_helpers_and_the_setting(monkeypatch):
+    assert gc.iv_to_percent(0.15) == pytest.approx(15.0) and gc.iv_to_percent(15.0, scale=0.01) == pytest.approx(15.0)
+    monkeypatch.setenv("JARVIS_GREEKS_IV_SCALE", "0.01")
+    assert gc.iv_scale() == 0.01 and gc.iv_to_percent(15.0) == pytest.approx(15.0)
 
 
 def test_calibration_recovers_the_future_carry(tmp_path):
@@ -125,7 +141,7 @@ def core_day(world, with_future=True):
         ts = start + timedelta(seconds=i * 20)
         under = 25000.0 + i
         g = gc.to_display(gc.bs_greeks(True, under, 25000.0, gc.years_to_expiry([ts], date(2026, 11, 3))[0], 15.0, 0.065))
-        ticks.append(pol.apply(Tick(ts, opt, 120.0, 10, 119.9, 5, 120.1, 5, 1000, iv=15.0, delta=g["delta"].item(), theta=g["theta"].item(),
+        ticks.append(pol.apply(Tick(ts, opt, 120.0, 10, 119.9, 5, 120.1, 5, 1000, iv=0.15, delta=g["delta"].item(), theta=g["theta"].item(),
                                     gamma=g["gamma"].item(), vega=g["vega"].item(), rho=g["rho"].item())))
         if with_future:
             ticks.append(Tick(ts, fut, under, 10, under - 0.5, 5, under + 0.5, 5, 5000))
@@ -146,7 +162,8 @@ def test_viewer_computes_theta_vega_rho_when_only_core_greeks_were_stored(world,
     assert df["delta"].between(0.4, 0.8).all()                                         # delivered, not computed
     ref = gc.to_display(gc.bs_greeks(True, 25000.0 + 29, 25000.0, gc.years_to_expiry([datetime(2026, 11, 2, 4, 9, 40)], date(2026, 11, 3))[0], 15.0))
     assert df["theta"].iloc[-1] == pytest.approx(ref["theta"].item(), rel=0.02)         # the last bar is the 04:09:40 tick
-    assert lake.greeks_last("2026-11-02", [opt])[opt]["iv"] == 15.0
+    assert df["iv"].iloc[0] == pytest.approx(15.0, abs=1e-4)                           # stored 0.15, shown as a percent
+    assert lake.greeks_last("2026-11-02", [opt])[opt]["iv"] == pytest.approx(15.0, abs=1e-4)
 
 
 def test_viewer_leaves_greeks_empty_when_the_future_has_no_bars(world):

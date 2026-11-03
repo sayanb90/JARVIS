@@ -13,8 +13,12 @@ wins on (symbol, ts).  The Lake query views read segments and compacted files al
 
 from __future__ import annotations
 
+import argparse
 import os
+import shutil
+import sys
 import time as _time
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -22,6 +26,11 @@ from typing import Iterable
 
 import duckdb
 import pandas as pd
+
+try:                                                                    # POSIX only; see _folder_lock
+    import fcntl
+except ImportError:                                                     # pragma: no cover
+    fcntl = None
 
 from .lake import LAKE_DIR
 from .ticks import Bar, Tick
@@ -66,6 +75,12 @@ def write_ticks(ticks: Iterable[Tick], lake_dir: Path | None = None) -> int:
         return 0
     for c in ("iv", "delta", "theta", "gamma", "vega", "rho"):   # stable type so equity-only and option segments union
         df[c] = df[c].astype("float32")
+    df["ltp"] = df["ltp"].astype("float64")                      # None for a quote-only row; keep the type stable
+    for c in ("fts", "rts"):                                     # event time and arrival time: only when this batch has them
+        if df[c].notna().any():
+            df[c] = pd.to_datetime(df[c])
+        else:
+            df = df.drop(columns=c)
     for c, dtype in EXT_COLUMNS.items():                         # extended stream fields: only when present in this batch
         if df[c].notna().any():
             df[c] = df[c].astype(dtype)
@@ -88,29 +103,119 @@ def write_events(events: Iterable[dict], lake_dir: Path | None = None) -> int:
     return len(df)
 
 
+def order_expr(columns: list[str]) -> str:
+    """SQL ordering key from `columns`, most significant first: arrival time, then message time, then last-trade time, whichever the files
+    have.  A row tuple, not a coalesce: where arrival times are equal (a coarse or fixed clock) the next column decides, so ordering
+    never falls apart into ties."""
+    return columns[0] if len(columns) == 1 else "ROW(" + ", ".join(columns) + ")"
+
+
+@contextmanager
+def _folder_lock(folder: Path):
+    """An exclusive lock on one day's tick folder, held across processes (flock on a hidden file beside the folder, so the
+    day's folder holds nothing but data).  The
+    equity service and the F&O job both compact the same folder when they stop at 10:05 UTC; without this two
+    compactions could fail on each other's temporary file or merge the same rows twice (SCRUM-114)."""
+    if fcntl is None:                                                   # not Linux: no cross-process lock available
+        yield
+        return
+    with open(folder.parent / f".{folder.name}.compact.lock", "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
     """Merge a day's raw-tick segments into one ticks.parquet.  Returns row count.
 
     Unlike bars, a tick is a point event written exactly once (no repeated flushes of the same
     bucket to dedupe), so this only concatenates and sorts; it does not drop any row.
+
+    Safe to call from several processes at once: compactions take turns under a lock, each reads and deletes exactly
+    the files it listed under the lock (a segment written meanwhile is left for the next compaction, never merged
+    twice) and writes through its own temporary file.
     """
     folder = (lake_dir or LAKE_DIR) / "ticks" / f"date={day}"
-    files = sorted(folder.glob("*.parquet"))
-    if not files:
+    if not folder.is_dir():
         return 0
-    con = duckdb.connect()
-    tmp = folder / "ticks.parquet.tmp"
-    # hive_partitioning=false: the date=YYYY-MM-DD folder must not become a stored column; files compacted before
-    # this fix carry one, so it is dropped here too
-    src = f"read_parquet('{folder}/*.parquet', union_by_name=true, hive_partitioning=false)"
-    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
-    sel = "* EXCLUDE (date)" if "date" in cols else "*"
-    con.execute(f"COPY (SELECT {sel} FROM {src} ORDER BY symbol, ts) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)")
-    os.replace(tmp, folder / "ticks.parquet")
-    for f in files:
-        if f.name != "ticks.parquet":
-            f.unlink()
-    return con.execute(f"SELECT count(*) FROM read_parquet('{folder}/ticks.parquet')").fetchone()[0]
+    with _folder_lock(folder):
+        files = sorted(folder.glob("*.parquet"))
+        if not files:
+            return 0
+        con = duckdb.connect()
+        tmp = folder / f"ticks.parquet.{os.getpid()}.tmp"
+        try:
+            # hive_partitioning=false: the date=YYYY-MM-DD folder must not become a stored column; files compacted before
+            # this fix carry one, so it is dropped here too.  An explicit file list, not a glob, so a segment that appears
+            # after the listing is not read without also being deleted.
+            names = ", ".join("'" + str(f).replace("'", "''") + "'" for f in files)
+            src = f"read_parquet([{names}], union_by_name=true, hive_partitioning=false)"
+            cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+            sel = "* EXCLUDE (date)" if "date" in cols else "*"
+            order = order_expr([c for c in ("rts", "fts", "ts") if c in cols])         # arrival order when it is known
+            con.execute(f"COPY (SELECT {sel} FROM {src} ORDER BY symbol, {order}) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+            os.replace(tmp, folder / "ticks.parquet")
+        finally:
+            con.close()
+            tmp.unlink(missing_ok=True)
+        for f in files:
+            if f.name != "ticks.parquet":
+                f.unlink(missing_ok=True)
+        return duckdb.connect().execute(f"SELECT count(*) FROM read_parquet('{folder}/ticks.parquet')").fetchone()[0]
+
+
+def dedupe_ticks_day(day: date, lake_dir: Path | None = None, keep_backup: bool = True) -> tuple[int, int]:
+    """
+    Drop the rows that are identical in every column from a day's compacted ticks.parquet.  Returns (rows before, rows
+    after).  A maintenance tool, not part of any scheduled job: use it only for a day shown to hold rows doubled by
+    overlapping compactions (row counts above what the feeds logged).  Identical rows also occur naturally when the feed
+    repeats an unchanged snapshot, and this removes those as well, so do not run it as routine tidying.  The original stays
+    beside the file as ticks.pre-dedupe.bak (not a *.parquet, so no reader sees it) unless keep_backup is False.  Refuses
+    while segment files are present: compact first.
+    """
+    folder = (lake_dir or LAKE_DIR) / "ticks" / f"date={day}"
+    f = folder / "ticks.parquet"
+    if not f.exists():
+        return 0, 0
+    with _folder_lock(folder):
+        extra = [x.name for x in folder.glob("*.parquet") if x.name != "ticks.parquet"]
+        if extra:
+            raise RuntimeError(f"{len(extra)} segment files are still in {folder}; run compact first")
+        tmp = folder / f"ticks.parquet.dedupe.{os.getpid()}.tmp"
+        con = duckdb.connect()
+        try:
+            before = con.execute(f"SELECT count(*) FROM read_parquet('{f}')").fetchone()[0]
+            con.execute(f"COPY (SELECT DISTINCT * FROM read_parquet('{f}') ORDER BY symbol, ts) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+            after = con.execute(f"SELECT count(*) FROM read_parquet('{tmp}')").fetchone()[0]
+            if keep_backup:
+                shutil.copy2(f, folder / "ticks.pre-dedupe.bak")
+            os.replace(tmp, f)
+        finally:
+            con.close()
+            tmp.unlink(missing_ok=True)
+        return before, after
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Maintenance for a day's raw ticks")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name, text in (("compact", "merge the day's segment files into ticks.parquet"),
+                       ("dedupe", "remove rows identical in every column from the compacted day, only for a day shown to hold doubled rows (keeps a .bak copy)")):
+        c = sub.add_parser(name, help=text)
+        c.add_argument("day", type=date.fromisoformat)
+        c.add_argument("--lake", type=Path, default=None)
+        if name == "dedupe":
+            c.add_argument("--no-backup", action="store_true")
+    a = ap.parse_args(argv)
+    if a.cmd == "compact":
+        print(f"{a.day}: {compact_ticks_day(a.day, a.lake)} rows")
+    else:
+        before, after = dedupe_ticks_day(a.day, a.lake, keep_backup=not a.no_backup)
+        print(f"{a.day}: {before} rows before, {after} after, {before - after} duplicates removed")
+    return 0
+
 
 
 def compact_day(interval: str, day: date, lake_dir: Path | None = None) -> int:
@@ -133,3 +238,7 @@ def compact_day(interval: str, day: date, lake_dir: Path | None = None) -> int:
         if f.name != "bars.parquet":
             f.unlink()
     return con.execute(f"SELECT count(*) FROM read_parquet('{folder}/bars.parquet')").fetchone()[0]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

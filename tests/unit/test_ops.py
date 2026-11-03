@@ -287,6 +287,14 @@ def test_service_state_and_probe(healthy, capsys, monkeypatch):
     assert run_health(world, bk, probe=True).fails == 1
 
 
+def test_a_service_running_under_systemd_user_is_reported_active(healthy, capsys, monkeypatch):
+    world, bk = healthy
+    monkeypatch.setattr(health.shutil, "which", lambda x: "/bin/systemctl")
+    monkeypatch.setattr(health.subprocess, "run", lambda cmd, **k: type("R", (), {"stdout": ("active\n" if "--user" in cmd else "inactive\n")})())
+    r = run_health(world, bk)
+    assert "[PASS] systemd service jarvis-feed: active (user)" in capsys.readouterr().out and r.fails == 0
+
+
 def test_weekday_helpers():
     assert health.prev_weekday(date(2026, 10, 26)) == date(2026, 10, 23)           # Monday -> previous Friday
     assert health.last_weekday(date(2026, 10, 25)) == date(2026, 10, 23)           # Sunday -> Friday
@@ -378,3 +386,16 @@ def test_backup_cli_reads_the_destination_from_the_env_file(src, tmp_path, monke
     assert backup.main(["run"]) == 0
     assert backup.list_snapshots(tmp_path / "from-env") == [date.today().isoformat()]
     assert "$JARVIS" not in (REPO / "deploy/crontab").read_text().split("backup")[1].split("\n")[0]
+
+
+def test_rollout_script_is_valid_bash_and_guards_the_session():
+    import subprocess
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[2] / "deploy" / "rollout.sh"
+    assert subprocess.run(["bash", "-n", str(script)], capture_output=True).returncode == 0
+    text = script.read_text()
+    for part in ("git pull --ff-only", "data_layer.greeks_calc calibrate", "data_layer.envfile set", "JARVIS_GREEKS=core", "data_layer.cron_check",
+                 "data_layer.health --after-close", "data_layer.day_diag", "FORCE", "STOPPED"):
+        assert part in text, part
+    assert "rm " not in text and "git reset" not in text and "git push" not in text          # it changes no data and rewrites no history
+    assert script.stat().st_mode & 0o111                                                    # executable

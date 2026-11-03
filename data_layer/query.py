@@ -20,6 +20,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from . import tick_store
 from .lake import LAKE_DIR
 
 PE_MAX, ROIC_MIN, LT_DEBT_FCF_MAX, PFCF_MAX = 22.5, 0.09, 5.0, 20.0
@@ -71,34 +72,47 @@ class Lake:
         cumulative `vol_today` field (first tick of a symbol's day only sets the baseline, matching
         BarAggregator.add's semantics); bid/ask/bid_qty/ask_qty/oi are the last value seen in the bucket.
         """
-        exclude = ""
+        try:
+            cols = {r[0] for r in duckdb.connect().execute(f"DESCRIBE SELECT * FROM read_parquet('{pattern}', union_by_name=true)").fetchall()}
+        except Exception:                                            # noqa: BLE001 -- no readable file: behave as before
+            cols = {"ts"}
+        ev, od = Lake._time_exprs(cols)
+        conds = ["ltp IS NOT NULL"]                                  # a quote-only row (no trade yet today) makes no price bar
         if exclude_dates:
             date_list = ", ".join("DATE '{}'".format(d) for d in sorted(exclude_dates))
-            exclude = f"WHERE CAST(ts AS DATE) NOT IN ({date_list})"
+            conds.append(f"CAST({ev} AS DATE) NOT IN ({date_list})")
         return f"""(
-            WITH raw AS (SELECT * FROM read_parquet('{pattern}', union_by_name=true) {exclude}),
-                 t AS (SELECT *, lag(vol_today) OVER (PARTITION BY symbol, CAST(ts AS DATE) ORDER BY ts) AS prev_vol
+            WITH raw AS (SELECT *, {ev} AS _ev, {od} AS _ord FROM read_parquet('{pattern}', union_by_name=true) WHERE {' AND '.join(conds)}),
+                 t AS (SELECT *, lag(vol_today) OVER (PARTITION BY symbol, CAST(_ev AS DATE) ORDER BY _ord) AS prev_vol
                        FROM raw),
                  d AS (SELECT *, CASE WHEN prev_vol IS NULL OR vol_today < prev_vol THEN 0
                                        ELSE vol_today - prev_vol END AS vol
                        FROM t),
-                 b AS (SELECT *, date_trunc('day', ts) + to_seconds(13500 + CAST(floor(
-                             (epoch(ts - date_trunc('day', ts)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
+                 b AS (SELECT *, date_trunc('day', _ev) + to_seconds(13500 + CAST(floor(
+                             (epoch(_ev - date_trunc('day', _ev)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
                            ) AS bucket
                        FROM d)
             SELECT symbol, 'IN' AS market, bucket AS ts,
-                   arg_min(ltp, ts) AS open, max(ltp) AS high, min(ltp) AS low, arg_max(ltp, ts) AS close,
+                   arg_min(ltp, _ord) AS open, max(ltp) AS high, min(ltp) AS low, arg_max(ltp, _ord) AS close,
                    sum(vol)::BIGINT AS volume,
                    sum(ltp * vol) FILTER (WHERE vol > 0) / nullif(sum(vol) FILTER (WHERE vol > 0), 0) AS vwap,
                    count(*)::BIGINT AS n_ticks,
-                   arg_max(bid, ts) FILTER (WHERE bid IS NOT NULL) AS bid,
-                   arg_max(ask, ts) FILTER (WHERE ask IS NOT NULL) AS ask,
-                   arg_max(bid_qty, ts) FILTER (WHERE bid_qty IS NOT NULL) AS bid_qty,
-                   arg_max(ask_qty, ts) FILTER (WHERE ask_qty IS NOT NULL) AS ask_qty,
+                   arg_max(bid, _ord) FILTER (WHERE bid IS NOT NULL) AS bid,
+                   arg_max(ask, _ord) FILTER (WHERE ask IS NOT NULL) AS ask,
+                   arg_max(bid_qty, _ord) FILTER (WHERE bid_qty IS NOT NULL) AS bid_qty,
+                   arg_max(ask_qty, _ord) FILTER (WHERE ask_qty IS NOT NULL) AS ask_qty,
                    'live' AS src,
-                   arg_max(oi, ts) FILTER (WHERE oi IS NOT NULL) AS oi
+                   arg_max(oi, _ord) FILTER (WHERE oi IS NOT NULL) AS oi
             FROM b GROUP BY symbol, bucket
         )"""
+
+    @staticmethod
+    def _time_exprs(cols: set[str]) -> tuple[str, str]:
+        """(event time, arrival order) as SQL for files with these columns.  Event time is the message time `fts` when the files have it,
+        else the last-trade time `ts`; order is arrival time `rts`, else `fts`, else `ts`.  Files written before SCRUM-116 have neither
+        extra column and read exactly as before."""
+        ev = "coalesce(fts, ts)" if "fts" in cols else "ts"
+        return ev, tick_store.order_expr([c for c in ("rts", "fts", "ts") if c in cols])
 
     # -- generic ------------------------------------------------------------
     def sql(self, query: str, params: list | None = None) -> pd.DataFrame:
@@ -303,12 +317,14 @@ class Lake:
         cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         return src if set(self.CORE_GREEKS) <= cols else None
 
-    def _greek_exprs(self, src: str) -> str:
-        """The last-value-per-group expression for each Greek; a Greek the files do not carry (theta, vega and rho under
-        JARVIS_GREEKS=core) is NULL here and computed afterwards."""
+    def _greek_exprs(self, src: str) -> tuple[str, str, str]:
+        """(the last-value-per-group expression for each Greek, event time, arrival order).  A Greek the files do not carry (theta, vega
+        and rho under JARVIS_GREEKS=core) is NULL here and computed afterwards."""
         cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
-        return ", ".join(f"arg_max({g}, ts) FILTER (WHERE {g} IS NOT NULL) AS {g}" if g in cols else f"CAST(NULL AS DOUBLE) AS {g}"
-                         for g in self.GREEKS)
+        ev, od = self._time_exprs(cols)
+        exprs = ", ".join(f"arg_max({g}, _ord) FILTER (WHERE {g} IS NOT NULL) AS {g}" if g in cols else f"CAST(NULL AS DOUBLE) AS {g}"
+                          for g in self.GREEKS)
+        return exprs, ev, od
 
     def _underlying_price(self, day: str, symbol: str, ts: pd.Series, width_s: int) -> pd.Series | None:
         """Spot implied by the nearest live future of this option's underlying at each time in `ts` (sorted ascending):
@@ -350,29 +366,39 @@ class Lake:
         src = self._greek_source(day)
         if src is None:
             return pd.DataFrame(columns=["ts", *self.GREEKS])
-        last = self._greek_exprs(src)
+        last, ev, od = self._greek_exprs(src)
         df = self.con.execute(f"""
-            WITH t AS (SELECT * FROM {src} WHERE symbol = ?),
-                 b AS (SELECT *, date_trunc('day', ts) + to_seconds(13500 + CAST(floor(
-                              (epoch(ts - date_trunc('day', ts)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
+            WITH t AS (SELECT *, {ev} AS _ev, {od} AS _ord FROM {src} WHERE symbol = ?),
+                 b AS (SELECT *, date_trunc('day', _ev) + to_seconds(13500 + CAST(floor(
+                              (epoch(_ev - date_trunc('day', _ev)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
                             ) AS bucket FROM t)
             SELECT bucket AS ts, {last} FROM b GROUP BY bucket ORDER BY bucket""", [symbol]).df()
-        return self._with_computed(df, day, symbol, width_s)
+        from .greeks_calc import iv_to_percent
+        df = self._with_computed(df, day, symbol, width_s)
+        computed = df.attrs.get("computed", [])
+        df["iv"] = iv_to_percent(df["iv"])                                  # stored as delivered (a fraction); shown as a percent
+        df.attrs["computed"] = computed
+        return df
 
     def greeks_last(self, day: str, symbols: list[str]) -> dict[str, dict]:
         """{symbol: {iv, delta, ...}} -- the last non-null value of each Greek that day, for chain columns."""
         src = self._greek_source(day)
         if src is None or not symbols:
             return {}
-        last = self._greek_exprs(src)
+        last, ev, od = self._greek_exprs(src)
         self.con.register("_g_wanted", pd.DataFrame({"symbol": symbols}))
         try:
             df = self.con.execute(f"""
-                SELECT symbol, {last} FROM {src}
+                SELECT symbol, {last} FROM (SELECT *, {ev} AS _ev, {od} AS _ord FROM {src})
                 WHERE symbol IN (SELECT symbol FROM _g_wanted) GROUP BY symbol""").df()
         finally:
             self.con.unregister("_g_wanted")
-        return {r["symbol"]: {g: (None if pd.isna(r[g]) else float(r[g])) for g in self.GREEKS} for r in df.to_dict("records")}
+        from .greeks_calc import iv_to_percent
+        out = {r["symbol"]: {g: (None if pd.isna(r[g]) else float(r[g])) for g in self.GREEKS} for r in df.to_dict("records")}
+        for v in out.values():
+            if v["iv"] is not None:
+                v["iv"] = float(iv_to_percent(v["iv"]))                     # stored as delivered (a fraction); shown as a percent
+        return out
 
     def fo_chain(self, day: str, underlying: str, expiry: str | None = None,
                 interval: str = "1s") -> dict:

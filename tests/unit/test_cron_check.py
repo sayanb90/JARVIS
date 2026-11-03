@@ -70,6 +70,25 @@ def test_command_line_exit_codes(tmp_path, monkeypatch, capsys):
     assert cc.main(["--now", "2026-11-02T04:00", "--no-services"]) == 1 and "No crontab installed" in capsys.readouterr().out
 
 
+def test_services_installed_for_a_user_are_found(monkeypatch):
+    calls = []
+
+    def fake(cmd):
+        calls.append(cmd)
+        return "active" if "--user" in cmd else "inactive"
+    monkeypatch.setattr(cc, "_run", fake)
+    assert cc.service_state("jarvis-feed") == "active (user)"
+    assert ["systemctl", "--user", "is-active", "jarvis-feed"] in calls
+    assert cc.service_state("jarvis-feed", user_units=False) == "inactive"                  # the cron daemon is a system service
+    monkeypatch.setattr(cc, "_run", lambda cmd: "active" if "--user" not in cmd else "inactive")
+    assert cc.service_state("jarvis-feed") == "active"                                      # a system unit needs no second look
+    monkeypatch.setattr(cc, "_run", lambda cmd: "inactive")
+    assert cc.service_state("jarvis-feed") == "inactive"
+    text, ok = cc.report(cc.parse_crontab(TEMPLATE_TEXT), cc.parse_crontab(TEMPLATE_TEXT), date(2026, 11, 3), MON, True, "active",
+                         {"jarvis-feed": "active (user)", "jarvis-viewer": "active (user)"})
+    assert ok and "jarvis-feed: active (user)" in text
+
+
 def test_system_state_helpers_degrade_without_systemd(monkeypatch):
     monkeypatch.setattr(cc, "_run", lambda cmd: None)
     assert cc.service_state("jarvis-feed").startswith("unknown") and cc.cron_daemon_state().startswith("unknown")

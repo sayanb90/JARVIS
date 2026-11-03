@@ -396,7 +396,7 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
             return None, pd.DataFrame(columns=["symbol", "ticks", "first_tick", "last_tick", "last_price"])
         d = days[0]
         df = Sandbox(cat).run(f"""
-            SELECT symbol, count(*)::BIGINT AS ticks, min(ts) AS first_tick, max(ts) AS last_tick, arg_max(ltp, ts) AS last_price
+            SELECT symbol, count(*)::BIGINT AS ticks, min(ts) AS first_tick, max(ts) AS last_tick, arg_max(ltp, ts) FILTER (WHERE ltp IS NOT NULL) AS last_price
             FROM read_parquet({cat._q(cat.lake / 'ticks' / f'date={d}' / '*.parquet')}, union_by_name=true) GROUP BY symbol""")
         return d, df
 

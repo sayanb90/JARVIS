@@ -121,8 +121,12 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
     if shutil.which("systemctl"):
         try:
             state = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=10).stdout.strip()
+            if state and state != "active":                     # a service installed for a user (systemctl --user) is not seen above
+                user = subprocess.run(["systemctl", "--user", "is-active", service], capture_output=True, text=True, timeout=10).stdout.strip()
+                if user == "active":
+                    state = "active (user)"
             if state:
-                r.line("PASS" if state == "active" else "WARN", f"systemd service {service}: {state}")
+                r.line("PASS" if state.startswith("active") else "WARN", f"systemd service {service}: {state}")
         except Exception:
             pass
 
