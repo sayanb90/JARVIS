@@ -13,7 +13,10 @@ wins on (symbol, ts).  The Lake query views read segments and compacted files al
 
 from __future__ import annotations
 
+import argparse
 import os
+import shutil
+import sys
 import time as _time
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -149,6 +152,57 @@ def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
         return duckdb.connect().execute(f"SELECT count(*) FROM read_parquet('{folder}/ticks.parquet')").fetchone()[0]
 
 
+def dedupe_ticks_day(day: date, lake_dir: Path | None = None, keep_backup: bool = True) -> tuple[int, int]:
+    """
+    Repair a day whose compacted ticks.parquet holds rows twice: drop the rows that are identical in every column.
+    Returns (rows before, rows after).  Written for 2026-11-03, when the two feeds' compactions overlapped (SCRUM-114);
+    a tick repeated exactly (same timestamp and every field) is also dropped, which at one update a second per
+    instrument is rare.  The original stays beside the file as ticks.pre-dedupe.bak (not a *.parquet, so no reader sees it)
+    unless keep_backup is False.  Refuses while segment files are present: compact first.
+    """
+    folder = (lake_dir or LAKE_DIR) / "ticks" / f"date={day}"
+    f = folder / "ticks.parquet"
+    if not f.exists():
+        return 0, 0
+    with _folder_lock(folder):
+        extra = [x.name for x in folder.glob("*.parquet") if x.name != "ticks.parquet"]
+        if extra:
+            raise RuntimeError(f"{len(extra)} segment files are still in {folder}; run compact first")
+        tmp = folder / f"ticks.parquet.dedupe.{os.getpid()}.tmp"
+        con = duckdb.connect()
+        try:
+            before = con.execute(f"SELECT count(*) FROM read_parquet('{f}')").fetchone()[0]
+            con.execute(f"COPY (SELECT DISTINCT * FROM read_parquet('{f}') ORDER BY symbol, ts) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+            after = con.execute(f"SELECT count(*) FROM read_parquet('{tmp}')").fetchone()[0]
+            if keep_backup:
+                shutil.copy2(f, folder / "ticks.pre-dedupe.bak")
+            os.replace(tmp, f)
+        finally:
+            con.close()
+            tmp.unlink(missing_ok=True)
+        return before, after
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Maintenance for a day's raw ticks")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name, text in (("compact", "merge the day's segment files into ticks.parquet"),
+                       ("dedupe", "remove rows identical in every column from the compacted day (keeps a .bak copy)")):
+        c = sub.add_parser(name, help=text)
+        c.add_argument("day", type=date.fromisoformat)
+        c.add_argument("--lake", type=Path, default=None)
+        if name == "dedupe":
+            c.add_argument("--no-backup", action="store_true")
+    a = ap.parse_args(argv)
+    if a.cmd == "compact":
+        print(f"{a.day}: {compact_ticks_day(a.day, a.lake)} rows")
+    else:
+        before, after = dedupe_ticks_day(a.day, a.lake, keep_backup=not a.no_backup)
+        print(f"{a.day}: {before} rows before, {after} after, {before - after} duplicates removed")
+    return 0
+
+
+
 def compact_day(interval: str, day: date, lake_dir: Path | None = None) -> int:
     """Merge segments + bars.parquet for one day into bars.parquet.  Returns row count."""
     folder = (lake_dir or LAKE_DIR) / "bars" / f"interval={interval}" / f"date={day}"
@@ -169,3 +223,7 @@ def compact_day(interval: str, day: date, lake_dir: Path | None = None) -> int:
         if f.name != "bars.parquet":
             f.unlink()
     return con.execute(f"SELECT count(*) FROM read_parquet('{folder}/bars.parquet')").fetchone()[0]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

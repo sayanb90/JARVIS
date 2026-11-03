@@ -95,3 +95,46 @@ def test_compacting_twice_is_idempotent(tmp_path, folder):
     assert tick_store.compact_ticks_day(DAY, tmp_path) == 400
     assert tick_store.compact_ticks_day(DAY, tmp_path) == 400
     assert rows_and_distinct(folder) == (400, 400)
+
+
+# ---------------------------------------------------------------------------------- repairing a day that holds rows twice
+def doubled_day(folder, rows: int = 300):
+    base = datetime(2026, 11, 3, 4, 0)
+    df = pd.DataFrame({"ts": [base + timedelta(seconds=i) for i in range(rows)], "symbol": "A", "ltp": 1.0, "iv": float("nan")})
+    pd.concat([df, df.iloc[:200]]).to_parquet(folder / "ticks.parquet")          # 200 rows appear twice, as after the overlapping compactions
+    return rows
+
+
+def test_dedupe_removes_rows_identical_in_every_column_and_keeps_a_backup(tmp_path, folder):
+    unique = doubled_day(folder)
+    assert tick_store.dedupe_ticks_day(DAY, tmp_path) == (unique + 200, unique)
+    assert rows_and_distinct(folder) == (unique, unique)
+    assert (folder / "ticks.pre-dedupe.bak").exists() and not list(folder.glob("*.tmp"))
+    assert [p.name for p in folder.glob("*.parquet")] == ["ticks.parquet"]       # the backup is not a *.parquet file
+    assert tick_store.dedupe_ticks_day(DAY, tmp_path) == (unique, unique)         # idempotent
+
+
+def test_dedupe_keeps_rows_that_differ_in_any_column_and_can_skip_the_backup(tmp_path, folder):
+    base = datetime(2026, 11, 3, 4, 0)
+    pd.DataFrame({"ts": [base, base, base], "symbol": "A", "ltp": [1.0, 2.0, 2.0]}).to_parquet(folder / "ticks.parquet")
+    assert tick_store.dedupe_ticks_day(DAY, tmp_path, keep_backup=False) == (3, 2)
+    assert not (folder / "ticks.pre-dedupe.bak").exists()
+
+
+def test_dedupe_refuses_while_segments_exist_and_ignores_a_missing_day(tmp_path, folder):
+    doubled_day(folder)
+    segment(folder, 1)
+    with pytest.raises(RuntimeError, match="run compact first"):
+        tick_store.dedupe_ticks_day(DAY, tmp_path)
+    assert rows_and_distinct(folder)[0] == 500                                    # nothing was changed
+    assert tick_store.dedupe_ticks_day(date(2026, 1, 1), tmp_path) == (0, 0)
+
+
+def test_command_line_compact_and_dedupe(tmp_path, folder, capsys):
+    for n in range(3):
+        segment(folder, n)
+    assert tick_store.main(["compact", "2026-11-03", "--lake", str(tmp_path)]) == 0
+    assert "300 rows" in capsys.readouterr().out
+    pd.concat([pd.read_parquet(folder / "ticks.parquet")] * 2).to_parquet(folder / "ticks.parquet")
+    assert tick_store.main(["dedupe", "2026-11-03", "--lake", str(tmp_path), "--no-backup"]) == 0
+    assert "600 rows before, 300 after, 300 duplicates removed" in capsys.readouterr().out
