@@ -88,3 +88,85 @@ def test_a_dead_housekeeping_task_is_reported(caplog):
     with caplog.at_level("ERROR"):
         asyncio.run(go())
     assert "housekeeping task died" in caplog.text and "something broke" in caplog.text
+
+
+# ---------------------------------------------------------------------------- SCRUM-123: one bad tick, a dead flush task
+def poison_writer(real, bad_symbol="BAD.NS"):
+    def writer(ticks, lake_dir=None):
+        ticks = list(ticks)
+        if any(t.symbol == bad_symbol for t in ticks):
+            raise ValueError("cannot convert")
+        return real(ticks, lake_dir)
+    return writer
+
+
+def test_one_unwritable_tick_is_dropped_and_logged_and_the_rest_of_the_batch_is_written(tmp_path, monkeypatch, caplog):
+    f = make_feed(tmp_path)
+    ticks = [tick(i) for i in range(40)]
+    ticks[17] = Tick(ticks[17].ts, "BAD.NS", 1.0, 1)
+    f.proc._ticks.extend(ticks)
+    monkeypatch.setattr(tick_store, "write_ticks", poison_writer(tick_store.write_ticks))
+    with caplog.at_level("ERROR"):
+        assert f.persist() == 39
+    assert f.proc._ticks == [] and f.write_dropped == 1 and "dropped 1 tick(s)" in caplog.text
+    assert f.persist() == 0                                                              # nothing is retried forever
+
+
+def test_when_no_tick_can_be_written_the_whole_batch_is_kept(tmp_path, monkeypatch):
+    f = make_feed(tmp_path)
+    f.proc._ticks.extend(tick(i) for i in range(20))
+
+    def failing(ticks, lake_dir=None):
+        raise OSError("disk full")
+    monkeypatch.setattr(tick_store, "write_ticks", failing)
+    with pytest.raises(OSError):
+        f.persist()
+    assert len(f.proc._ticks) == 20 and f.write_dropped == 0                             # a disk problem drops nothing
+
+
+def test_ticks_not_tried_because_the_budget_ran_out_wait_for_the_next_flush(tmp_path, monkeypatch):
+    f = make_feed(tmp_path)
+    f.BISECT_BUDGET = 6
+    ticks = [tick(i) for i in range(64)]
+    ticks[5] = Tick(ticks[5].ts, "BAD.NS", 1.0, 1)
+    f.proc._ticks.extend(ticks)
+    monkeypatch.setattr(tick_store, "write_ticks", poison_writer(tick_store.write_ticks))
+    written, total = f.persist(), 0
+    assert written > 0 and f.proc._ticks                                                 # part written, part waiting
+    f.BISECT_BUDGET = 256
+    while f.proc._ticks:
+        total += f.persist()
+    assert written + total + f.write_dropped == 64                                       # every tick is written or counted
+
+
+def test_the_receive_loop_restarts_a_housekeeping_task_that_died(tmp_path, caplog):
+    from websockets.asyncio.server import serve
+    from tests.unit.test_cli_and_feed_extras import stock_frame, ms, KMAP
+
+    f = UpstoxFeed("T", KMAP, url="ws://x", lake_dir=tmp_path / "lake", flush_s=0.01, write_s=0.02, stale_s=3600)
+    starts = []
+
+    async def hk(ws, stop):
+        starts.append(1)
+        if len(starts) == 1:
+            raise RuntimeError("boom")                                                   # dies at once, as the old code could
+        await stop.wait()
+    f._housekeeping = hk
+
+    async def handler(ws):
+        await ws.recv()
+        for i in range(30):
+            await ws.send(stock_frame(ms(3, 45, 5 + i), 100.0 + i, 1))
+            await asyncio.sleep(0.02)
+
+    async def go():
+        async with serve(handler, "127.0.0.1", 0) as srv:
+            f.url = f"ws://127.0.0.1:{srv.sockets[0].getsockname()[1]}"
+            stop = asyncio.Event()
+            task = asyncio.create_task(f.run_session(stop))
+            await asyncio.sleep(0.8)
+            stop.set()
+            await asyncio.wait_for(task, 5)
+    with caplog.at_level("ERROR"):
+        asyncio.run(go())
+    assert len(starts) >= 2 and "restarting the housekeeping task" in caplog.text

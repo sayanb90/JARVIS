@@ -140,6 +140,7 @@ class UpstoxFeed:
         self.clock = clock
         self.dump_left, self.dump_dir = dump_frames, dump_dir or Path("logs/frames")
         self._last_frame = self.clock()
+        self.write_dropped = 0
 
     # -- persistence -------------------------------------------------------
     def persist(self, final: bool = False) -> int:
@@ -148,7 +149,7 @@ class UpstoxFeed:
         ticks = self.proc.drain()
         events = self.proc.drain_events() if self.proc.ext else []
         try:
-            n = tick_store.write_ticks(ticks, self.lake_dir)
+            n = self._write_ticks(ticks)
         except Exception:
             self.proc._ticks[:0] = ticks
             self.proc.events[:0] = events
@@ -160,6 +161,50 @@ class UpstoxFeed:
                 self.proc.events[:0] = events
                 raise
         return n
+
+    BISECT_BUDGET = 256               # write attempts one flush may spend isolating bad ticks
+
+    def _write_ticks(self, ticks: list) -> int:
+        """Write `ticks`.  If the batch cannot be written, find out whether the data or the disk is at fault (SCRUM-123): split the
+        batch and write the halves.  Ticks that cannot be written alone are dropped, logged and counted (one bad tick must not hold
+        up every later one, and a retry of the same batch would fail forever while the buffer grew: the F&O feed on 2026-11-03 held
+        2.6 million ticks in memory, 5.5 GB, after its flush stopped).  If nothing at all can be written, the disk or the lake is at
+        fault: raise, and the caller keeps the whole batch for the next flush."""
+        try:
+            return tick_store.write_ticks(ticks, self.lake_dir)
+        except Exception as first:                                             # noqa: BLE001
+            if len(ticks) < 2:
+                raise
+            budget = [self.BISECT_BUDGET]
+            mid = len(ticks) // 2
+            wa, ba, ua = self._bisect(ticks[:mid], budget)
+            wb, bb, ub = self._bisect(ticks[mid:], budget)
+            written, bad, untested = wa + wb, ba + bb, ua + ub
+            if not written:
+                raise first                                                    # nothing could be written: not a data problem
+            self.proc._ticks[:0] = untested                                    # not tried this time (budget): next flush
+            if bad:
+                self.write_dropped += len(bad)
+                log.error("first write failure: %r; dropped %d tick(s) that cannot be written (%d dropped so far), e.g. %r",
+                          first, len(bad), self.write_dropped, bad[0])
+            return written
+
+    def _bisect(self, ticks: list, budget: list) -> tuple[int, list, list]:
+        """(rows written, ticks that fail alone, ticks not tried because the attempt budget ran out)."""
+        if not ticks:
+            return 0, [], []
+        if budget[0] <= 0:
+            return 0, [], list(ticks)
+        budget[0] -= 1
+        try:
+            return tick_store.write_ticks(ticks, self.lake_dir), [], []
+        except Exception:                                                      # noqa: BLE001
+            if len(ticks) == 1:
+                return 0, list(ticks), []
+            mid = len(ticks) // 2
+            wa, ba, ua = self._bisect(ticks[:mid], budget)
+            wb, bb, ub = self._bisect(ticks[mid:], budget)
+            return wa + wb, ba + bb, ua + ub
 
     # -- one connection ----------------------------------------------------
     def _subscribe_msgs(self) -> list[bytes]:
@@ -186,6 +231,10 @@ class UpstoxFeed:
                 async for msg in ws:
                     if stop.is_set():
                         break
+                    if aux.done() and not aux.cancelled() and aux.exception() is not None:       # SCRUM-123: it died; ticks would pile up
+                        log.error("restarting the housekeeping task (it died: %r)", aux.exception())
+                        aux = asyncio.create_task(self._housekeeping(ws, stop))
+                        aux.add_done_callback(self._housekeeping_ended)
                     if isinstance(msg, bytes):
                         self._last_frame = self.clock()
                         if self.dump_left > 0:                    # keep raw frames as real test fixtures
@@ -222,9 +271,10 @@ class UpstoxFeed:
                 except Exception:                              # noqa: BLE001 -- a failed flush must not end this loop
                     log.exception("flush failed; %d ticks are kept in memory and the next flush will retry", len(self.proc._ticks))
                 else:
-                    log.info("frames=%d ticks=%d ticks_written=%d policy_dropped=%d stale=%d future=%d quote_only=%d",
+                    log.info("frames=%d ticks=%d ticks_written=%d policy_dropped=%d stale=%d future=%d quote_only=%d buffered=%d write_dropped=%d",
                              self.proc.frames, self.proc.ticks, n, self.proc.policy.dropped,
-                             self.proc.dropped_stale, self.proc.dropped_future, self.proc.quote_only)
+                             self.proc.dropped_stale, self.proc.dropped_future, self.proc.quote_only,
+                             len(self.proc._ticks), self.write_dropped)
             if (now - self._last_frame).total_seconds() > self.stale_s:
                 log.warning("no frames for %.0fs, reconnecting", (now - self._last_frame).total_seconds())
                 await ws.close()
