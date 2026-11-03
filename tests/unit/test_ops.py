@@ -302,7 +302,14 @@ def test_weekday_helpers():
 
 
 def test_health_cli_exit_code(world, monkeypatch):
+    """main() must see the sandbox, not the machine it runs on: health.py binds LAKE_DIR and ROOT at import, and a server with a
+    real lake and .env would otherwise report no FAIL (SCRUM-117)."""
+    from data_layer import lake
     monkeypatch.delenv("JARVIS_BACKUP_DIR", raising=False)
+    root = Path(os.environ["JARVIS_ROOT"])
+    monkeypatch.setattr(health, "LAKE_DIR", root / "lake")
+    monkeypatch.setattr(health, "ROOT", root)
+    monkeypatch.setattr(lake, "ENV_FILE", root / "absent.env")
     assert health.main([]) == 1                                                       # empty lake FAILs
 
 
