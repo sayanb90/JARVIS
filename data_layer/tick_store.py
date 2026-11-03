@@ -154,11 +154,12 @@ def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
 
 def dedupe_ticks_day(day: date, lake_dir: Path | None = None, keep_backup: bool = True) -> tuple[int, int]:
     """
-    Repair a day whose compacted ticks.parquet holds rows twice: drop the rows that are identical in every column.
-    Returns (rows before, rows after).  Written for 2026-11-03, when the two feeds' compactions overlapped (SCRUM-114);
-    a tick repeated exactly (same timestamp and every field) is also dropped, which at one update a second per
-    instrument is rare.  The original stays beside the file as ticks.pre-dedupe.bak (not a *.parquet, so no reader sees it)
-    unless keep_backup is False.  Refuses while segment files are present: compact first.
+    Drop the rows that are identical in every column from a day's compacted ticks.parquet.  Returns (rows before, rows
+    after).  A maintenance tool, not part of any scheduled job: use it only for a day shown to hold rows doubled by
+    overlapping compactions (row counts above what the feeds logged).  Identical rows also occur naturally when the feed
+    repeats an unchanged snapshot, and this removes those as well, so do not run it as routine tidying.  The original stays
+    beside the file as ticks.pre-dedupe.bak (not a *.parquet, so no reader sees it) unless keep_backup is False.  Refuses
+    while segment files are present: compact first.
     """
     folder = (lake_dir or LAKE_DIR) / "ticks" / f"date={day}"
     f = folder / "ticks.parquet"
@@ -187,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Maintenance for a day's raw ticks")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in (("compact", "merge the day's segment files into ticks.parquet"),
-                       ("dedupe", "remove rows identical in every column from the compacted day (keeps a .bak copy)")):
+                       ("dedupe", "remove rows identical in every column from the compacted day, only for a day shown to hold doubled rows (keeps a .bak copy)")):
         c = sub.add_parser(name, help=text)
         c.add_argument("day", type=date.fromisoformat)
         c.add_argument("--lake", type=Path, default=None)

@@ -138,10 +138,23 @@ class UpstoxFeed:
 
     # -- persistence -------------------------------------------------------
     def persist(self, final: bool = False) -> int:
+        """Write what the feed holds.  If a write fails, what was drained goes back into memory so the next flush retries it
+        (SCRUM-115): losing the drained ticks would turn one failed write into an hour of missing data."""
         ticks = self.proc.drain()
-        if self.proc.ext:
-            tick_store.write_events(self.proc.drain_events(), self.lake_dir)
-        return tick_store.write_ticks(ticks, self.lake_dir)
+        events = self.proc.drain_events() if self.proc.ext else []
+        try:
+            n = tick_store.write_ticks(ticks, self.lake_dir)
+        except Exception:
+            self.proc._ticks[:0] = ticks
+            self.proc.events[:0] = events
+            raise
+        if events:
+            try:
+                tick_store.write_events(events, self.lake_dir)
+            except Exception:
+                self.proc.events[:0] = events
+                raise
+        return n
 
     # -- one connection ----------------------------------------------------
     def _subscribe_msgs(self) -> list[bytes]:
@@ -162,6 +175,7 @@ class UpstoxFeed:
             log.info("subscribed %d instruments in mode %s", len(self.keys), self.mode)
             self._last_frame = self.clock()
             aux = asyncio.create_task(self._housekeeping(ws, stop))
+            aux.add_done_callback(self._housekeeping_ended)
             closer = asyncio.create_task(self._close_on_stop(ws, stop))
             try:
                 async for msg in ws:
@@ -181,6 +195,12 @@ class UpstoxFeed:
                 closer.cancel()
 
     @staticmethod
+    def _housekeeping_ended(task: asyncio.Task) -> None:
+        """asyncio drops the exception of a task nobody awaits; say so, since this task flushes ticks and watches the feed."""
+        if not task.cancelled() and task.exception() is not None:
+            log.error("housekeeping task died: %r (ticks are no longer flushed and the silent-feed watchdog is off)", task.exception())
+
+    @staticmethod
     async def _close_on_stop(ws, stop: asyncio.Event) -> None:
         await stop.wait()                                 # wake a receive loop that is waiting on a quiet feed
         await ws.close()
@@ -191,11 +211,15 @@ class UpstoxFeed:
             await asyncio.sleep(self.flush_s)
             now = self.clock()
             if (now - last_write).total_seconds() >= self.write_s:
-                n = self.persist()
                 last_write = now
-                log.info("frames=%d ticks=%d ticks_written=%d policy_dropped=%d stale=%d future=%d",
-                         self.proc.frames, self.proc.ticks, n, self.proc.policy.dropped,
-                         self.proc.dropped_stale, self.proc.dropped_future)
+                try:
+                    n = self.persist()
+                except Exception:                              # noqa: BLE001 -- a failed flush must not end this loop
+                    log.exception("flush failed; %d ticks are kept in memory and the next flush will retry", len(self.proc._ticks))
+                else:
+                    log.info("frames=%d ticks=%d ticks_written=%d policy_dropped=%d stale=%d future=%d",
+                             self.proc.frames, self.proc.ticks, n, self.proc.policy.dropped,
+                             self.proc.dropped_stale, self.proc.dropped_future)
             if (now - self._last_frame).total_seconds() > self.stale_s:
                 log.warning("no frames for %.0fs, reconnecting", (now - self._last_frame).total_seconds())
                 await ws.close()
