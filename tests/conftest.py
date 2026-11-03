@@ -10,6 +10,27 @@ import pytest
 from tests.helpers import UNI_HEADER, universe_rows, write_csv
 
 
+HOST_SETTINGS = ("UPSTOX_ACCESS_TOKEN", "UPSTOX_EXTENDED_TOKEN", "UPSTOX_ANALYTICS_TOKEN", "UPSTOX_FEED_TOKEN", "UPSTOX_API_KEY",
+                 "UPSTOX_API_SECRET", "UPSTOX_REDIRECT_URI", "FMP_API_KEY", "FMP_DAILY_BUDGET", "FMP_RATE_LIMIT_DELAY",
+                 "JARVIS_ENV", "JARVIS_BACKUP_DIR", "JARVIS_GREEKS", "JARVIS_GREEKS_RATE", "JARVIS_GREEKS_CARRY",
+                 "JARVIS_GREEKS_IV_SCALE", "JARVIS_GREEKS_THETA_BASIS", "JARVIS_SYSMON", "JARVIS_SYSMON_INTERVAL_S",
+                 "JARVIS_EXT_FIELDS", "WEBAPP_PASSWORD", "WEBAPP_USER", "ADMIN_PASSWORD", "ADMIN_USER")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_settings(tmp_path, monkeypatch):
+    """A test must not see the settings of the machine it runs on (SCRUM-124): a server has tokens in its environment and a real .env,
+    and two tests failed there that pass in CI.  Clear them, and point the env-file paths at a file that does not exist; a test that
+    needs a setting sets it itself, after this runs."""
+    for name in HOST_SETTINGS:
+        monkeypatch.delenv(name, raising=False)
+    import data_layer.lake as lake
+    from data_layer.upstox import auth
+    absent = tmp_path / "no-such.env"
+    monkeypatch.setattr(lake, "ENV_FILE", absent)
+    monkeypatch.setattr(auth, "ENV_PATH", absent)
+
+
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     """Legacy fixture used by the first tests: fresh lake module rooted at tmp_path."""
