@@ -104,8 +104,10 @@ def write_events(events: Iterable[dict], lake_dir: Path | None = None) -> int:
 
 
 def order_expr(columns: list[str]) -> str:
-    """SQL for the first non-null of `columns` (arrival time, event time, last-trade time, whichever the files have)."""
-    return columns[0] if len(columns) == 1 else "coalesce(" + ", ".join(columns) + ")"
+    """SQL ordering key from `columns`, most significant first: arrival time, then message time, then last-trade time, whichever the files
+    have.  A row tuple, not a coalesce: where arrival times are equal (a coarse or fixed clock) the next column decides, so ordering
+    never falls apart into ties."""
+    return columns[0] if len(columns) == 1 else "ROW(" + ", ".join(columns) + ")"
 
 
 @contextmanager

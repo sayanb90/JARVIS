@@ -147,3 +147,16 @@ def test_the_live_book_is_timed_by_the_message():
     r = pb.FeedResponse.FromString(frame(current=ms(4, 0, 30, D), ltt=ms(4, 0, 1, D)))
     sym, ts, ltp, bids, asks = next(decode.books_from_response(r, {KEY: "A.NS"}))
     assert ts == datetime(2026, 11, 3, 4, 0, 30) and ltp == 100.0 and bids[0][0] == 99.9
+
+
+def test_equal_arrival_times_fall_back_to_the_message_time_and_then_the_trade_time(tmp_path):
+    """A fixed or coarse clock gives many rows the same arrival time; volume deltas and 'last value in the second' must still follow time."""
+    t0 = datetime(2026, 11, 3, 4, 0, 0)
+    same_arrival = t0 + timedelta(seconds=1)
+    rows = [Tick(t0 + timedelta(milliseconds=100 * i), "A.NS", 100.0 + i, 1000 + 10 * i, 99.0 + i, 5, 100.0 + i, 6, rts=same_arrival) for i in (3, 0, 2, 1, 4)]
+    lake = lake_with(tmp_path, rows)                                                # written in a shuffled order, one arrival time for all
+    bar = lake.day_bars("2026-11-03", "A.NS", "1s", 1).iloc[0]
+    assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (100.0, 104.0, 100.0, 104.0, 40)    # open first, close last, volume the sum of the deltas
+    tick_store.compact_ticks_day(date(2026, 11, 3), tmp_path)
+    f = tmp_path / "ticks" / "date=2026-11-03" / "ticks.parquet"
+    assert [r[0] for r in duckdb.sql(f"SELECT ltp FROM read_parquet('{f}')").fetchall()] == [100.0, 101.0, 102.0, 103.0, 104.0]
