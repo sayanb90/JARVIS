@@ -56,7 +56,7 @@ def test_add_computed_fills_only_the_missing_greeks():
 
 
 # ---------------------------------------------------------------------------------- calibration
-def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0, iv_percent=False):
+def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0, iv_percent=False, theta_on_future=False):
     """A fake all-Greeks day: Upstox-style values (IV as a fraction, theta per day, vega per vol point, rho per 1%) from a known rate."""
     rows = []
     start = pd.Timestamp("2026-11-02 04:00")
@@ -70,7 +70,10 @@ def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0, iv_percent=False
             for kind in ("CE", "PE"):
                 iv = 14.0 + (k - 25000) / 400.0
                 t = gc.years_to_expiry([ts], date(2026, 11, 3))[0]
-                g = gc.to_display(gc.bs_greeks(kind == "CE", under, k, t, iv, rate))
+                raw = gc.bs_greeks(kind == "CE", under, k, t, iv, rate)
+                if theta_on_future:                                   # Upstox-style: the future's price held fixed
+                    raw["theta"] = gc.theta_for_basis(raw["theta"], under, raw["delta"], "future", carry)
+                g = gc.to_display(raw)
                 rows.append({"ts": ts, "symbol": f"NIFTY_{k}_{kind}_03_NOV_26", "ltp": 120.0, "iv": iv if iv_percent else iv / 100.0, "delta": g["delta"].item(),
                              "gamma": round(g["gamma"].item(), 4), "theta": g["theta"].item() * scale_theta, "vega": g["vega"].item(), "rho": g["rho"].item()})
     folder = tmp_path / "ticks" / "date=2026-11-02"
@@ -189,3 +192,23 @@ def test_api_marks_which_greeks_were_computed(world):
     c = TestClient(create_app(world.lakedir))
     d = c.get("/api/fo/greeks", params={"date": "2026-11-02", "symbol": opt, "width": 60}).json()
     assert d["available"] and d["computed"] == ["theta", "vega", "rho"] and all(v is not None for v in d["series"]["theta"])
+
+
+def test_calibration_finds_theta_held_on_the_future_and_the_viewer_follows_the_setting(tmp_path, monkeypatch):
+    stream = write_day(tmp_path, rate=0.065, carry=0.065, theta_on_future=True)
+    res = gc.calibrate(stream)
+    assert res["ok"] and res["theta_basis"] == "future" and res["greeks"]["theta"]["median_rel_error"] < 0.02
+    plain = gc.calibrate(write_day(tmp_path / "b", rate=0.065, carry=0.065))
+    assert plain["ok"] and plain["theta_basis"] == "spot"
+    assert "JARVIS_GREEKS_THETA_BASIS=future" in gc.render(res)
+    # the viewer's computed theta moves by carry * spot * delta per year (per day: / 365) when the basis is the future
+    ts = pd.Series([pd.Timestamp("2026-11-02 04:00")])
+    df = pd.DataFrame({"ts": ts, "iv": [0.15], "delta": [0.5], "gamma": [0.0004]})
+    under = pd.Series([25000.0])
+    monkeypatch.setenv("JARVIS_GREEKS_RATE", "0.065")
+    monkeypatch.setenv("JARVIS_GREEKS_CARRY", "0.065")
+    monkeypatch.setenv("JARVIS_GREEKS_THETA_BASIS", "spot")
+    a = gc.add_computed(df, "NIFTY_25000_CE_03_NOV_26", under)["theta"].iloc[0]
+    monkeypatch.setenv("JARVIS_GREEKS_THETA_BASIS", "future")
+    b = gc.add_computed(df, "NIFTY_25000_CE_03_NOV_26", under)["theta"].iloc[0]
+    assert b - a == pytest.approx(0.065 * 25000.0 * gc.bs_greeks(True, 25000.0, 25000, gc.years_to_expiry([ts.iloc[0]], date(2026, 11, 3))[0], 15.0, 0.065)["delta"].item() / 365.0, rel=1e-6)

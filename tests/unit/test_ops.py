@@ -235,8 +235,8 @@ def test_each_problem_is_reported(healthy, capsys, monkeypatch):
     (bk / "2026-10-27").rename(bk / "2026-10-20")
     r = run_health(world, bk, after_close=True)
     out = capsys.readouterr().out
-    assert r.fails == 3                                                         # disk, scheduler, backup age
-    assert "[FAIL] disk free 3%" in out and "[FAIL] scheduler: last success" in out and "[FAIL] newest backup 2026-10-20" in out
+    assert r.fails == 2                                                         # disk, scheduler; a stale backup only warns (SCRUM-122)
+    assert "[FAIL] disk free 3%" in out and "[FAIL] scheduler: last success" in out and "[WARN] newest backup 2026-10-20" in out
     assert "[WARN] no Upstox token" in out and "uncompacted segment files: ['2026-10-26']" in out
 
 
@@ -392,7 +392,8 @@ def test_backup_cli_reads_the_destination_from_the_env_file(src, tmp_path, monke
     monkeypatch.delenv("JARVIS_BACKUP_DIR", raising=False)
     assert backup.main(["run"]) == 0
     assert backup.list_snapshots(tmp_path / "from-env") == [date.today().isoformat()]
-    assert "$JARVIS" not in (REPO / "deploy/crontab").read_text().split("backup")[1].split("\n")[0]
+    tmpl = (REPO / "deploy/crontab").read_text()
+    assert not any("data_layer.backup" in ln for ln in cron_lines()) and "SCRUM-121" in tmpl      # parked: no active job, a pointer instead
 
 
 def test_rollout_script_is_valid_bash_and_guards_the_session():

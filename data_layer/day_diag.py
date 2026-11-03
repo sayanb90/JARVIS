@@ -197,7 +197,7 @@ def build_report(day: date, logs: Path, lake: Path, probe: Optional[Path]) -> st
     summary.append(f"{len([e for e in errs if ERRORS.search(e)])} error-looking line(s) in the F&O log.")
     # 3: memory
     body += ["## 3. Memory (RSS MB, peak) over the day", ""]
-    for label, jsonl, match, exclude in (("F&O feed", logs / f"resources-fo-{day:%Y%m%d}.jsonl", "feed", ()),
+    for label, jsonl, match, exclude in (("F&O feed", logs / f"resources-fo-{day:%Y%m%d}.jsonl", "segment fo", ()),
                                          ("equity feed", next(iter(sorted(logs.glob("resources-eq-*.jsonl"))), logs / "resources-eq.jsonl"), "feed", ("segment fo",))):
         trend = rss_trend(jsonl, day, match, exclude)
         body.append(f"- {label}: " + ", ".join(f"{m} {('%.0f' % r) if r is not None else '-'} ({('%.0f' % p) if p is not None else '-'})" for m, r, p in trend))

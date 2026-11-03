@@ -103,3 +103,23 @@ def test_feed_main_without_usable_universe_exits(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["feed"])
     with pytest.raises(SystemExit, match="ISIN"):
         feed.main()
+
+
+def test_sigterm_stops_the_service_while_it_waits_for_the_next_session_and_handlers_do_not_outlive_a_day(tmp_path, monkeypatch):
+    """SCRUM-118: the SIGTERM handler of a finished session used to stay installed, so systemctl stop outside the session hung
+    for the whole stop timeout and ended in SIGKILL."""
+    import os
+    import signal
+    monkeypatch.setattr(feed, "utcnow", lambda: datetime(2026, 10, 23, 12, 0))           # after the close: the next window is Monday
+    make = lambda: UpstoxFeed("T", KMAP, url="ws://127.0.0.1:1", lake_dir=tmp_path / "lake", flush_s=0.05)  # noqa: E731
+
+    async def main():
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(run_forever(make))
+        await asyncio.sleep(0.3)                                                         # now waiting for Monday's window
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(task, timeout=3)                                          # returns instead of hanging
+        assert not loop._signal_handlers                                                 # and leaves no handler behind
+        await asyncio.wait_for(feed.run_day(make(), datetime(2026, 10, 23, 0, 0)), timeout=5)   # a session that is already over
+        assert not loop._signal_handlers
+    asyncio.run(main())
