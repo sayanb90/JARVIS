@@ -287,6 +287,14 @@ def test_service_state_and_probe(healthy, capsys, monkeypatch):
     assert run_health(world, bk, probe=True).fails == 1
 
 
+def test_a_service_running_under_systemd_user_is_reported_active(healthy, capsys, monkeypatch):
+    world, bk = healthy
+    monkeypatch.setattr(health.shutil, "which", lambda x: "/bin/systemctl")
+    monkeypatch.setattr(health.subprocess, "run", lambda cmd, **k: type("R", (), {"stdout": ("active\n" if "--user" in cmd else "inactive\n")})())
+    r = run_health(world, bk)
+    assert "[PASS] systemd service jarvis-feed: active (user)" in capsys.readouterr().out and r.fails == 0
+
+
 def test_weekday_helpers():
     assert health.prev_weekday(date(2026, 10, 26)) == date(2026, 10, 23)           # Monday -> previous Friday
     assert health.last_weekday(date(2026, 10, 25)) == date(2026, 10, 23)           # Sunday -> Friday
