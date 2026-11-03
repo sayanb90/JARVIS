@@ -386,3 +386,16 @@ def test_backup_cli_reads_the_destination_from_the_env_file(src, tmp_path, monke
     assert backup.main(["run"]) == 0
     assert backup.list_snapshots(tmp_path / "from-env") == [date.today().isoformat()]
     assert "$JARVIS" not in (REPO / "deploy/crontab").read_text().split("backup")[1].split("\n")[0]
+
+
+def test_rollout_script_is_valid_bash_and_guards_the_session():
+    import subprocess
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[2] / "deploy" / "rollout.sh"
+    assert subprocess.run(["bash", "-n", str(script)], capture_output=True).returncode == 0
+    text = script.read_text()
+    for part in ("git pull --ff-only", "data_layer.greeks_calc calibrate", "data_layer.envfile set", "JARVIS_GREEKS=core", "data_layer.cron_check",
+                 "data_layer.health --after-close", "data_layer.day_diag", "FORCE", "STOPPED"):
+        assert part in text, part
+    assert "rm " not in text and "git reset" not in text and "git push" not in text          # it changes no data and rewrites no history
+    assert script.stat().st_mode & 0o111                                                    # executable

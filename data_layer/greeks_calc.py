@@ -9,7 +9,7 @@ underlying price, the strike, the time to expiry and a rate, so the viewer recom
 `calibrate` compares what this module computes with the values Upstox delivered for near-the-money options, tries a few
 interest rates and unit scalings (theta per day or per year, vega per volatility point or per 1.0, rho per 1% or per 1.0),
 prints the median and 95th-percentile relative error of the best setting for each Greek, and exits non-zero when delta,
-gamma, theta or vega are off by more than the tolerance (default 2%).  If it fails, keep JARVIS_GREEKS=all.
+theta or vega are off by more than the tolerance (default 2%) or gamma by more than 0.00005 (Upstox rounds gamma to four decimals).  If it fails, keep JARVIS_GREEKS=all.
 
 Conventions (what the webapp shows): IV in percent (the feed stores it as a fraction; `iv_to_percent`), theta per calendar day, vega per volatility point, rho per 1% of rate,
 expiry at 15:30 IST, continuous compounding, no dividend.  The underlying is the spot implied by the nearest future,
@@ -45,6 +45,7 @@ _erf = np.frompyfunc(math.erf, 1, 1)
 OPTION_RE = re.compile(r"^(?P<u>.+)_(?P<k>\d+(?:\.\d+)?)_(?P<t>CE|PE)_(?P<d>\d{2})_(?P<m>[A-Z]{3})_(?P<y>\d{2})$")
 FUTURE_RE = re.compile(r"^(?P<u>.+)_FUT_(?P<d>\d{2})_(?P<m>[A-Z]{3})_(?P<y>\d{2})$")
 COMPUTED = ("theta", "vega", "rho")
+GAMMA_ABS_TOLERANCE = 5e-5                # median absolute gamma error that passes; Upstox rounds gamma to 0.0001
 
 
 def _ncdf(x) -> np.ndarray:
@@ -272,8 +273,12 @@ def calibrate(stream: Path, max_rows: int = 100_000, near: float = 0.05, toleran
             scored.append((med, p95, n, scale, label))
         med, p95, n, scale, label = min(scored, key=lambda r: r[0])
         greeks[g] = {"median_rel_error": med, "p95_rel_error": p95, "rows": n, "unit": label, "scale": scale}
-    judged = ("delta", "gamma", "theta", "vega")
-    ok = all(greeks[g]["median_rel_error"] <= tolerance for g in judged)
+    # Gamma is stored with four decimals (48 distinct values over 2.65 million rows on 2026-11-02), so a relative error on
+    # small gammas measures the rounding, not the formula: judge it by absolute error, half of the 0.0001 step.
+    gamma_ref_ok = np.isfinite(raw["gamma"]) & np.isfinite(gamma_ref)
+    greeks["gamma"]["median_abs_error"] = float(np.median(np.abs(raw["gamma"][gamma_ref_ok] - gamma_ref[gamma_ref_ok]))) if gamma_ref_ok.any() else float("inf")
+    judged = ("delta", "theta", "vega")
+    ok = all(greeks[g]["median_rel_error"] <= tolerance for g in judged) and greeks["gamma"]["median_abs_error"] <= GAMMA_ABS_TOLERANCE
     stored = {g: {"distinct": int(pd.Series(d[g]).nunique()), "min": float(d[g].min()), "max": float(d[g].max())}
               for g in ("iv", "delta", "gamma", "theta", "vega", "rho")}
     return {"ok": ok, "rate": rate, "carry": carry_, "iv_scale": iv_unit, "tolerance": tolerance, "greeks": greeks, "rows": len(d),
@@ -285,10 +290,11 @@ def render(res: dict) -> str:
              f"IV stored as {'a fraction' if res['iv_scale'] == 1.0 else 'a percent'}",
              f"{'greek':<7}{'median error':>14}{'95th pct':>11}{'rows':>9}  unit that matched"]
     for g, r in res["greeks"].items():
-        lines.append(f"{g:<7}{r['median_rel_error'] * 100:>13.2f}%{r['p95_rel_error'] * 100:>10.2f}%{r['rows']:>9,}  {r['unit']}")
+        extra = f"  (judged by absolute error: median {r['median_abs_error']:.6f}, limit {GAMMA_ABS_TOLERANCE:g})" if "median_abs_error" in r else ""
+        lines.append(f"{g:<7}{r['median_rel_error'] * 100:>13.2f}%{r['p95_rel_error'] * 100:>10.2f}%{r['rows']:>9,}  {r['unit']}{extra}")
     lines.append("\nstored values in the sample (distinct values, min, max):")
     lines += [f"  {g:<6}{v['distinct']:>9,}  {v['min']:.6g}  {v['max']:.6g}" for g, v in res["stored"].items()]
-    lines.append(f"\n{'PASS' if res['ok'] else 'FAIL'}: delta, gamma, theta and vega must each be within {res['tolerance'] * 100:.0f}% (median)."
+    lines.append(f"\n{'PASS' if res['ok'] else 'FAIL'}: delta, theta and vega must each be within {res['tolerance'] * 100:.0f}% (median) and gamma within {GAMMA_ABS_TOLERANCE:g} (absolute)."
                  + (f"\nSet in .env: JARVIS_GREEKS_RATE={res['rate']:g}  JARVIS_GREEKS_CARRY={res['carry']:g}  JARVIS_GREEKS_IV_SCALE={res['iv_scale']:g}" if res["ok"]
                     else "  Keep JARVIS_GREEKS=all until this passes."))
     return "\n".join(lines)

@@ -72,7 +72,7 @@ def write_day(tmp_path, scale_theta=1.0, rate=0.065, carry=0.0, iv_percent=False
                 t = gc.years_to_expiry([ts], date(2026, 11, 3))[0]
                 g = gc.to_display(gc.bs_greeks(kind == "CE", under, k, t, iv, rate))
                 rows.append({"ts": ts, "symbol": f"NIFTY_{k}_{kind}_03_NOV_26", "ltp": 120.0, "iv": iv if iv_percent else iv / 100.0, "delta": g["delta"].item(),
-                             "gamma": g["gamma"].item(), "theta": g["theta"].item() * scale_theta, "vega": g["vega"].item(), "rho": g["rho"].item()})
+                             "gamma": round(g["gamma"].item(), 4), "theta": g["theta"].item() * scale_theta, "vega": g["vega"].item(), "rho": g["rho"].item()})
     folder = tmp_path / "ticks" / "date=2026-11-02"
     folder.mkdir(parents=True)
     pd.DataFrame(rows).to_parquet(folder / "ticks.parquet")
@@ -85,7 +85,9 @@ def test_calibration_recovers_the_rate_and_units_and_passes(tmp_path, capsys):
     assert "JARVIS_GREEKS_CARRY=0" in gc.render(res) and "JARVIS_GREEKS_IV_SCALE=1" in gc.render(res) and "IV stored as a fraction" in gc.render(res)
     assert res["stored"]["iv"]["max"] < 1.0 and res["stored"]["delta"]["distinct"] > 10
     assert {g: res["greeks"][g]["unit"] for g in ("theta", "vega", "rho")} == {"theta": "per day", "vega": "per vol point", "rho": "per 1%"}
-    assert all(res["greeks"][g]["median_rel_error"] < 0.001 for g in ("delta", "gamma", "theta", "vega"))
+    assert all(res["greeks"][g]["median_rel_error"] < 0.001 for g in ("delta", "theta", "vega"))
+    assert res["greeks"]["gamma"]["median_abs_error"] <= gc.GAMMA_ABS_TOLERANCE                   # gamma is stored with four decimals
+    assert "judged by absolute error" in gc.render(res)
     assert "PASS" in gc.render(res)
     assert gc.main(["calibrate", "--stream", str(tmp_path)]) == 0 and "PASS" in capsys.readouterr().out
 
