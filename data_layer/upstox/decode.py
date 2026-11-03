@@ -29,6 +29,13 @@ def _ts(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).replace(tzinfo=None)
 
 
+def _event_time(resp: "pb.FeedResponse", ltpc) -> datetime:
+    """When the message was generated (FeedResponse.currentTs), else the last-trade time, else now."""
+    if resp.currentTs:
+        return _ts(resp.currentTs)
+    return _ts(ltpc.ltt) if ltpc.ltt else datetime.utcnow()
+
+
 def _greeks(holder) -> dict:
     """iv, delta, theta, gamma, vega, rho from a feed message that carries `optionGreeks` (options only)."""
     if not holder.HasField("optionGreeks"):
@@ -55,19 +62,24 @@ def _ext_full(m) -> dict:
 
 
 def _tick(symbol: str, ltpc, vtt: Optional[int], quote, oi: Optional[float], greeks: Optional[dict] = None,
-          extra: Optional[dict] = None) -> Optional[Tick]:
-    if not ltpc.ltt or not ltpc.ltp:                 # no trade yet today
+          extra: Optional[dict] = None, fts: Optional[datetime] = None) -> Optional[Tick]:
+    """One row per message and instrument.  `ts` is the last-trade time; `fts` is the message time (event time).  An instrument that has
+    not traded yet has no last-trade time: the row is kept as a quote-only row (no price) stamped with the message time."""
+    traded = bool(ltpc.ltt and ltpc.ltp)
+    if not traded and fts is None:                  # nothing to time the row with
         return None
     bid = ask = bq = aq = None
     if quote is not None:
         bid, bq, ask, aq = quote.bidP or None, quote.bidQ, quote.askP or None, quote.askQ
-    return Tick(_ts(ltpc.ltt), symbol, ltpc.ltp, vtt, bid, bq, ask, aq,
-                int(oi) if oi else None, **(greeks or {}), **(extra or {}))
+    return Tick(_ts(ltpc.ltt) if traded else fts, symbol, ltpc.ltp if traded else None, vtt, bid, bq, ask, aq,
+                int(oi) if oi else None, **(greeks or {}), **(extra or {}), fts=fts)
 
 
 def ticks_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str], ext: bool = False
                         ) -> Iterator[Tick]:
-    """Yield one Tick per known instrument in a feed frame; unknown keys are ignored.  `ext` adds the extended fields."""
+    """Yield one Tick per known instrument in a feed frame; unknown keys are ignored.  `ext` adds the extended fields.  Every tick
+    carries the message time (`fts`, FeedResponse.currentTs) as its event time next to the last-trade time `ts`."""
+    fts = _ts(resp.currentTs) if resp.currentTs else None
     for key, feed in resp.feeds.items():
         sym = key_to_symbol.get(key)
         if sym is None:
@@ -78,15 +90,15 @@ def ticks_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str], 
             if ff.HasField("marketFF"):
                 m = ff.marketFF
                 q = m.marketLevel.bidAskQuote[0] if m.marketLevel.bidAskQuote else None
-                t = _tick(sym, m.ltpc, m.vtt, q, m.oi, _greeks(m), {**_ext_ltpc(m.ltpc), **_ext_full(m)} if ext else None)
+                t = _tick(sym, m.ltpc, m.vtt, q, m.oi, _greeks(m), {**_ext_ltpc(m.ltpc), **_ext_full(m)} if ext else None, fts)
             elif ff.HasField("indexFF"):
-                t = _tick(sym, ff.indexFF.ltpc, None, None, None, None, _ext_ltpc(ff.indexFF.ltpc) if ext else None)
+                t = _tick(sym, ff.indexFF.ltpc, None, None, None, None, _ext_ltpc(ff.indexFF.ltpc) if ext else None, fts)
         elif feed.HasField("firstLevelWithGreeks"):
             g = feed.firstLevelWithGreeks
             t = _tick(sym, g.ltpc, g.vtt, g.firstDepth if g.HasField("firstDepth") else None, g.oi, _greeks(g),
-                      _ext_ltpc(g.ltpc) if ext else None)
+                      _ext_ltpc(g.ltpc) if ext else None, fts)
         elif feed.HasField("ltpc"):
-            t = _tick(sym, feed.ltpc, None, None, None, None, _ext_ltpc(feed.ltpc) if ext else None)
+            t = _tick(sym, feed.ltpc, None, None, None, None, _ext_ltpc(feed.ltpc) if ext else None, fts)
         if t is not None:
             yield t
 
@@ -106,7 +118,7 @@ def books_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str]
         bids = [[q.bidP, q.bidQ] for q in quotes if q.bidP]
         asks = [[q.askP, q.askQ] for q in quotes if q.askP]
         if bids or asks:
-            yield sym, _ts(m.ltpc.ltt) if m.ltpc.ltt else datetime.utcnow(), m.ltpc.ltp or None, bids, asks
+            yield sym, _event_time(resp, m.ltpc), m.ltpc.ltp or None, bids, asks
 
 
 def events_from_response(resp: "pb.FeedResponse") -> list[dict]:

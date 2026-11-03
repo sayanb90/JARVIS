@@ -75,6 +75,12 @@ def write_ticks(ticks: Iterable[Tick], lake_dir: Path | None = None) -> int:
         return 0
     for c in ("iv", "delta", "theta", "gamma", "vega", "rho"):   # stable type so equity-only and option segments union
         df[c] = df[c].astype("float32")
+    df["ltp"] = df["ltp"].astype("float64")                      # None for a quote-only row; keep the type stable
+    for c in ("fts", "rts"):                                     # event time and arrival time: only when this batch has them
+        if df[c].notna().any():
+            df[c] = pd.to_datetime(df[c])
+        else:
+            df = df.drop(columns=c)
     for c, dtype in EXT_COLUMNS.items():                         # extended stream fields: only when present in this batch
         if df[c].notna().any():
             df[c] = df[c].astype(dtype)
@@ -95,6 +101,11 @@ def write_events(events: Iterable[dict], lake_dir: Path | None = None) -> int:
     for day, part in df.groupby(df["ts"].dt.date):
         _write_segment((lake_dir or LAKE_DIR) / "events" / f"date={day}", part)
     return len(df)
+
+
+def order_expr(columns: list[str]) -> str:
+    """SQL for the first non-null of `columns` (arrival time, event time, last-trade time, whichever the files have)."""
+    return columns[0] if len(columns) == 1 else "coalesce(" + ", ".join(columns) + ")"
 
 
 @contextmanager
@@ -141,7 +152,8 @@ def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
             src = f"read_parquet([{names}], union_by_name=true, hive_partitioning=false)"
             cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
             sel = "* EXCLUDE (date)" if "date" in cols else "*"
-            con.execute(f"COPY (SELECT {sel} FROM {src} ORDER BY symbol, ts) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+            order = order_expr([c for c in ("rts", "fts", "ts") if c in cols])         # arrival order when it is known
+            con.execute(f"COPY (SELECT {sel} FROM {src} ORDER BY symbol, {order}) TO '{tmp}' (FORMAT PARQUET, COMPRESSION ZSTD)")
             os.replace(tmp, folder / "ticks.parquet")
         finally:
             con.close()

@@ -74,7 +74,7 @@ class FeedProcessor:
         self.policy = policy or TickPolicy()             # default: keep every tick, every Greek
         self._ticks: list[Tick] = []
         self.status: dict[str, str] = {}
-        self.frames = self.ticks = self.dropped_stale = self.dropped_future = 0
+        self.frames = self.ticks = self.dropped_stale = self.dropped_future = self.quote_only = 0
 
     def handle(self, data: bytes, now: datetime) -> None:
         resp = decode.parse_frame(data)
@@ -93,9 +93,14 @@ class FeedProcessor:
         for sym, ts, ltp, bids, asks in decode.books_from_response(resp, self.key_map):
             self.books.update(sym, ts, ltp, bids, asks)
         for t in decode.ticks_from_response(resp, self.key_map, ext=self.ext):
-            if t.ts.date() != now.date():                # last trade from an earlier day
-                self.dropped_stale += 1
-                continue
+            t.rts = now                                  # when this process received the message (exact arrival order)
+            if t.ts.date() != now.date():                # last trade from an earlier day: no trade yet today
+                if t.fts is not None and t.fts.date() == now.date():
+                    t.ts, t.ltp = t.fts, None            # keep the quote and Greeks as a quote-only row, timed by the message
+                    self.quote_only += 1
+                else:
+                    self.dropped_stale += 1
+                    continue
             if t.ts > now + timedelta(seconds=60):       # clock skew or wrong time unit
                 self.dropped_future += 1
                 if self.dropped_future in (1, 100, 10_000):
@@ -217,9 +222,9 @@ class UpstoxFeed:
                 except Exception:                              # noqa: BLE001 -- a failed flush must not end this loop
                     log.exception("flush failed; %d ticks are kept in memory and the next flush will retry", len(self.proc._ticks))
                 else:
-                    log.info("frames=%d ticks=%d ticks_written=%d policy_dropped=%d stale=%d future=%d",
+                    log.info("frames=%d ticks=%d ticks_written=%d policy_dropped=%d stale=%d future=%d quote_only=%d",
                              self.proc.frames, self.proc.ticks, n, self.proc.policy.dropped,
-                             self.proc.dropped_stale, self.proc.dropped_future)
+                             self.proc.dropped_stale, self.proc.dropped_future, self.proc.quote_only)
             if (now - self._last_frame).total_seconds() > self.stale_s:
                 log.warning("no frames for %.0fs, reconnecting", (now - self._last_frame).total_seconds())
                 await ws.close()

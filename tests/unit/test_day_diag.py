@@ -86,6 +86,13 @@ def test_timestamp_sharing_counts_rows_that_carry_another_rows_time(tmp_path):
     ts = dd.timestamp_sharing(f)
     assert ts["equity"] == {"rows": 4, "distinct_ts": 2, "rows_sharing_a_ts": 3, "max_rows_one_ts": 3, "instruments": 1, "pct_sharing": 75.0}
     assert ts["fo"]["pct_sharing"] == 0.0 and ts["fo"]["rows"] == 4 and ts["fo"]["distinct_ts"] == 4
+    assert "pct_sharing_fts" not in ts["equity"]                                                  # files without event time say nothing about it
+    df = pd.DataFrame(rows)
+    df["fts"] = [base + timedelta(seconds=i) for i in range(len(df))]                              # every row has its own event time
+    g = tmp_path / "with_fts.parquet"
+    df.to_parquet(g)
+    both = dd.timestamp_sharing(g)
+    assert both["equity"]["pct_sharing"] == 75.0 and both["equity"]["pct_sharing_fts"] == 0.0 and both["equity"]["max_rows_one_fts"] == 1
 
 
 def stream(tmp_path: Path, iv: float = 0.15) -> Path:
@@ -122,7 +129,7 @@ def test_full_report_and_command_line(tmp_path, capsys):
     report = (logs / "diag-20261103.md").read_text()
     assert report in out
     assert "F&O progress log silent from 08:18:51 to 10:05:36 UTC (106 min)" in report
-    assert "F&O feed memory grew 8x" in report and "Identical rows: equity 50.0%, fo 0.0%" in report and "Rows sharing a timestamp" in report and "equity 100.0%" in report and "gamma has 5 distinct values" in report
+    assert "F&O feed memory grew 8x" in report and "Identical rows: equity 50.0%, fo 0.0%" in report and "Rows sharing a last-trade time" in report and "equity 100.0%" in report and "gamma has 5 distinct values" in report
     assert "ValueError: bad" in report and f"{DAY} 08:18:51" not in report.splitlines()[2]
     assert dd.main(["--day", "2026-11-04", "--logs", str(logs), "--lake", str(lake), "--probe", str(tmp_path / "none")]) == 0
     assert "No F&O feed log lines for the day" in (logs / "diag-20261104.md").read_text()

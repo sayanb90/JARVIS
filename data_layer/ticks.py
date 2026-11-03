@@ -22,9 +22,9 @@ SESSION_CLOSE_UTC = time(10, 0)
 
 @dataclass(slots=True)
 class Tick:
-    ts: datetime                    # exchange timestamp, naive UTC
+    ts: datetime                    # exchange last-trade time (ltpc.ltt), naive UTC; the feed message time for a row with no trade
     symbol: str                     # lake symbol, e.g. RELIANCE.NS
-    ltp: float
+    ltp: Optional[float]            # None for a quote-only row: the instrument has not traded today
     vol_today: Optional[int] = None  # cumulative day volume, if the feed carries it
     bid: Optional[float] = None
     bid_qty: Optional[int] = None
@@ -50,6 +50,12 @@ class Tick:
     iiq_market: Optional[int] = None    # imbalance from market orders
     ref_price: Optional[float] = None   # reference price for price bands
     cas_eligible: Optional[bool] = None
+    # event time (SCRUM-116): `ts` is the time of the last trade, so quote, Greek and open-interest updates between trades all carry
+    # the time of the earlier trade.  fts is when Upstox generated the message (FeedResponse.currentTs); rts is when this process
+    # received it, which orders messages exactly even if the two clocks disagree.  Both naive UTC; a column that is empty in a
+    # batch is not written, so files are unchanged for code that does not set them.
+    fts: Optional[datetime] = None
+    rts: Optional[datetime] = None
 
 
 @dataclass(slots=True)
@@ -117,6 +123,8 @@ class BarAggregator:
                    (a.pv / a.vol) if a.vol else a.c, a.n, a.bid, a.ask, a.bq, a.aq, oi=a.oi)
 
     def add(self, t: Tick) -> list[Bar]:
+        if t.ltp is None:                               # a quote-only row (no trade yet today) makes no price bar
+            return []
         start = self._bucket(t.ts)
         if start is None:
             return []

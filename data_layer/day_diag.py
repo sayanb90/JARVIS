@@ -128,16 +128,26 @@ def duplicate_counts(ticks_file: Path) -> dict[str, dict]:
 
 
 def timestamp_sharing(ticks_file: Path) -> dict[str, dict]:
-    """How often rows of one instrument share a timestamp.  A tick is stamped with the exchange's last-trade time (ltpc.ltt), so
-    quote and Greek updates that arrive between two trades all carry the time of the earlier trade (SCRUM-116)."""
+    """How often rows of one instrument share a timestamp, by last-trade time (`ts`) and, when the file has it, by event time (`fts`).
+    A tick is stamped with the exchange's last-trade time (ltpc.ltt), so quote and Greek updates between two trades all carry the time
+    of the earlier trade; event time (the message time) is what SCRUM-116 added."""
     con = duckdb.connect()
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{ticks_file}')").fetchall()}
     out = {}
     for name, cond in (("equity", f"NOT {FO}"), ("fo", FO)):
-        rows, pairs, sharing, worst, instruments = con.execute(
-            f"""WITH g AS (SELECT symbol, ts, count(*) AS n FROM read_parquet('{ticks_file}') WHERE {cond} GROUP BY symbol, ts)
-                SELECT coalesce(sum(n), 0), count(*), coalesce(sum(n) FILTER (WHERE n > 1), 0), coalesce(max(n), 0), count(DISTINCT symbol) FROM g""").fetchone()
-        out[name] = {"rows": int(rows), "distinct_ts": int(pairs), "rows_sharing_a_ts": int(sharing), "max_rows_one_ts": int(worst), "instruments": int(instruments),
-                     "pct_sharing": round(100.0 * sharing / rows, 1) if rows else 0.0}
+        res = {}
+        for label, col in (("", "ts"), ("_fts", "fts")):
+            if col not in cols:
+                continue
+            rows, pairs, sharing, worst, instruments = con.execute(
+                f"""WITH g AS (SELECT symbol, {col} AS t, count(*) AS n FROM read_parquet('{ticks_file}') WHERE {cond} GROUP BY symbol, {col})
+                    SELECT coalesce(sum(n), 0), count(*), coalesce(sum(n) FILTER (WHERE n > 1), 0), coalesce(max(n), 0), count(DISTINCT symbol) FROM g""").fetchone()
+            if label == "":
+                res.update({"rows": int(rows), "distinct_ts": int(pairs), "rows_sharing_a_ts": int(sharing), "max_rows_one_ts": int(worst),
+                            "instruments": int(instruments), "pct_sharing": round(100.0 * sharing / rows, 1) if rows else 0.0})
+            else:
+                res.update({"pct_sharing_fts": round(100.0 * sharing / rows, 1) if rows else 0.0, "max_rows_one_fts": int(worst)})
+        out[name] = res
     return out
 
 
@@ -205,9 +215,11 @@ def build_report(day: date, logs: Path, lake: Path, probe: Optional[Path]) -> st
         body += ["", "## 4b. Rows that share their timestamp with another row of the same instrument", ""]
         ts = timestamp_sharing(ticks)
         for k, v in ts.items():
-            body.append(f"- {k}: {v['rows']:,} rows over {v['instruments']:,} instruments carry {v['distinct_ts']:,} distinct timestamps; "
-                        f"{v['rows_sharing_a_ts']:,} rows ({v['pct_sharing']}%) share one, at most {v['max_rows_one_ts']:,} rows on a single timestamp")
-        summary.append("Rows sharing a timestamp with another row of the same instrument: " + ", ".join(f"{k} {v['pct_sharing']}%" for k, v in ts.items()) + ".")
+            body.append(f"- {k}: {v['rows']:,} rows over {v['instruments']:,} instruments carry {v['distinct_ts']:,} distinct last-trade times; "
+                        f"{v['rows_sharing_a_ts']:,} rows ({v['pct_sharing']}%) share one, at most {v['max_rows_one_ts']:,} rows on a single one"
+                        + (f"; by event time (fts) {v['pct_sharing_fts']}% share one, at most {v['max_rows_one_fts']:,}" if "pct_sharing_fts" in v else "; no event time stored"))
+        summary.append("Rows sharing a last-trade time with another row of the same instrument: " + ", ".join(f"{k} {v['pct_sharing']}%" for k, v in ts.items())
+                       + (". Sharing an event time: " + ", ".join(f"{k} {v['pct_sharing_fts']}%" for k, v in ts.items()) if all("pct_sharing_fts" in v for v in ts.values()) else "") + ".")
     else:
         body.append(f"{ticks} not found (not compacted yet?).")
     # 5: Greeks

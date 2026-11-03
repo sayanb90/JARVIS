@@ -78,10 +78,11 @@ class TickPolicy:
         if self.mode != "full":
             prev = self._last.get(t.symbol)
             if self.mode == "throttle":
-                if prev is not None and (t.ts - prev).total_seconds() < self.min_interval_s:
+                at = t.fts or t.ts                              # event time when the feed gives it
+                if prev is not None and (at - prev).total_seconds() < self.min_interval_s:
                     self.dropped += 1
                     return None
-                self._last[t.symbol] = t.ts
+                self._last[t.symbol] = at
             else:
                 key = tuple(getattr(t, f) for f in _MARKET_FIELDS)
                 if prev == key:
