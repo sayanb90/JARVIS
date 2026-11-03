@@ -13,8 +13,8 @@ JARVIS=/home/jarvis/JARVIS
 30 22 * * 1-5  cd $JARVIS && python scheduler.py --job ohlc-daily  >> logs/scheduler.log 2>&1
 # Fundamentals rotation (India; spends the FMP free-tier budget on the stalest stocks)
 0 12 * * 1-5   cd $JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
-# Nightly backup snapshot (JARVIS_BACKUP_DIR comes from .env)
-30 23 * * *    cd $JARVIS && python -m data_layer.backup run >> logs/backup.log 2>&1
+# Nightly backup snapshot: parked until a separate disk or bucket exists (SCRUM-121); health only warns, cron_check does not require it.
+# When it is set up (JARVIS_BACKUP_DIR in .env), add:  30 23 * * *  cd $JARVIS && python -m data_layer.backup run >> logs/backup.log 2>&1
 # Morning health report, before the session; mail or read logs/health.log
 15 3 * * 1-5   cd $JARVIS && python -m data_layer.health >> logs/health.log 2>&1
 # End-of-day health report, after the feed has compacted the day (10:05 UTC) and Yahoo's daily bar exists

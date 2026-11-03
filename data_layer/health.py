@@ -165,14 +165,14 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
     # backup
     bdir = backup_path or os.getenv("JARVIS_BACKUP_DIR")
     if not bdir:
-        r.line("WARN", "no backup destination configured (JARVIS_BACKUP_DIR)")
+        r.line("WARN", "no backup destination configured (JARVIS_BACKUP_DIR; backup is parked: SCRUM-121)")
     else:
         snaps = backup.list_snapshots(Path(bdir))
         if not snaps:
-            r.line("FAIL", f"no backup snapshots in {bdir}")
+            r.line("WARN", f"no backup snapshots in {bdir} (backup is parked: SCRUM-121)")
         else:
             age = (today - date.fromisoformat(snaps[-1])).days
-            r.line("PASS" if age <= 1 else "WARN" if age <= 3 else "FAIL", f"newest backup {snaps[-1]} ({age} days old), {len(snaps)} snapshots")
+            r.line("PASS" if age <= 1 else "WARN", f"newest backup {snaps[-1]} ({age} days old), {len(snaps)} snapshots")
     return r
 
 
