@@ -144,3 +144,12 @@ def test_the_fo_memory_line_reads_the_fo_process_even_when_the_equity_feed_is_li
     fo = dict((m, (r, p)) for m, r, p in dd.rss_trend(f, DAY, "segment fo"))
     eq = dict((m, (r, p)) for m, r, p in dd.rss_trend(f, DAY, "feed", exclude=("segment fo",)))
     assert fo["10:00"] == (2203.0, 2300.0) and eq["10:00"] == (269.0, 273.0)
+
+
+def test_the_fo_row_skips_the_cron_wrapper_that_is_listed_before_the_feed(tmp_path):
+    """SCRUM-123: the cron job's shell wrapper has 'segment fo' in its command too (3.7 MB) and came first in the process list."""
+    f = tmp_path / "r.jsonl"
+    procs = [{"pid": 1, "cmd": "data_layer.upstox.feed --once --segment fo >> logs/fo-feed.log 2>&1", "rss_mb": 3.7, "peak_rss_mb": 3.7},
+             {"pid": 2, "cmd": "data_layer.upstox.feed --once --segment fo", "rss_mb": 2279.0, "peak_rss_mb": 5499.6}]
+    f.write_text(json.dumps({"ts": f"{DAY}T10:01:00Z", "procs": procs}) + "\n")
+    assert dict((m, (r, p)) for m, r, p in dd.rss_trend(f, DAY, "segment fo", exclude=(">>", "sh -c")))["10:00"] == (2279.0, 5499.6)
