@@ -72,6 +72,26 @@ def _setting(name: str, default: float) -> float:
         return default
 
 
+def theta_basis() -> str:
+    """"spot": theta holds the spot fixed (textbook Black-Scholes).  "future": it holds the future's price fixed (Black-76 style),
+    which adds carry * spot * delta per year; `calibrate` finds out which one Upstox uses."""
+    v = os.environ.get("JARVIS_GREEKS_THETA_BASIS")
+    if not v:
+        try:
+            from dotenv import dotenv_values
+            from .lake import ENV_FILE
+            v = dotenv_values(ENV_FILE).get("JARVIS_GREEKS_THETA_BASIS")
+        except Exception:                                                     # noqa: BLE001 -- settings are optional
+            v = None
+    return "future" if (v or "").strip().lower() == "future" else "spot"
+
+
+def theta_for_basis(raw_theta, under, delta, basis: str, carry_rate: float):
+    """Raw theta (per year) on the chosen basis.  With S = F * exp(-c * (Tf - t)) and F fixed, dS/dt = c * S, so
+    dV/dt|F = dV/dt|S + c * S * delta."""
+    return raw_theta + carry_rate * np.asarray(under, dtype=float) * delta if basis == "future" else raw_theta
+
+
 def rate() -> float:
     return _setting("JARVIS_GREEKS_RATE", DEFAULT_RATE)
 
@@ -172,6 +192,7 @@ def add_computed(df: pd.DataFrame, symbol: str, under: pd.Series, rate_: Optiona
     _, strike, kind, expiry = meta
     t = years_to_expiry(out["ts"], expiry)
     raw = bs_greeks(kind == "CE", under.to_numpy(dtype=float), strike, t, iv_to_percent(out["iv"].to_numpy(dtype=float)), rate() if rate_ is None else rate_)
+    raw["theta"] = theta_for_basis(raw["theta"], under.to_numpy(dtype=float), raw["delta"], theta_basis(), carry())
     disp = to_display(raw)
     for g in ("delta", "gamma", "theta", "vega", "rho"):
         if g not in out.columns or out[g].isna().all():
@@ -238,7 +259,7 @@ def _errors(calc: np.ndarray, ref: np.ndarray) -> tuple[float, float, int]:
 
 
 def calibrate(stream: Path, max_rows: int = 100_000, near: float = 0.05, tolerance: float = 0.02,
-              rates: tuple = (0.0, 0.05, 0.065, 0.08), carries: tuple = (0.0, 0.02, 0.04, 0.05, 0.06, 0.065, 0.07, 0.08, 0.1)) -> dict:
+              rates: tuple = (0.0, 0.04, 0.05, 0.055, 0.06, 0.065, 0.07, 0.08), carries: tuple = (0.0, 0.02, 0.04, 0.05, 0.06, 0.065, 0.07, 0.08, 0.1)) -> dict:
     """Best (rate, carry, units) per Greek against Upstox's own values.  Returns a dict with `ok`, `rate`, `carry`, `greeks`, `rows`."""
     opts, futs = _read_rows(stream, max_rows)
     d = _prepare(opts, futs, near)
@@ -248,10 +269,15 @@ def calibrate(stream: Path, max_rows: int = 100_000, near: float = 0.05, toleran
     fut, tf = d["fut"].to_numpy(), d["tf"].to_numpy()
     delta_ref, gamma_ref = d["delta"].to_numpy(), d["gamma"].to_numpy()
 
+    theta_ref = d["theta"].to_numpy()
+
     def trial(scale: float, c: float, r: float):
         under = fut * np.exp(-c * tf)
         raw = bs_greeks(call, under, k, t, iv_to_percent(iv_raw, scale), r)
-        return _errors(raw["delta"], delta_ref)[0] + _errors(raw["gamma"], gamma_ref)[0], raw
+        raw["theta_spot"] = raw["theta"]
+        raw["theta_future"] = theta_for_basis(raw["theta"], under, raw["delta"], "future", c)
+        th = min(_errors(raw[f"theta_{b}"] / DISPLAY["theta"], theta_ref)[0] for b in ("spot", "future"))
+        return _errors(raw["delta"], delta_ref)[0] + _errors(raw["gamma"], gamma_ref)[0] + th, raw
 
     scales = {s_: trial(s_, DEFAULT_CARRY, DEFAULT_RATE)[0] for s_ in (1.0, 0.01)}               # fraction or percent?
     iv_unit = min(scales, key=scales.get)
@@ -262,6 +288,8 @@ def calibrate(stream: Path, max_rows: int = 100_000, near: float = 0.05, toleran
             if best is None or err < best[0]:
                 best = (err, r, c, raw)
     _, rate, carry_, raw = best
+    basis = min(("spot", "future"), key=lambda b: _errors(raw[f"theta_{b}"] / DISPLAY["theta"], theta_ref)[0])
+    raw["theta"] = raw[f"theta_{basis}"]
     greeks = {}
     for g in ("delta", "gamma", "theta", "vega", "rho"):
         choices = [(1.0, "as is")] if g in ("delta", "gamma") else [
@@ -281,12 +309,12 @@ def calibrate(stream: Path, max_rows: int = 100_000, near: float = 0.05, toleran
     ok = all(greeks[g]["median_rel_error"] <= tolerance for g in judged) and greeks["gamma"]["median_abs_error"] <= GAMMA_ABS_TOLERANCE
     stored = {g: {"distinct": int(pd.Series(d[g]).nunique()), "min": float(d[g].min()), "max": float(d[g].max())}
               for g in ("iv", "delta", "gamma", "theta", "vega", "rho")}
-    return {"ok": ok, "rate": rate, "carry": carry_, "iv_scale": iv_unit, "tolerance": tolerance, "greeks": greeks, "rows": len(d),
+    return {"ok": ok, "rate": rate, "carry": carry_, "iv_scale": iv_unit, "theta_basis": basis, "tolerance": tolerance, "greeks": greeks, "rows": len(d),
             "total_rows": opts.attrs["total_rows"], "stored": stored}
 
 
 def render(res: dict) -> str:
-    lines = [f"Calibration on {res['rows']:,} near-the-money rows (sampled from {res['total_rows']:,}); best rate {res['rate']:.3f}, future carry {res['carry']:.3f}, "
+    lines = [f"Calibration on {res['rows']:,} near-the-money rows (sampled from {res['total_rows']:,}); best rate {res['rate']:.3f}, future carry {res['carry']:.3f}, theta held on the {res['theta_basis']}, "
              f"IV stored as {'a fraction' if res['iv_scale'] == 1.0 else 'a percent'}",
              f"{'greek':<7}{'median error':>14}{'95th pct':>11}{'rows':>9}  unit that matched"]
     for g, r in res["greeks"].items():
@@ -295,7 +323,7 @@ def render(res: dict) -> str:
     lines.append("\nstored values in the sample (distinct values, min, max):")
     lines += [f"  {g:<6}{v['distinct']:>9,}  {v['min']:.6g}  {v['max']:.6g}" for g, v in res["stored"].items()]
     lines.append(f"\n{'PASS' if res['ok'] else 'FAIL'}: delta, theta and vega must each be within {res['tolerance'] * 100:.0f}% (median) and gamma within {GAMMA_ABS_TOLERANCE:g} (absolute)."
-                 + (f"\nSet in .env: JARVIS_GREEKS_RATE={res['rate']:g}  JARVIS_GREEKS_CARRY={res['carry']:g}  JARVIS_GREEKS_IV_SCALE={res['iv_scale']:g}" if res["ok"]
+                 + (f"\nSet in .env: JARVIS_GREEKS_RATE={res['rate']:g}  JARVIS_GREEKS_CARRY={res['carry']:g}  JARVIS_GREEKS_IV_SCALE={res['iv_scale']:g}  JARVIS_GREEKS_THETA_BASIS={res['theta_basis']}" if res["ok"]
                     else "  Keep JARVIS_GREEKS=all until this passes."))
     return "\n".join(lines)
 

@@ -9,7 +9,7 @@
 #   1. the tests that cover these fixes           stops if any fails
 #   2. restarts the jarvis-feed user service
 #   3. re-runs the Greeks calibration on probe_data/stream_fo
-#        PASS -> adds JARVIS_GREEKS_RATE, JARVIS_GREEKS_CARRY, JARVIS_GREEKS_IV_SCALE and JARVIS_GREEKS=core to .env
+#        PASS -> adds JARVIS_GREEKS_RATE, JARVIS_GREEKS_CARRY, JARVIS_GREEKS_IV_SCALE, JARVIS_GREEKS_THETA_BASIS and JARVIS_GREEKS=core to .env
 #                (a backup copy is made first, values are never printed) and restarts jarvis-feed again
 #        FAIL -> changes nothing
 #   4. the scheduler check and the health check
@@ -56,13 +56,13 @@ CAL="logs/calibration-${TAG}b.txt"
 $PY -m data_layer.greeks_calc calibrate --stream probe_data/stream_fo | tee "$CAL"
 rc=${PIPESTATUS[0]}
 if [ "$rc" -eq 0 ]; then
-    pairs=$(grep -o 'JARVIS_GREEKS_[A-Z_]*=[0-9.eE+-]*' "$CAL" | sort -u | tr '\n' ' ')
-    if [ "$(echo $pairs | wc -w)" -eq 3 ]; then
+    pairs=$(grep -o 'JARVIS_GREEKS_[A-Z_]*=[A-Za-z0-9.eE+-]*' "$CAL" | sort -u | tr '\n' ' ')
+    if [ "$(echo $pairs | wc -w)" -eq 4 ]; then
         # shellcheck disable=SC2086
         $PY -m data_layer.envfile set $pairs JARVIS_GREEKS=core
         systemctl --user restart jarvis-feed
         sleep 5
-        echo "calibration PASSED: .env now has the three calibration settings and JARVIS_GREEKS=core; jarvis-feed: $(systemctl --user is-active jarvis-feed)"
+        echo "calibration PASSED: .env now has the four calibration settings and JARVIS_GREEKS=core; jarvis-feed: $(systemctl --user is-active jarvis-feed)"
     else
         echo "calibration passed but the settings line was not found in $CAL: .env left as it is"
     fi

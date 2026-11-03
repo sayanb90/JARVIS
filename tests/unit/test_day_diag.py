@@ -133,3 +133,14 @@ def test_full_report_and_command_line(tmp_path, capsys):
     assert "ValueError: bad" in report and f"{DAY} 08:18:51" not in report.splitlines()[2]
     assert dd.main(["--day", "2026-11-04", "--logs", str(logs), "--lake", str(lake), "--probe", str(tmp_path / "none")]) == 0
     assert "No F&O feed log lines for the day" in (logs / "diag-20261104.md").read_text()
+
+
+def test_the_fo_memory_line_reads_the_fo_process_even_when_the_equity_feed_is_listed_first(tmp_path):
+    """SCRUM-119: both feeds appear in each resource log; matching 'feed' alone gave the F&O row the equity feed's memory."""
+    f = tmp_path / "r.jsonl"
+    procs = [{"pid": 1, "cmd": "data_layer.upstox.feed", "rss_mb": 269.0, "peak_rss_mb": 273.0},
+             {"pid": 2, "cmd": "data_layer.upstox.feed --once --segment fo", "rss_mb": 2203.0, "peak_rss_mb": 2300.0}]
+    f.write_text(json.dumps({"ts": f"{DAY}T10:01:00Z", "procs": procs}) + "\n")
+    fo = dict((m, (r, p)) for m, r, p in dd.rss_trend(f, DAY, "segment fo"))
+    eq = dict((m, (r, p)) for m, r, p in dd.rss_trend(f, DAY, "feed", exclude=("segment fo",)))
+    assert fo["10:00"] == (2203.0, 2300.0) and eq["10:00"] == (269.0, 273.0)

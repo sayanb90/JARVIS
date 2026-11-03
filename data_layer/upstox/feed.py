@@ -287,6 +287,30 @@ def next_window(now: datetime) -> tuple[datetime, datetime]:
         d += timedelta(days=1)
 
 
+class _on_signals:
+    """While active, SIGINT and SIGTERM call `callback` (Ctrl+C / systemctl stop).  The handlers are removed on exit: a handler
+    left behind after the session made the process ignore SIGTERM while it waited for the next window, so every restart
+    outside the session needed the 60 s stop timeout and a SIGKILL (SCRUM-118)."""
+
+    def __init__(self, callback) -> None:
+        self.callback, self.installed = callback, []
+
+    def __enter__(self):
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, self.callback)
+                self.installed.append(sig)
+            except (NotImplementedError, RuntimeError):      # non-main thread / Windows
+                pass
+        return self
+
+    def __exit__(self, *exc) -> None:
+        loop = asyncio.get_running_loop()
+        for sig in self.installed:
+            loop.remove_signal_handler(sig)
+
+
 async def run_day(feed: UpstoxFeed, end: datetime) -> None:
     stop = asyncio.Event()
 
@@ -294,14 +318,9 @@ async def run_day(feed: UpstoxFeed, end: datetime) -> None:
         await asyncio.sleep(max(0.0, (end - feed.clock()).total_seconds()))
         stop.set()
     t = asyncio.create_task(stopper())
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):          # Ctrl+C / systemctl stop: save and compact
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except (NotImplementedError, RuntimeError):      # non-main thread / Windows
-            pass
     try:
-        await feed.run_session(stop)
+        with _on_signals(stop.set):                      # save and compact on Ctrl+C / systemctl stop
+            await feed.run_session(stop)
     finally:
         t.cancel()
     day = end.date()
@@ -315,7 +334,15 @@ async def run_forever(make_feed, once: bool = False) -> None:
         start, end = next_window(now) if not once else (now, session_window(now.date())[1])
         if start > now:
             log.info("waiting for %s UTC", start)
-            await asyncio.sleep((start - now).total_seconds())
+            quit_ = asyncio.Event()
+            with _on_signals(quit_.set):                 # stop at once while waiting; there is nothing to save
+                try:
+                    await asyncio.wait_for(quit_.wait(), timeout=(start - now).total_seconds())
+                except asyncio.TimeoutError:
+                    pass
+            if quit_.is_set():
+                log.info("stopped while waiting for the next session")
+                return
         await run_day(make_feed(), end)
         if once:
             return
