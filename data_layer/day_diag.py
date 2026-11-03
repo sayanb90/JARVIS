@@ -127,6 +127,20 @@ def duplicate_counts(ticks_file: Path) -> dict[str, dict]:
     return out
 
 
+def timestamp_sharing(ticks_file: Path) -> dict[str, dict]:
+    """How often rows of one instrument share a timestamp.  A tick is stamped with the exchange's last-trade time (ltpc.ltt), so
+    quote and Greek updates that arrive between two trades all carry the time of the earlier trade (SCRUM-116)."""
+    con = duckdb.connect()
+    out = {}
+    for name, cond in (("equity", f"NOT {FO}"), ("fo", FO)):
+        rows, pairs, sharing, worst, instruments = con.execute(
+            f"""WITH g AS (SELECT symbol, ts, count(*) AS n FROM read_parquet('{ticks_file}') WHERE {cond} GROUP BY symbol, ts)
+                SELECT coalesce(sum(n), 0), count(*), coalesce(sum(n) FILTER (WHERE n > 1), 0), coalesce(max(n), 0), count(DISTINCT symbol) FROM g""").fetchone()
+        out[name] = {"rows": int(rows), "distinct_ts": int(pairs), "rows_sharing_a_ts": int(sharing), "max_rows_one_ts": int(worst), "instruments": int(instruments),
+                     "pct_sharing": round(100.0 * sharing / rows, 1) if rows else 0.0}
+    return out
+
+
 def greek_report(stream: Path) -> dict:
     """Units and ranges of the stored option Greeks (call options): what a calibration needs to know."""
     root = stream / "ticks" if (stream / "ticks").is_dir() else stream
@@ -188,6 +202,12 @@ def build_report(day: date, logs: Path, lake: Path, probe: Optional[Path]) -> st
         for k, v in d.items():
             body.append(f"- {k}: {v['total']:,} rows, {v['distinct']:,} distinct, {v['duplicates']:,} identical repeats ({v['pct']}%)")
         summary.append("Identical rows: " + ", ".join(f"{k} {v['pct']}%" for k, v in d.items()) + ".")
+        body += ["", "## 4b. Rows that share their timestamp with another row of the same instrument", ""]
+        ts = timestamp_sharing(ticks)
+        for k, v in ts.items():
+            body.append(f"- {k}: {v['rows']:,} rows over {v['instruments']:,} instruments carry {v['distinct_ts']:,} distinct timestamps; "
+                        f"{v['rows_sharing_a_ts']:,} rows ({v['pct_sharing']}%) share one, at most {v['max_rows_one_ts']:,} rows on a single timestamp")
+        summary.append("Rows sharing a timestamp with another row of the same instrument: " + ", ".join(f"{k} {v['pct_sharing']}%" for k, v in ts.items()) + ".")
     else:
         body.append(f"{ticks} not found (not compacted yet?).")
     # 5: Greeks
