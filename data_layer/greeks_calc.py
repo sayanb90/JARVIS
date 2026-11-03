@@ -11,10 +11,10 @@ interest rates and unit scalings (theta per day or per year, vega per volatility
 prints the median and 95th-percentile relative error of the best setting for each Greek, and exits non-zero when delta,
 gamma, theta or vega are off by more than the tolerance (default 2%).  If it fails, keep JARVIS_GREEKS=all.
 
-Conventions (what the webapp shows): IV in percent, theta per calendar day, vega per volatility point, rho per 1% of rate,
+Conventions (what the webapp shows): IV in percent (the feed stores it as a fraction; `iv_to_percent`), theta per calendar day, vega per volatility point, rho per 1% of rate,
 expiry at 15:30 IST, continuous compounding, no dividend.  The underlying is the spot implied by the nearest future,
 spot = future * exp(-carry * time to the future's expiry), because a weekly option's moneyness is sensitive to the monthly
-future's carry.  The rate and the carry come from JARVIS_GREEKS_RATE and JARVIS_GREEKS_CARRY (environment or .env) when set,
+future's carry.  The rate, the carry and the IV unit come from JARVIS_GREEKS_RATE, JARVIS_GREEKS_CARRY and JARVIS_GREEKS_IV_SCALE (environment or .env) when set,
 otherwise the defaults above; `calibrate` prints the values that fit Upstox's own numbers best.
 """
 
@@ -35,6 +35,8 @@ import pandas as pd
 
 DEFAULT_RATE = 0.065                       # annual, continuously compounded; confirmed or replaced by `calibrate`
 DEFAULT_CARRY = 0.065                      # spot = future price * exp(-carry * years to the future's expiry); `calibrate` fits it
+DEFAULT_IV_SCALE = 1.0                     # stored IV * this = a fraction.  Upstox delivers a fraction (0.0195 to 2.63 on 2026-11-02),
+                                           # so 1.0; a feed that delivered percent would need 0.01
 EXPIRY_UTC = timedelta(hours=10)           # 15:30 IST
 YEAR_S = 365.0 * 86400.0
 MIN_T = 1e-6                               # years; keeps the formulas finite in the last seconds before expiry
@@ -71,6 +73,15 @@ def _setting(name: str, default: float) -> float:
 
 def rate() -> float:
     return _setting("JARVIS_GREEKS_RATE", DEFAULT_RATE)
+
+
+def iv_scale() -> float:
+    return _setting("JARVIS_GREEKS_IV_SCALE", DEFAULT_IV_SCALE)
+
+
+def iv_to_percent(iv, scale: Optional[float] = None):
+    """The stored implied volatility as a percent (what the viewer shows and bs_greeks takes)."""
+    return iv * (iv_scale() if scale is None else scale) * 100.0
 
 
 def carry() -> float:
@@ -159,7 +170,7 @@ def add_computed(df: pd.DataFrame, symbol: str, under: pd.Series, rate_: Optiona
         return out
     _, strike, kind, expiry = meta
     t = years_to_expiry(out["ts"], expiry)
-    raw = bs_greeks(kind == "CE", under.to_numpy(dtype=float), strike, t, out["iv"].to_numpy(dtype=float), rate() if rate_ is None else rate_)
+    raw = bs_greeks(kind == "CE", under.to_numpy(dtype=float), strike, t, iv_to_percent(out["iv"].to_numpy(dtype=float)), rate() if rate_ is None else rate_)
     disp = to_display(raw)
     for g in ("delta", "gamma", "theta", "vega", "rho"):
         if g not in out.columns or out[g].isna().all():
@@ -232,12 +243,21 @@ def calibrate(stream: Path, max_rows: int = 100_000, near: float = 0.05, toleran
     d = _prepare(opts, futs, near)
     if d.empty:
         raise SystemExit("no near-the-money option rows with a matching future price; check --stream and --near")
+    call, k, t, iv_raw = d["call"].to_numpy(), d["k"].to_numpy(), d["t"].to_numpy(), d["iv"].to_numpy(dtype=float)
+    fut, tf = d["fut"].to_numpy(), d["tf"].to_numpy()
+    delta_ref, gamma_ref = d["delta"].to_numpy(), d["gamma"].to_numpy()
+
+    def trial(scale: float, c: float, r: float):
+        under = fut * np.exp(-c * tf)
+        raw = bs_greeks(call, under, k, t, iv_to_percent(iv_raw, scale), r)
+        return _errors(raw["delta"], delta_ref)[0] + _errors(raw["gamma"], gamma_ref)[0], raw
+
+    scales = {s_: trial(s_, DEFAULT_CARRY, DEFAULT_RATE)[0] for s_ in (1.0, 0.01)}               # fraction or percent?
+    iv_unit = min(scales, key=scales.get)
     best = None
     for c in carries:
-        under = d["fut"].to_numpy() * np.exp(-c * d["tf"].to_numpy())
         for r in rates:
-            raw = bs_greeks(d["call"].to_numpy(), under, d["k"].to_numpy(), d["t"].to_numpy(), d["iv"].to_numpy(), r)
-            err = _errors(raw["delta"], d["delta"].to_numpy())[0] + _errors(raw["gamma"], d["gamma"].to_numpy())[0]
+            err, raw = trial(iv_unit, c, r)
             if best is None or err < best[0]:
                 best = (err, r, c, raw)
     _, rate, carry_, raw = best
@@ -254,17 +274,22 @@ def calibrate(stream: Path, max_rows: int = 100_000, near: float = 0.05, toleran
         greeks[g] = {"median_rel_error": med, "p95_rel_error": p95, "rows": n, "unit": label, "scale": scale}
     judged = ("delta", "gamma", "theta", "vega")
     ok = all(greeks[g]["median_rel_error"] <= tolerance for g in judged)
-    return {"ok": ok, "rate": rate, "carry": carry_, "tolerance": tolerance, "greeks": greeks, "rows": len(d),
-            "total_rows": opts.attrs["total_rows"]}
+    stored = {g: {"distinct": int(pd.Series(d[g]).nunique()), "min": float(d[g].min()), "max": float(d[g].max())}
+              for g in ("iv", "delta", "gamma", "theta", "vega", "rho")}
+    return {"ok": ok, "rate": rate, "carry": carry_, "iv_scale": iv_unit, "tolerance": tolerance, "greeks": greeks, "rows": len(d),
+            "total_rows": opts.attrs["total_rows"], "stored": stored}
 
 
 def render(res: dict) -> str:
-    lines = [f"Calibration on {res['rows']:,} near-the-money rows (sampled from {res['total_rows']:,}); best rate {res['rate']:.3f}, future carry {res['carry']:.3f}",
+    lines = [f"Calibration on {res['rows']:,} near-the-money rows (sampled from {res['total_rows']:,}); best rate {res['rate']:.3f}, future carry {res['carry']:.3f}, "
+             f"IV stored as {'a fraction' if res['iv_scale'] == 1.0 else 'a percent'}",
              f"{'greek':<7}{'median error':>14}{'95th pct':>11}{'rows':>9}  unit that matched"]
     for g, r in res["greeks"].items():
         lines.append(f"{g:<7}{r['median_rel_error'] * 100:>13.2f}%{r['p95_rel_error'] * 100:>10.2f}%{r['rows']:>9,}  {r['unit']}")
+    lines.append("\nstored values in the sample (distinct values, min, max):")
+    lines += [f"  {g:<6}{v['distinct']:>9,}  {v['min']:.6g}  {v['max']:.6g}" for g, v in res["stored"].items()]
     lines.append(f"\n{'PASS' if res['ok'] else 'FAIL'}: delta, gamma, theta and vega must each be within {res['tolerance'] * 100:.0f}% (median)."
-                 + (f"\nSet in .env: JARVIS_GREEKS_RATE={res['rate']:g}  JARVIS_GREEKS_CARRY={res['carry']:g}" if res["ok"]
+                 + (f"\nSet in .env: JARVIS_GREEKS_RATE={res['rate']:g}  JARVIS_GREEKS_CARRY={res['carry']:g}  JARVIS_GREEKS_IV_SCALE={res['iv_scale']:g}" if res["ok"]
                     else "  Keep JARVIS_GREEKS=all until this passes."))
     return "\n".join(lines)
 

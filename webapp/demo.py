@@ -183,7 +183,7 @@ def demo_greeks(typ: str, spot: np.ndarray, strike: float, t_years: float, iv: n
         delta = _norm_cdf(d1) - 1
         theta = -spot * pdf * sig / (2 * math.sqrt(t_years)) + r * strike * disc * _norm_cdf(-d2)
         rho = -strike * t_years * disc * _norm_cdf(-d2) / 100
-    return {"iv": iv, "delta": delta, "theta": theta / 365, "gamma": pdf / (spot * sq), "vega": spot * pdf * math.sqrt(t_years) / 100, "rho": rho}
+    return {"iv": iv / 100.0, "delta": delta, "theta": theta / 365, "gamma": pdf / (spot * sq), "vega": spot * pdf * math.sqrt(t_years) / 100, "rho": rho}
 
 
 def write_demo_ticks(out: Path, df: pd.DataFrame, contracts: list[dict], day: date, seed: int) -> None:

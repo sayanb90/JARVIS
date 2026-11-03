@@ -357,7 +357,12 @@ class Lake:
                               (epoch(ts - date_trunc('day', ts)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
                             ) AS bucket FROM t)
             SELECT bucket AS ts, {last} FROM b GROUP BY bucket ORDER BY bucket""", [symbol]).df()
-        return self._with_computed(df, day, symbol, width_s)
+        from .greeks_calc import iv_to_percent
+        df = self._with_computed(df, day, symbol, width_s)
+        computed = df.attrs.get("computed", [])
+        df["iv"] = iv_to_percent(df["iv"])                                  # stored as delivered (a fraction); shown as a percent
+        df.attrs["computed"] = computed
+        return df
 
     def greeks_last(self, day: str, symbols: list[str]) -> dict[str, dict]:
         """{symbol: {iv, delta, ...}} -- the last non-null value of each Greek that day, for chain columns."""
@@ -372,7 +377,12 @@ class Lake:
                 WHERE symbol IN (SELECT symbol FROM _g_wanted) GROUP BY symbol""").df()
         finally:
             self.con.unregister("_g_wanted")
-        return {r["symbol"]: {g: (None if pd.isna(r[g]) else float(r[g])) for g in self.GREEKS} for r in df.to_dict("records")}
+        from .greeks_calc import iv_to_percent
+        out = {r["symbol"]: {g: (None if pd.isna(r[g]) else float(r[g])) for g in self.GREEKS} for r in df.to_dict("records")}
+        for v in out.values():
+            if v["iv"] is not None:
+                v["iv"] = float(iv_to_percent(v["iv"]))                     # stored as delivered (a fraction); shown as a percent
+        return out
 
     def fo_chain(self, day: str, underlying: str, expiry: str | None = None,
                 interval: str = "1s") -> dict:
