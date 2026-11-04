@@ -119,7 +119,7 @@ def test_splitting_a_day_keeps_every_row_and_every_answer(tmp_path):
     n = old_layout_day(tmp_path)
     before = Lake(tmp_path)
     ref = {"overview": before.day_overview(D).set_index("symbol"), "bars": before.day_bars(D, OPT, "1s", 5),
-           "stats": before._fo_day_stats(D, [OPT, FUT]).set_index("symbol"), "ticks": before.day_ticks(D, STK)}
+           "stats": before._fo_day_stats(D, [OPT, FUT]).set_index("symbol").sort_index(), "ticks": before.day_ticks(D, STK)}
     r = tick_store.split_ticks_day(DAY, tmp_path)
     assert r["rows"] == n == sum(v["rows"] for v in r["segments"].values()) and r["segments"]["eq"]["rows"] == 30 and r["segments"]["fo"]["rows"] == 60
     assert {"iv", "delta", "gamma", "theta", "vega", "rho", "oi"} <= set(r["segments"]["eq"]["dropped"]) and not r["segments"]["fo"]["dropped"]
@@ -128,7 +128,7 @@ def test_splitting_a_day_keeps_every_row_and_every_answer(tmp_path):
     after = Lake(tmp_path)
     pd.testing.assert_frame_equal(after.day_overview(D).set_index("symbol"), ref["overview"])
     pd.testing.assert_frame_equal(after.day_bars(D, OPT, "1s", 5), ref["bars"])
-    pd.testing.assert_frame_equal(after._fo_day_stats(D, [OPT, FUT]).set_index("symbol"), ref["stats"])
+    pd.testing.assert_frame_equal(after._fo_day_stats(D, [OPT, FUT]).set_index("symbol").sort_index(), ref["stats"])
     pd.testing.assert_frame_equal(after.day_ticks(D, STK), ref["ticks"])
     assert tick_store.split_ticks_day(DAY, tmp_path)["skipped"]                         # a second run finds nothing to do
 

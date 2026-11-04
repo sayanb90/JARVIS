@@ -368,7 +368,7 @@ class Lake:
                    arg_max(oi, _ord) FILTER (WHERE oi IS NOT NULL AND bk = f.b0) AS oi_first    -- the last reading inside the first bar that has one
             FROM t JOIN f ON t.symbol = f.symbol GROUP BY t.symbol, f.b0""")
         df["oi_change"] = df["oi_last"] - df["oi_first"]
-        return df
+        return df.sort_values("symbol").reset_index(drop=True)          # the same order on every run
 
     def _fo_day_stats(self, day: str, symbols: list[str], interval: str = "1s") -> pd.DataFrame:
         """Per-contract stats for `day`: bars, volume, last close, and open interest first/last/change
