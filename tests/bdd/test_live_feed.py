@@ -265,5 +265,5 @@ def _none(ctx):
 
 @then("the stored bars are compacted into one file for the day")
 def _compacted(ctx):
-    folder = ctx.w.lakedir / "ticks/date=2026-10-23"
-    assert [p.name for p in folder.iterdir()] == ["ticks.parquet"]
+    folders = [f for f in (ctx.w.lakedir / "ticks").glob("segment=*/date=2026-10-23")]
+    assert folders and all([p.name for p in f.iterdir()] == ["ticks.parquet"] for f in folders)

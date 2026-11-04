@@ -264,8 +264,7 @@ def test_live_session_check_fails_when_the_feed_is_silent(healthy, capsys, monke
     world, bk = healthy
     inside = datetime(2026, 10, 27, 5, 0)
     monkeypatch.setattr(health, "utcnow", lambda: inside)
-    today = world.lakedir / "ticks/date=2026-10-27"
-    f = next(today.glob("*.parquet"))
+    f = next((world.lakedir / "ticks").rglob("date=2026-10-27/*.parquet"))
     os.utime(f, (inside.timestamp() - 10, inside.timestamp() - 10))
     assert health.check(inside, lake_dir=world.lakedir, root=world.root, backup_path=bk).fails == 0
     os.utime(f, (inside.timestamp() - 600, inside.timestamp() - 600))

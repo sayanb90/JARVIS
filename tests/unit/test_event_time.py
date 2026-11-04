@@ -14,7 +14,7 @@ from data_layer.tick_policy import TickPolicy
 from data_layer.ticks import Tick
 from data_layer.upstox import decode, feed
 from data_layer.upstox.proto import MarketDataFeedV3_pb2 as pb
-from tests.helpers import ms
+from tests.helpers import ms, tick_file, tick_folder
 
 KEY = "NSE_EQ|INE000A01010"
 D = (2026, 11, 3)
@@ -98,7 +98,7 @@ def test_compaction_orders_an_instruments_rows_by_arrival_not_by_last_trade_time
     tick_store.write_ticks([row(30, 0.30), row(10, 0.10)], tmp_path)                                         # same last-trade time, written out of order
     tick_store.write_ticks([row(20, 0.20)], tmp_path)
     tick_store.compact_ticks_day(date(2026, 11, 3), tmp_path)
-    f = tmp_path / "ticks" / "date=2026-11-03" / "ticks.parquet"
+    f = tick_file(tmp_path, "2026-11-03")
     assert [round(r[0], 2) for r in duckdb.sql(f"SELECT delta FROM read_parquet('{f}')").fetchall()] == [0.10, 0.20, 0.30]
 
 
@@ -118,7 +118,7 @@ def test_bars_and_greeks_follow_event_time_and_quote_only_rows_make_no_bar(tmp_p
     assert [(b.ts.second, b.bid) for b in bars.itertuples()] == [(0, 99.9), (30, 99.5)]                     # the later quote lands in the later second
     assert list(lake.bar_symbols("2026-11-03", "1s")["symbol"]) == ["A.NS"]                                  # no price bar for the untraded instrument
     assert lake.day_bars("2026-11-03", "Q.NS", "1s", 1).empty
-    stored = duckdb.sql(f"SELECT count(*) FROM read_parquet('{tmp_path}/ticks/date=2026-11-03/*.parquet') WHERE symbol = 'Q.NS'").fetchall()[0][0]
+    stored = duckdb.sql(f"SELECT count(*) FROM read_parquet('{tick_folder(tmp_path, '2026-11-03')}/*.parquet') WHERE symbol = 'Q.NS'").fetchall()[0][0]
     assert stored == 1                                                                                       # but its quote is stored
 
     opt = "NIFTY_25000_CE_03_NOV_26"
@@ -158,5 +158,5 @@ def test_equal_arrival_times_fall_back_to_the_message_time_and_then_the_trade_ti
     bar = lake.day_bars("2026-11-03", "A.NS", "1s", 1).iloc[0]
     assert (bar.open, bar.high, bar.low, bar.close, bar.volume) == (100.0, 104.0, 100.0, 104.0, 40)    # open first, close last, volume the sum of the deltas
     tick_store.compact_ticks_day(date(2026, 11, 3), tmp_path)
-    f = tmp_path / "ticks" / "date=2026-11-03" / "ticks.parquet"
+    f = tick_file(tmp_path, "2026-11-03")
     assert [r[0] for r in duckdb.sql(f"SELECT ltp FROM read_parquet('{f}')").fetchall()] == [100.0, 101.0, 102.0, 103.0, 104.0]

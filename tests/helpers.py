@@ -83,3 +83,12 @@ def seed_scoring(world, symbol="GOOD.NS", price=9.0, **o):
     world.lake.load_ohlc(("IN",))
     from data_layer.query import Lake
     return Lake()
+
+
+def tick_folder(lake, day, segment: str = "eq") -> Path:
+    """Where the raw ticks of a segment ("eq" stocks, "fo" futures and options) of a day live (SCRUM-133)."""
+    return Path(lake) / "ticks" / f"segment={segment}" / f"date={day}"
+
+
+def tick_file(lake, day, segment: str = "eq") -> Path:
+    return tick_folder(lake, day, segment) / "ticks.parquet"

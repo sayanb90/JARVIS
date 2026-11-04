@@ -37,7 +37,7 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from data_layer import fmp_client, universe as uni
+from data_layer import fmp_client, tick_store, universe as uni
 from data_layer import lake as lake_mod
 from data_layer.query import Lake
 from data_layer.upstox import fo_instruments as fo
@@ -125,12 +125,16 @@ class Catalog:
 
     # -- discovery ----------------------------------------------------------
     def days(self, t: Table) -> list[str]:
+        if t.location == "ticks":                      # raw ticks: one folder per segment and day, or the older single folder (SCRUM-133)
+            return sorted(tick_store.tick_days(self.lake), reverse=True)
         if t.kind in ("days", "derived"):
             base = self.lake / t.location
             return sorted((p.name.split("=", 1)[1] for p in base.glob("date=*") if any(p.glob("*.parquet"))), reverse=True)
         return []
 
     def files(self, t: Table, day: str | None = None) -> list[Path]:
+        if t.location == "ticks":
+            return tick_store.day_files(self.lake, day) if day else [f for d in sorted(tick_store.tick_days(self.lake)) for f in tick_store.day_files(self.lake, d)]
         if t.kind in ("days", "derived"):
             return sorted((self.lake / t.location / f"date={day}").glob("*.parquet")) if day else \
                 sorted((self.lake / t.location).glob("date=*/*.parquet"))
@@ -186,7 +190,7 @@ class Catalog:
         if t.kind == "derived":
             if not day or not files:
                 return None
-            return Lake._ticks_bars_sql(f"{self.lake / t.location / f'date={day}'}/*.parquet", t.width_s)
+            return Lake._ticks_bars_sql(files, t.width_s)
         return None
 
 
@@ -201,8 +205,12 @@ class Sandbox:
         for t in CATALOG:
             sql = None
             if t.kind == "days" and cat.files(t):
-                sql = (f"SELECT * FROM read_parquet({cat._q(cat.lake / t.location / 'date=*' / '*.parquet')}, "
-                       f"hive_partitioning=true, union_by_name=true)")
+                layouts = [cat.lake / t.location / "date=*" / "*.parquet"]
+                if t.location == "ticks":                  # the segment layout too: each layout read with its own folder-name columns
+                    layouts.append(cat.lake / t.location / "segment=*" / "date=*" / "*.parquet")
+                parts = [f"SELECT * FROM read_parquet({cat._q(g)}, hive_partitioning=true, union_by_name=true)"
+                         for g in layouts if any(cat.lake.glob(str(g.relative_to(cat.lake))))]
+                sql = " UNION ALL BY NAME ".join(parts)
             elif t.kind in ("file", "years") and cat.files(t):
                 sql = f"SELECT * FROM {cat.source_sql(t, None)}"
             elif t.kind == "frame":
@@ -395,9 +403,10 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
         if not days:
             return None, pd.DataFrame(columns=["symbol", "ticks", "first_tick", "last_tick", "last_price"])
         d = days[0]
+        files = ", ".join(cat._q(f) for f in cat.files(BY_KEY[("market", "ticks")], d))
         df = Sandbox(cat).run(f"""
             SELECT symbol, count(*)::BIGINT AS ticks, min(ts) AS first_tick, max(ts) AS last_tick, arg_max(ltp, ts) FILTER (WHERE ltp IS NOT NULL) AS last_price
-            FROM read_parquet({cat._q(cat.lake / 'ticks' / f'date={d}' / '*.parquet')}, union_by_name=true) GROUP BY symbol""")
+            FROM read_parquet([{files}], union_by_name=true, hive_partitioning=false) GROUP BY symbol""")
         return d, df
 
     @r.get("/api/universe")

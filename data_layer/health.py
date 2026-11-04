@@ -20,7 +20,7 @@ import sys
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from . import backup
+from . import backup, tick_store
 from .fmp_client import read_universe
 from .lake import BARS_MARKETS, LAKE_DIR, MARKETS, ROOT
 from .query import Lake
@@ -98,7 +98,7 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
     else:
         newest = days[0]
         stale_days = [d for d in days
-                     if d < today.isoformat() and any((lake_dir / "ticks" / f"date={d}").glob("seg-*.parquet"))]
+                     if d < today.isoformat() and any(f.name.startswith("seg-") for f in tick_store.day_files(lake_dir, d))]
         r.line("PASS" if newest >= expected_day.isoformat() else "WARN", f"latest bar day {newest} (expected {expected_day} or later)")
         syms = lake.bar_symbols(newest, "1s")
         want = max(len(with_isin), 1)
@@ -108,8 +108,7 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
 
     # is the feed writing right now?
     if in_session(now):
-        folder = lake_dir / "ticks" / f"date={today}"
-        files = list(folder.glob("*.parquet")) if folder.exists() else []
+        files = tick_store.day_files(lake_dir, today)                 # every segment's folder, and the older single folder
         newest_age = (now.timestamp() - max((f.stat().st_mtime for f in files), default=0)) if files else None
         # file mtimes are real wall-clock; only compare when `now` is the real now
         if abs((utcnow() - now).total_seconds()) < 120:

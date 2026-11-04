@@ -37,6 +37,7 @@ from typing import Optional
 import duckdb
 
 from . import lake as lake_mod
+from . import tick_store
 
 FO = "regexp_matches(symbol, '_(CE|PE|FUT)_')"
 OPEN_UTC, CLOSE_UTC = "03:45:00", "10:00:00"
@@ -44,8 +45,7 @@ WIDTHS = (1, 5, 60)
 MEMORY = "3GB"
 
 
-def _source(folder: Path) -> Optional[str]:
-    files = sorted(folder.glob("*.parquet")) if folder.is_dir() else []
+def _source(files: list[Path]) -> Optional[str]:
     if not files:
         return None
     names = ", ".join("'" + str(f).replace("'", "''") + "'" for f in files)
@@ -62,10 +62,9 @@ def _num(x, digits: int = 1) -> Optional[float]:
 
 def analyse(day: date, lake_dir: Path, tmp_dir: Path, skip_repeats: bool = False) -> dict:
     """The measurements as a dict (see the module text).  {'error': ...} when the day cannot be analysed."""
-    folder = lake_dir / "ticks" / f"date={day}"
-    src = _source(folder)
+    src = _source(tick_store.day_files(lake_dir, day))
     if src is None:
-        return {"error": f"no tick files in {folder}"}
+        return {"error": f"no tick files for {day} in {lake_dir / 'ticks'}"}
     con = duckdb.connect()
     try:
         con.execute(f"SET memory_limit='{MEMORY}'")
