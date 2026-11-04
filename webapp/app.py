@@ -5,9 +5,9 @@ JARVIS intraday viewer: a small read-only web app over the Parquet lake.
   python -m webapp --lake lake_demo     # synthetic demo data (see webapp/demo.py)
 
 API (JSON):
-  GET /api/meta                                    days available, demo flag, allowed bar widths
+  GET /api/meta                                    days available, demo flag, allowed precisions (width 0 = raw ticks, else bar seconds)
   GET /api/symbols?date=YYYY-MM-DD                 equities with bars that day (F&O contracts are listed under /api/fo/*)
-  GET /api/day?date=&symbol=&width=1&vol_window=300   summary + chart series for one instrument (equity or F&O)
+  GET /api/day?date=&symbol=&width=1&vol_window=300   summary + chart series for one instrument (equity or F&O); width=0 returns every tick
   GET /api/overview?date=                          one row per equity: volume, spread, volatility, ...
   GET /api/fo/meta?date=                           underlyings with derivative bars that day
   GET /api/fo/chain?date=&underlying=&expiry=      futures + option chain snapshot (section 17)
@@ -32,13 +32,13 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from analytics.microstructure import day_summary, series_payload, to_ist_strings
+from analytics.microstructure import day_summary, rolling_realised_vol, series_payload, to_ist_strings
 from data_layer import live_book
 from data_layer.lake import LAKE_DIR
 from data_layer.query import Lake
 
 STATIC = Path(__file__).parent / "static"
-WIDTHS = (1, 5, 15, 30, 60, 300)                 # bar widths in seconds offered in the UI
+WIDTHS = (0, 1, 5, 15, 30, 60, 300)              # precision offered in the UI: 0 = raw ticks (no aggregation), else a bar width in seconds
 VOL_WINDOWS = (60, 300, 900, 1800)
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9&._-]{1,32}$")
 UNDERLYING_RE = re.compile(r"^[A-Za-z0-9&]{1,20}$")
@@ -128,29 +128,49 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             raise HTTPException(422, f"width must be one of {WIDTHS}")
         if vol_window not in VOL_WINDOWS:
             raise HTTPException(422, f"vol_window must be one of {VOL_WINDOWS}")
-        df = lake().day_bars(date, symbol, interval, width)
-        if df.empty:
-            raise HTTPException(404, f"no bars for {symbol} on {date}")
+        q = lake()
+        if width == 0:                                              # ticks: the raw rows, no aggregation (SCRUM-131)
+            df = q.day_ticks(date, symbol)
+            if df.empty:
+                raise HTTPException(404, f"no raw ticks for {symbol} on {date} (precision Ticks needs the day's raw ticks)")
+            series = series_payload(df, vol_window, ms=True)
+            summary = day_summary(df)
+            one = q.day_bars(date, symbol, interval, 1)             # volatility is estimated from 1-second bars, then shown at each tick
+            if not one.empty:
+                one = one.sort_values("ts").reset_index(drop=True)
+                vol = pd.DataFrame({"ts": pd.to_datetime(one["ts"]).astype("datetime64[ns]"), "v": rolling_realised_vol(one, vol_window) * 100})
+                at = pd.DataFrame({"ts": pd.to_datetime(df.sort_values("ts")["ts"]).astype("datetime64[ns]")})
+                mapped = pd.merge_asof(at, vol, on="ts")["v"]
+                series["vol_ann"] = [None if np.isnan(v) else round(float(v), 6) for v in mapped]
+                summary["realised_vol_pct"] = day_summary(one).get("realised_vol_pct")
+        else:
+            df = q.day_bars(date, symbol, interval, width)
+            if df.empty:
+                raise HTTPException(404, f"no bars for {symbol} on {date}")
+            series, summary = series_payload(df, max(vol_window, width * 2)), day_summary(df)
         return JSONResponse(_json_safe({
             "symbol": symbol, "date": date, "width": width, "vol_window": vol_window,
-            "summary": day_summary(df),
+            "summary": summary,
             "has_book": bool(df[["bid", "ask"]].notna().all(axis=1).any()),
             "has_oi": bool("oi" in df.columns and df["oi"].notna().any()),
-            "series": series_payload(df, max(vol_window, width * 2))}))
+            "series": series}))
 
     @app.get("/api/overview")
     def overview(date: str):
         _check_date(date)
-        folder = lake_path / "bars" / f"interval={interval}" / f"date={date}"
-        files = sorted(folder.glob("*.parquet"))
-        if not files:
+        q = lake()
+        if interval == "1s":
+            fingerprint = q.fingerprint(date)                      # the day's tick files (what the collector writes) and any legacy bars
+        else:
+            folder = lake_path / "bars" / f"interval={interval}" / f"date={date}"
+            fingerprint = tuple((f.name, f.stat().st_mtime_ns) for f in sorted(folder.glob("*.parquet")))
+        if not fingerprint:
             raise HTTPException(404, f"no bars for {date}")
-        key = (date, tuple((f.name, f.stat().st_mtime_ns) for f in files))
+        key = (date, fingerprint)
         if key not in overview_cache:
             overview_cache.clear()          # keep only the latest day in memory
-            q = lake()
-            rows = q.day_overview(date, interval)
-            rows = rows[~rows["symbol"].isin(q.fo_symbols())]       # equities only; F&O has its own tab
+            rows = q.day_overview(date, interval, equities_only=True)      # futures and options are left out before any bar is built
+            rows = rows[~rows["symbol"].isin(q.fo_symbols())]
             overview_cache[key] = _json_safe(rows.to_dict("records"))
         return overview_cache[key]
 
@@ -180,7 +200,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         df = lake().greeks_series(date, symbol, width)
         if df.empty:
             return {"symbol": symbol, "date": date, "width": width, "available": False, "series": {}}
-        series = {"ts": to_ist_strings(df["ts"])}
+        series = {"ts": to_ist_strings(df["ts"], ms=(width == 0))}
         for g in Lake.GREEKS:
             series[g] = [None if pd.isna(v) else round(float(v), 6) for v in df[g]]
         return JSONResponse(_json_safe({"symbol": symbol, "date": date, "width": width, "available": True,

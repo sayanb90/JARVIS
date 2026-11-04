@@ -132,13 +132,14 @@ def day_summary(df: pd.DataFrame) -> dict:
     }
 
 
-def to_ist_strings(ts: pd.Series) -> list[str]:
-    """UTC timestamps -> exchange wall-clock strings ('YYYY-MM-DD HH:MM:SS') for chart axes."""
-    return (pd.to_datetime(ts) + IST_OFFSET).dt.strftime("%Y-%m-%d %H:%M:%S").tolist()
+def to_ist_strings(ts: pd.Series, ms: bool = False) -> list[str]:
+    """UTC timestamps -> exchange wall-clock strings ('YYYY-MM-DD HH:MM:SS', with '.mmm' when `ms`) for chart axes."""
+    out = (pd.to_datetime(ts) + IST_OFFSET).dt.strftime("%Y-%m-%d %H:%M:%S.%f" if ms else "%Y-%m-%d %H:%M:%S")
+    return (out.str[:-3] if ms else out).tolist()
 
 
-def series_payload(df: pd.DataFrame, vol_window_s: int = 300) -> dict:
-    """Column-oriented chart payload for one instrument/day.  NaN becomes null."""
+def series_payload(df: pd.DataFrame, vol_window_s: int = 300, ms: bool = False) -> dict:
+    """Column-oriented chart payload for one instrument/day.  NaN becomes null.  `ms` keeps milliseconds in the times (raw ticks)."""
     d = add_book_metrics(df.sort_values("ts").reset_index(drop=True))
     d["cum_volume"] = d["volume"].fillna(0).astype("float64").cumsum()
     d["vol_ann"] = rolling_realised_vol(d, vol_window_s) * 100
@@ -150,7 +151,7 @@ def series_payload(df: pd.DataFrame, vol_window_s: int = 300) -> dict:
     if "oi" in d.columns and pd.to_numeric(d["oi"], errors="coerce").notna().any():
         d["oi"] = pd.to_numeric(d["oi"], errors="coerce").ffill()           # OI only changes occasionally; carry it forward
         cols.append("oi")
-    payload = {"ts": to_ist_strings(d["ts"])}
+    payload = {"ts": to_ist_strings(d["ts"], ms)}
     for c in cols:
         col = d[c].astype("float64").round(6)
         payload[c] = [None if np.isnan(v) else float(v) for v in col]

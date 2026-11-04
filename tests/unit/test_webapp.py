@@ -240,3 +240,114 @@ def test_demo_ar1_matches_the_step_by_step_recursion():
         for i in range(1, 5000):
             want[i] = a * want[i - 1] + eps[i]
         np.testing.assert_allclose(demo._ar1(eps, a), want, atol=1e-9)
+
+
+# -- a lake that holds raw ticks only, as production does since 2026-11-03 (SCRUM-129) -----------------------------
+@pytest.fixture()
+def tick_lake(tmp_path):
+    d = tmp_path / "lake"
+    ticks = []
+    for i in range(60):
+        t = OPEN + timedelta(seconds=i)
+        ticks.append(Tick(t, "A.NS", 100.0 + (i % 5) * 0.1, 10 * (i + 1), 99.9, 100, 100.1, 50, None, fts=t, rts=t))
+        ticks.append(Tick(t, "B.NS", 500.0 + (i % 3), 5 * (i + 1), 499.9, 100, 500.1, 50, None, fts=t, rts=t))
+        ticks.append(Tick(t, "NIFTY_25000_CE_09_NOV_26", 120.0 + i % 4, 7 * (i + 1), 119.9, 75, 120.1, 75, 1000 + i, iv=0.15, delta=0.5, gamma=0.0005, fts=t, rts=t))
+    tick_store.write_ticks(ticks, d)
+    tick_store.compact_ticks_day(date(2026, 10, 26), d)
+    (d / "instruments").mkdir()
+    pd.DataFrame({"symbol": ["NIFTY_25000_CE_09_NOV_26"], "underlying": ["NIFTY"], "instrument_type": ["CE"], "expiry": [date(2026, 11, 9)],
+                  "strike": [25000.0], "lot_size": [75]}).to_parquet(d / "instruments" / "fo.parquet")
+    return d
+
+
+def test_the_market_tab_works_on_a_lake_with_ticks_only(tick_lake):
+    """It returned 404 'no bars' because it looked for lake/bars/interval=1s, which the collector no longer writes."""
+    client = TestClient(create_app(tick_lake))
+    r = client.get("/api/overview", params={"date": DAY})
+    assert r.status_code == 200
+    rows = r.json()
+    assert sorted(x["symbol"] for x in rows) == ["A.NS", "B.NS"]                          # equities only: the option is not in the Market tab
+    assert all(x["bars"] == 60 for x in rows)
+    assert client.get("/api/overview", params={"date": "2020-01-01"}).status_code == 404
+    assert [x["symbol"] for x in client.get("/api/symbols", params={"date": DAY}).json()] == ["A.NS", "B.NS"]
+
+
+def test_equities_only_overview_equals_the_overview_without_the_options(tick_lake):
+    q = Lake(tick_lake)
+    full = q.day_overview(DAY).set_index("symbol").drop("NIFTY_25000_CE_09_NOV_26")
+    only = q.day_overview(DAY, equities_only=True).set_index("symbol")
+    pd.testing.assert_frame_equal(full, only)
+
+
+def test_fo_summary_from_ticks_matches_the_bars_and_is_cached(tick_lake):
+    q = Lake(tick_lake)
+    st = q._fo_day_stats(DAY, ["NIFTY_25000_CE_09_NOV_26"]).set_index("symbol").loc["NIFTY_25000_CE_09_NOV_26"]
+    b = q.day_bars(DAY, "NIFTY_25000_CE_09_NOV_26", "1s", 1)
+    assert st["bars"] == len(b) == 60 and st["volume"] == b["volume"].sum() and st["close"] == b["close"].iloc[-1]
+    assert st["oi_first"] == b["oi"].dropna().iloc[0] and st["oi_last"] == b["oi"].dropna().iloc[-1]
+    assert q.day_symbol_set(DAY) == {"A.NS", "B.NS", "NIFTY_25000_CE_09_NOV_26"}
+    client = TestClient(create_app(tick_lake))
+    assert client.get("/api/fo/meta", params={"date": DAY}).json() == {"underlyings": ["NIFTY"]}
+    c = client.get("/api/fo/chain", params={"date": DAY, "underlying": "NIFTY"}).json()
+    assert c["chain"][0]["ce_oi"] == 1059 and c["chain"][0]["ce_iv"] is not None
+
+
+# -- Precision: Ticks (SCRUM-131) ------------------------------------------------------------------------------------
+def tick_lake_with_quotes(tmp_path):
+    """Trades at 04:00:00, :01, :02; between them quote-only rows (no price) and a row before the first trade."""
+    d = tmp_path / "lake"
+    t0 = datetime(2026, 10, 26, 4, 0, 0)
+    rows = [Tick(t0 - timedelta(seconds=5), "A.NS", None, 0, 99.0, 10, 101.0, 10, None, fts=t0 - timedelta(seconds=5), rts=t0 - timedelta(seconds=5))]
+    px, vol = [100.0, 101.0, 102.0], [10, 25, 40]
+    for i in range(3):
+        f = t0 + timedelta(seconds=i)
+        rows.append(Tick(f - timedelta(milliseconds=20), "A.NS", px[i], vol[i], px[i] - 0.1, 100, px[i] + 0.1, 50, None, fts=f, rts=f + timedelta(milliseconds=5)))
+        rows.append(Tick(f - timedelta(milliseconds=20), "A.NS", px[i], vol[i], px[i] - 0.2, 90, px[i] + 0.2, 60, None, fts=f + timedelta(milliseconds=500), rts=f + timedelta(milliseconds=505)))
+    tick_store.write_ticks(rows, d)
+    tick_store.compact_ticks_day(date(2026, 10, 26), d)
+    return d
+
+
+def test_ticks_precision_is_offered_first_and_returns_every_row(tmp_path):
+    client = TestClient(create_app(tick_lake_with_quotes(tmp_path)))
+    assert client.get("/api/meta").json()["widths"][0] == 0
+    r = client.get("/api/day", params={"date": DAY, "symbol": "A.NS", "width": 0})
+    assert r.status_code == 200
+    d = r.json()
+    s = d["series"]
+    assert d["width"] == 0 and len(s["ts"]) == 6                                       # six rows after the first trade; the row before it is left out
+    assert s["ts"][0] == "2026-10-26 09:30:00.000"                                     # IST, milliseconds kept (event time = fts)
+    assert s["close"] == [100.0, 100.0, 101.0, 101.0, 102.0, 102.0] and s["open"] == s["close"] == s["high"] == s["low"]
+    assert s["volume"] == [0, 0, 15, 0, 15, 0]                                         # the rise of the cumulative volume, a row at a time
+    assert s["bid"][0] == pytest.approx(99.9) and s["bid"][1] == pytest.approx(99.8)   # each row's own book
+    assert d["summary"]["bars"] == 6 and d["summary"]["volume"] == 30
+
+
+def test_ticks_precision_404_without_raw_ticks_and_other_widths_unchanged(client, tmp_path):
+    assert client.get("/api/day", params={"date": DAY, "symbol": "A.NS", "width": 0}).status_code == 404     # a lake of legacy bars has no ticks
+    assert client.get("/api/day", params={"date": DAY, "symbol": "A.NS", "width": 60}).status_code == 200
+    assert client.get("/api/day", params={"date": DAY, "symbol": "A.NS", "width": 7}).status_code == 422
+
+
+def test_ticks_precision_for_option_greeks_returns_each_row(tick_lake):
+    client = TestClient(create_app(tick_lake))
+    r = client.get("/api/fo/greeks", params={"date": DAY, "symbol": "NIFTY_25000_CE_09_NOV_26", "width": 0})
+    assert r.status_code == 200
+    s = r.json()["series"]
+    assert len(s["ts"]) == 60 and s["ts"][0].endswith(".000") and s["delta"][0] == pytest.approx(0.5)
+    assert s["iv"][0] == pytest.approx(15.0)                                           # shown as a percent
+    bars = client.get("/api/fo/greeks", params={"date": DAY, "symbol": "NIFTY_25000_CE_09_NOV_26", "width": 60}).json()["series"]
+    assert len(bars["ts"]) == 1                                                        # the same minute as one bar
+
+
+def test_pages_use_a_date_picker_and_the_word_precision(client):
+    """SCRUM-132, SCRUM-131: no date drop-down remains in the viewer or the admin page, and the selector is called Precision."""
+    from pathlib import Path
+    import webapp
+    html = client.get("/").text
+    assert 'type="date" id="date"' in html and '<select id="date"' not in html
+    assert html.count("<span>Precision</span>") == 3 and "Bar width" not in html
+    admin = (Path(webapp.__file__).parent / "static" / "admin.html").read_text()
+    assert 'type="date" id="day"' in admin and '<select id="day"' not in admin
+    js = (Path(webapp.__file__).parent / "static" / "app.js").read_text()
+    assert "0: 'Ticks (raw)'" in js and "nearestDay" in js                           # the option exists and a day without data snaps to the nearest

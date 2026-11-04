@@ -95,7 +95,11 @@ function selectTable(name, day = null, page = 1) {
   $('table-name').value = name;
   $('svc-cards').querySelectorAll('.svc-card').forEach((b) => b.setAttribute('aria-pressed', b.dataset.t === name));
   $('day-field').hidden = !t.days.length;
-  fill($('day'), t.days.map((d) => [d, d]), (state.day = t.days.includes(day) ? day : (t.days[0] || null)));
+  state.days = t.days;                                                            // a date picker limited to the days that have data
+  state.day = t.days.includes(day) ? day : (t.days[0] || null);
+  const picker = $('day');
+  picker.min = t.days.length ? t.days[t.days.length - 1] : ''; picker.max = t.days.length ? t.days[0] : '';
+  picker.value = state.day || '';
   loadPage();
 }
 
@@ -125,7 +129,16 @@ async function loadPage() {
 
 $('service').onchange = (e) => selectService(e.target.value);
 $('table-name').onchange = (e) => selectTable(e.target.value);
-$('day').onchange = (e) => { state.day = e.target.value; state.page = 1; loadPage(); };
+$('day').onchange = (e) => {
+  const days = state.days || [];
+  const want = e.target.value;
+  if (!want || !days.length) { e.target.value = state.day || ''; return; }
+  const near = (a, b) => Math.abs(new Date(a) - new Date(b));
+  const day = days.includes(want) ? want : days.reduce((best, d) => (near(d, want) < near(best, want) ? d : best), days[0]);
+  e.target.value = day;                                                           // no data that day: move to the nearest day that has some
+  if (day !== want) setStatus(`No data on ${want} · showing ${day}`);
+  state.day = day; state.page = 1; loadPage();
+};
 $('order').onchange = (e) => { state.order = e.target.value; state.page = 1; loadPage(); };
 $('size').onchange = (e) => { state.size = +e.target.value; state.page = 1; loadPage(); };
 let symTimer;

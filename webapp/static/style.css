@@ -35,6 +35,10 @@ button,select{font:inherit;color:inherit}
 /* ---------- controls ---------- */
 select{appearance:none;-webkit-appearance:none;font-size:13.5px;color:var(--fg);background:var(--panel2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238e8e93' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 11px center;border:1px solid var(--line);border-radius:var(--r2);padding:7px 30px 7px 12px;min-width:0;max-width:100%;cursor:pointer;transition:border-color .15s}
 select:hover,select:focus-visible{border-color:var(--accent);outline:none}
+input[type=date]{font:inherit;font-size:13.5px;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:var(--r2);padding:6px 10px;min-width:0;max-width:100%;cursor:pointer;transition:border-color .15s;color-scheme:dark}
+input[type=date]:hover,input[type=date]:focus-visible{border-color:var(--accent);outline:none}
+.date-note{color:var(--orange);font-size:12px;white-space:nowrap}
+@media (max-width:700px){.date-note{position:absolute;top:100%;right:var(--gut);background:var(--panel2);padding:4px 8px;border-radius:var(--r2)}}
 .field{display:flex;flex-direction:column;gap:4px;min-width:0}
 .field>span{font-size:11px;color:var(--muted);letter-spacing:.03em}
 .toolbar{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:flex-end}
