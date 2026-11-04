@@ -101,7 +101,7 @@ def test_ticks_page_through_200_rows_at_a_time_with_a_count_from_the_file_footer
     assert len(last["rows"]) == 150 and last["page"] == 4
     over = client.get("/admin/api/table", params={"service": "market", "name": "ticks", "page": 99}, auth=A).json()
     assert over["page"] == 4                                                   # clamped, not an empty page
-    files = list((lake.lakedir / "ticks/date=2026-10-23").glob("*.parquet"))
+    files = list((lake.lakedir / "ticks").rglob("date=2026-10-23/*.parquet"))                  # the stocks' file and the options' file, whichever exist
     assert sum(pq.ParquetFile(f).metadata.num_rows for f in files) == 750
 
 
@@ -249,7 +249,7 @@ def test_ticks_compaction_does_not_store_the_partition_folder_as_a_column(world)
     tick_store.write_ticks([Tick(T0, "A.NS", 1.0, 1)], world.lakedir)
     tick_store.write_ticks([Tick(T0 + timedelta(seconds=1), "A.NS", 1.1, 2)], world.lakedir)
     assert tick_store.compact_ticks_day(DAY, world.lakedir) == 2
-    f = world.lakedir / "ticks/date=2026-10-23/ticks.parquet"
+    f = world.lakedir / "ticks/segment=eq/date=2026-10-23/ticks.parquet"
     assert "date" not in pq.ParquetFile(f).schema_arrow.names
     # a file compacted by the earlier code (with a stored date column) loses it on the next compaction
     pd.read_parquet(f).assign(date=pd.Timestamp("2026-10-23")).to_parquet(f)

@@ -11,7 +11,7 @@ from data_layer.tick_policy import TickPolicy
 from data_layer.ticks import Tick
 from data_layer.upstox import decode, feed
 from data_layer.upstox.proto import MarketDataFeedV3_pb2 as pb
-from tests.helpers import ms
+from tests.helpers import ms, tick_file
 
 KEY = "NSE_EQ|INE000A01010"
 
@@ -89,7 +89,7 @@ def test_extended_columns_are_stored_typed_and_compact_with_old_files(tmp_path):
     new.handle(ext_frame(ltt=ms(4, 0, 1, (2026, 10, 23))), datetime(2026, 10, 23, 5, 0))
     tick_store.write_ticks(new.drain(), tmp_path)
     assert tick_store.compact_ticks_day(date(2026, 10, 23), tmp_path) == 2
-    f = tmp_path / "ticks" / "date=2026-10-23" / "ticks.parquet"
+    f = tick_file(tmp_path, "2026-10-23")
     assert {"ltq", "atp", "tbq", "tsq", "cp", "iep", "ieq", "iiq_total", "iiq_market", "ref_price", "cas_eligible"} <= set(cols(f))
     rows = duckdb.sql(f"SELECT ltq, atp, cas_eligible FROM read_parquet('{f}') ORDER BY ts").fetchall()
     assert rows == [(None, None, None), (7, 101.1, True)]            # the old file's tick has no extended values

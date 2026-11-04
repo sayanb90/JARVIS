@@ -65,7 +65,7 @@ class FeedProcessor:
     """Synchronous core: frame bytes in, raw ticks out.  The async runner only moves data."""
 
     def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None,
-                 books: BookStore | None = None, ext: bool = False) -> None:
+                 books: BookStore | None = None, ext: bool = False, segment: str | None = None) -> None:
         self.key_map = key_map
         self.ext = ext                                   # extended fields and session events (off in production for now)
         self.events: list[dict] = []
@@ -128,7 +128,7 @@ class UpstoxFeed:
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None,
                  token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None,
-                 books: BookStore | None = None, ext: bool = False) -> None:
+                 books: BookStore | None = None, ext: bool = False, segment: str | None = None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
@@ -137,6 +137,7 @@ class UpstoxFeed:
         self.keys = list(key_map)
         self.proc = FeedProcessor(key_map, policy, books, ext=ext)
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
+        self.segment = segment                            # 'eq' or 'fo': the folder this feed owns and compacts at the end of the session (SCRUM-133)
         self.clock = clock
         self.dump_left, self.dump_dir = dump_frames, dump_dir or Path("logs/frames")
         self._last_frame = self.clock()
@@ -374,8 +375,8 @@ async def run_day(feed: UpstoxFeed, end: datetime) -> None:
     finally:
         t.cancel()
     day = end.date()
-    rows = tick_store.compact_ticks_day(day, feed.lake_dir)
-    log.info("session %s done: compacted %d ticks (every row now in the day's file, equity and F&O together)", day, rows)
+    rows = tick_store.compact_ticks_day(day, feed.lake_dir, feed.segment)
+    log.info("session %s done: compacted %d ticks (every row of this feed's %s file)", day, rows, feed.segment or "folders")
 
 
 async def run_forever(make_feed, once: bool = False) -> None:
@@ -499,7 +500,8 @@ def main() -> None:
             key_map = fresh
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
                           token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books,
-                          ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"))
+                          ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"),
+                          segment=a.segment)
     books = BookStore()
 
     async def runner() -> None:

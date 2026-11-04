@@ -17,7 +17,7 @@ from data_layer.upstox import candles, decode, feed
 from data_layer.upstox import fo_instruments as fo
 from data_layer.upstox.proto import MarketDataFeedV3_pb2 as pb
 from tests.bdd.fake_upstox import tick_frame
-from tests.helpers import ms
+from tests.helpers import ms, tick_file, tick_folder
 from webapp import demo
 from webapp.app import create_app
 
@@ -365,7 +365,7 @@ def test_frames_without_greeks_leave_them_empty_and_storage_round_trips(tmp_path
     day = ticks[0].ts.date()
     assert tick_store.compact_ticks_day(day, tmp_path) == 3
     import duckdb
-    rows = duckdb.sql(f"SELECT symbol, delta, iv FROM read_parquet('{tmp_path}/ticks/date={day}/ticks.parquet') ORDER BY symbol, delta").fetchall()
+    rows = duckdb.sql(f"SELECT symbol, delta, iv FROM read_parquet('{tick_file(tmp_path, day)}') ORDER BY symbol, delta").fetchall()
     assert rows[0][0] == "EQ.NS" and rows[0][1] is None
     assert rows[-1][1] == pytest.approx(0.52, rel=1e-4) and rows[-1][2] == pytest.approx(14.25, rel=1e-4)
 
@@ -414,7 +414,7 @@ def test_core_greeks_files_are_smaller_and_the_dropped_columns_cost_nothing(tmp_
     def day(policy, folder):
         ticks = []
         for i in range(3000):
-            t = _opt(i)
+            t = _opt(i, sym="NIFTY_25000_CE_09_NOV_26")                 # a real contract name: it is stored in the F&O file
             t.iv, t.delta, t.gamma = 14 + rng.normal(), rng.random(), rng.random() / 100
             t.theta, t.vega, t.rho = -rng.random() * 5, rng.random() * 20, rng.random() * 8
             ticks.append(policy.apply(t))
@@ -546,9 +546,7 @@ def test_viewer_live_book_is_503_without_a_running_feed(tmp_path, monkeypatch):
 
 def test_greeks_absent_on_days_stored_before_greeks_existed(tmp_path):
     tick_store.write_ticks([Tick(datetime(2026, 10, 23, 4, 0), "OLD", 1.0, 1)], tmp_path)
-    folder = tmp_path / "ticks" / "date=2026-10-23"
-    for f in folder.glob("*.parquet"):                                       # simulate a file written before the six columns existed
-        import duckdb
-        duckdb.sql(f"COPY (SELECT * EXCLUDE (iv, delta, theta, gamma, vega, rho) FROM read_parquet('{f}')) TO '{f}.new' (FORMAT PARQUET)")
-        f.unlink(); (folder / (f.name + ".new")).rename(f)
+    folder = tick_folder(tmp_path, "2026-10-23")
+    cols = {c for f in folder.glob("*.parquet") for c in __import__("duckdb").sql(f"DESCRIBE SELECT * FROM read_parquet('{f}')").df()["column_name"]}
+    assert not cols & {"iv", "delta", "theta", "gamma", "vega", "rho"}       # a stock's file never has the Greek columns; an old file did not either
     assert Lake(tmp_path).greeks_series("2026-10-23", "OLD").empty

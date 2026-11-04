@@ -5,6 +5,7 @@ import duckdb
 import pytest
 
 from data_layer.ticks import BarAggregator, Tick
+from tests.helpers import tick_folder
 
 D = (2026, 10, 23)
 
@@ -122,7 +123,7 @@ def test_compact_merges_new_segments_into_existing_file_newest_wins(world):
 def test_write_ticks_keeps_l1_columns(world):
     t = [tk(3, 45, 1, 10, 5, bid=9.9, bid_qty=3, ask=10.1, ask_qty=4, oi=7)]
     assert world.tick_store.write_ticks(t) == 1
-    (row,) = duckdb.sql(f"SELECT bid, bid_qty, ask, ask_qty, oi FROM read_parquet('{world.lakedir}/ticks/date=2026-10-23/*.parquet')").fetchall()
+    (row,) = duckdb.sql(f"SELECT bid, bid_qty, ask, ask_qty, oi FROM read_parquet('{tick_folder(world.lakedir, '2026-10-23', 'eq')}/*.parquet')").fetchall()
     assert row == (9.9, 3, 10.1, 4, 7)
     assert world.tick_store.write_ticks([]) == 0
 

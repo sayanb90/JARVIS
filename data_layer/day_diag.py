@@ -27,6 +27,7 @@ from typing import Optional
 import duckdb
 
 from . import lake as lake_mod
+from . import tick_store
 
 STAMP = re.compile(r"^(\d{4}-\d\d-\d\d) (\d\d):(\d\d):(\d\d)")
 PROGRESS = re.compile(r"frames=\d+ ticks=\d+")
@@ -114,25 +115,33 @@ def rss_trend(jsonl: Path, day: date, match: str, exclude: tuple = (), marks: tu
     return out
 
 
-def duplicate_counts(ticks_file: Path) -> dict[str, dict]:
+def _src(files) -> str:
+    """read_parquet over one file or a list of files (a day has one file per segment since SCRUM-133)."""
+    items = [files] if isinstance(files, (str, Path)) else list(files)
+    return "read_parquet([" + ", ".join("'" + str(f).replace("'", "''") + "'" for f in items) + "], union_by_name=true, hive_partitioning=false)"
+
+
+def duplicate_counts(ticks_file) -> dict[str, dict]:
     """Rows, rows after SELECT DISTINCT * (all columns) and the difference, for equity and F&O rows of one compacted day."""
     con = duckdb.connect()
+    src = _src(ticks_file)
     out = {}
     for name, cond in (("equity", f"NOT {FO}"), ("fo", FO)):
         total, distinct = con.execute(
-            f"SELECT (SELECT count(*) FROM read_parquet('{ticks_file}') WHERE {cond}), "
-            f"(SELECT count(*) FROM (SELECT DISTINCT * FROM read_parquet('{ticks_file}') WHERE {cond}))").fetchone()
+            f"SELECT (SELECT count(*) FROM {src} WHERE {cond}), "
+            f"(SELECT count(*) FROM (SELECT DISTINCT * FROM {src} WHERE {cond}))").fetchone()
         out[name] = {"total": total, "distinct": distinct, "duplicates": total - distinct,
                      "pct": round(100.0 * (total - distinct) / total, 1) if total else 0.0}
     return out
 
 
-def timestamp_sharing(ticks_file: Path) -> dict[str, dict]:
+def timestamp_sharing(ticks_file) -> dict[str, dict]:
     """How often rows of one instrument share a timestamp, by last-trade time (`ts`) and, when the file has it, by event time (`fts`).
     A tick is stamped with the exchange's last-trade time (ltpc.ltt), so quote and Greek updates between two trades all carry the time
     of the earlier trade; event time (the message time) is what SCRUM-116 added."""
     con = duckdb.connect()
-    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{ticks_file}')").fetchall()}
+    src = _src(ticks_file)
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
     out = {}
     for name, cond in (("equity", f"NOT {FO}"), ("fo", FO)):
         res = {}
@@ -140,7 +149,7 @@ def timestamp_sharing(ticks_file: Path) -> dict[str, dict]:
             if col not in cols:
                 continue
             rows, pairs, sharing, worst, instruments = con.execute(
-                f"""WITH g AS (SELECT symbol, {col} AS t, count(*) AS n FROM read_parquet('{ticks_file}') WHERE {cond} GROUP BY symbol, {col})
+                f"""WITH g AS (SELECT symbol, {col} AS t, count(*) AS n FROM {src} WHERE {cond} GROUP BY symbol, {col})
                     SELECT coalesce(sum(n), 0), count(*), coalesce(sum(n) FILTER (WHERE n > 1), 0), coalesce(max(n), 0), count(DISTINCT symbol) FROM g""").fetchone()
             if label == "":
                 res.update({"rows": int(rows), "distinct_ts": int(pairs), "rows_sharing_a_ts": int(sharing), "max_rows_one_ts": int(worst),
@@ -205,9 +214,9 @@ def build_report(day: date, logs: Path, lake: Path, probe: Optional[Path]) -> st
         if len(known) >= 2 and known[-1] > 3 * known[0]:
             summary.append(f"{label} memory grew {known[-1] / known[0]:.0f}x over the day ({known[0]:.0f} to {known[-1]:.0f} MB).")
     # 4: duplicates
-    ticks = lake / "ticks" / f"date={day}" / "ticks.parquet"
+    ticks = [f for f in tick_store.day_files(lake, day) if f.name == "ticks.parquet"]       # one compacted file per segment
     body += ["", "## 4. Rows identical in every column (SELECT DISTINCT *)", ""]
-    if ticks.exists():
+    if ticks:
         d = duplicate_counts(ticks)
         for k, v in d.items():
             body.append(f"- {k}: {v['total']:,} rows, {v['distinct']:,} distinct, {v['duplicates']:,} identical repeats ({v['pct']}%)")

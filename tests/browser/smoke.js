@@ -19,9 +19,19 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   // ---------------- Equities (desktop) ----------------
   const page = await open(1400, 1000);
   await page.waitForSelector('#eq-price .main-svg', { timeout: 20000 });
-  const days = await page.$$eval('#date option', (o) => o.map((x) => x.value));
+  // the trading day is a date picker limited to the days that have data (SCRUM-132)
+  const picker = await page.$eval('#date', (e) => ({ tag: e.tagName, type: e.type, value: e.value, min: e.min, max: e.max }));
   const syms = await page.$$eval('#symbol option', (o) => o.map((x) => x.value));
-  if (days.length !== 3 || days[0] < days[1]) fail('dates not newest first: ' + days);
+  if (picker.tag !== 'INPUT' || picker.type !== 'date') fail('the trading day is not a date picker: ' + JSON.stringify(picker));
+  if (!(picker.min < picker.max) || picker.value !== picker.max) fail('the picker should start on the newest day, between the first and the last: ' + JSON.stringify(picker));
+  // a day without data moves to the nearest day that has data and says so
+  await page.fill('#date', '2031-01-01');
+  await page.waitForFunction((mx) => document.getElementById('date').value === mx && !document.getElementById('date-note').hidden, picker.max, { timeout: 10000 })
+    .catch(() => fail('a day without data should snap to the nearest day and show a note'));
+  await page.waitForSelector('#eq-price .main-svg', { timeout: 20000 });
+  // the precision selector has the Ticks option first
+  const widths = await page.$$eval('#width option', (o) => o.map((x) => x.textContent));
+  if (widths[0] !== 'Ticks (raw)' || widths.length !== 7) fail('precision options: ' + widths);
   if (syms.length !== 10) fail('expected 10 equities (derivatives listed separately), got ' + syms.length);
   if (await page.isHidden('#demo-banner')) fail('demo banner not shown');
   if ((await page.$$eval('#cards .kpi', (c) => c.length)) !== 6) fail('expected 6 key figures');
