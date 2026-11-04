@@ -19,7 +19,8 @@
       <button role="tab" id="tab-fo" data-tab="fo" aria-selected="false">Derivatives</button>
     </nav>
     <div class="spacer"></div>
-    <label class="day"><span>Trading day</span><select id="date" aria-label="Trading day"></select></label>
+    <span id="date-note" class="date-note" role="status" hidden></span>
+    <label class="day"><span>Trading day</span><input type="date" id="date" aria-label="Trading day"></label>
   </div>
 </header>
 <div id="context" class="context busy" role="status" aria-live="polite"><i class="dot"></i><span id="status">Loading…</span></div>
@@ -37,7 +38,7 @@
       <div><h1 id="eq-title">Equities</h1><p class="sub" id="eq-sub"></p></div>
       <div class="toolbar">
         <label class="field wide"><span>Instrument</span><select id="symbol"></select></label>
-        <label class="field"><span>Bar width</span><select id="width"></select></label>
+        <label class="field"><span>Precision</span><select id="width"></select></label>
         <label class="field"><span>Volatility window</span><select id="volwin"></select></label>
       </div>
     </div>
@@ -73,7 +74,7 @@
     <div class="subview stack" data-sub="vol" hidden>
       <div class="panel"><header><h3>Realised volatility<span class="hint">rolling, annualised</span></h3><div class="legend" data-for="eq-vol"></div></header>
         <div class="body"><div id="eq-vol" class="plot h-lg"></div></div></div>
-      <p class="note">Realised volatility = sqrt(sum of squared 1-second log returns over the window, scaled to a trading year). At 1-second sampling the bid-ask bounce inflates it relative to 1-minute estimates, so compare instruments with each other rather than with published figures.</p>
+      <p class="note">Realised volatility = sqrt(sum of squared 1-second log returns over the window, scaled to a trading year). At 1-second sampling the bid-ask bounce inflates it relative to 1-minute estimates, so compare instruments with each other rather than with published figures. When the precision is Ticks, volatility is still estimated from 1-second bars and shown at each tick.</p>
     </div>
   </section>
 
@@ -172,7 +173,7 @@
       <div class="subview" data-sub="contract" hidden>
         <div class="toolbar" style="margin-bottom:14px">
           <label class="field wide"><span>Contract</span><select id="fo-contract"></select></label>
-          <label class="field"><span>Bar width</span><select id="fo-width"></select></label>
+          <label class="field"><span>Precision</span><select id="fo-width"></select></label>
           <label class="field"><span>Volatility window</span><select id="fo-volwin"></select></label>
         </div>
         <p class="sub muted" id="fo-contract-meta" style="margin:-4px 0 14px"></p>
@@ -201,7 +202,7 @@
       <div class="subview" data-sub="greeks" hidden>
         <div class="toolbar" style="margin-bottom:14px">
           <label class="field wide"><span>Option</span><select id="fo-greeks-contract"></select></label>
-          <label class="field"><span>Bar width</span><select id="fo-greeks-width"></select></label>
+          <label class="field"><span>Precision</span><select id="fo-greeks-width"></select></label>
         </div>
         <p class="sub muted" id="fo-greeks-meta" style="margin:-4px 0 14px"></p>
         <div id="fo-greeks-cards" class="kpis"></div>

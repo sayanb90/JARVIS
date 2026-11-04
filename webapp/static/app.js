@@ -15,7 +15,10 @@ const fmtBig = (x) => {                           // Indian lakh / crore, as tra
 const signed = (x, f = fmtInt) => (x == null ? '–' : `<span class="${x >= 0 ? 'pos' : 'neg'}">${x > 0 ? '+' : ''}${f(x)}</span>`);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const niceDate = (d) => (d ? new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
-const WIDTH_LABEL = { 1: '1 second', 5: '5 seconds', 15: '15 seconds', 30: '30 seconds', 60: '1 minute', 300: '5 minutes' };
+const WIDTH_LABEL = { 0: 'Ticks (raw)', 1: '1 second', 5: '5 seconds', 15: '15 seconds', 30: '30 seconds', 60: '1 minute', 300: '5 minutes' };
+const precisionText = (w) => (w === 0 ? 'every tick' : `${WIDTH_LABEL[w]} bars`);
+const countText = (n, w) => (w === 0 ? `${fmtInt(n)} ticks (raw)` : `${fmtInt(n)} bars of ${WIDTH_LABEL[w]}`);
+const nearestDay = (days, want) => days.reduce((best, d) => (Math.abs(new Date(d) - new Date(want)) < Math.abs(new Date(best) - new Date(want)) ? d : best), days[0]);
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
 const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'] };
 
@@ -172,7 +175,10 @@ async function init() {
   if (!state.meta.days.length) {
     $('empty').hidden = false; document.querySelectorAll('.view').forEach((v) => { v.hidden = true; }); setStatus('No data yet', 'err'); return;
   }
-  fillSelect($('date'), state.meta.days.map((d) => [d, niceDate(d)]), (state.day = state.meta.days.includes(h.date) ? h.date : state.meta.days[0]));
+  const picker = $('date');                                                       // a date picker limited to the days that have data
+  picker.min = state.meta.days[state.meta.days.length - 1]; picker.max = state.meta.days[0];
+  state.day = state.meta.days.includes(h.date) ? h.date : state.meta.days[0];
+  picker.value = state.day;
   state.symbol = h.symbol || null; state.underlying = h.underlying || null; state.expiry = h.expiry || null; state.foContract = h.contract || null;
   if (['5', '10', '20', '0'].includes(h.range)) state.range = +h.range;
   if (['active', 'atm', 'all'].includes(h.focus)) state.focus = h.focus;
@@ -201,10 +207,10 @@ async function refreshEquity() {
     if (id !== reqId) return;
     state.data = d;
     $('eq-title').textContent = state.symbol.replace(/\.NS$/, '');
-    $('eq-sub').textContent = `NSE · ${niceDate(state.day)} · ${WIDTH_LABEL[d.width]} bars`;
+    $('eq-sub').textContent = `NSE · ${niceDate(state.day)} · ${precisionText(d.width)}`;
     renderKpis('cards', equityKpis(d.summary));
     renderSeries(d, EQ);
-    setStatus(`${state.symbol} · ${state.day} · ${fmtInt(d.series.ts.length)} bars of ${WIDTH_LABEL[d.width]} · times in IST`);
+    setStatus(`${state.symbol} · ${state.day} · ${countText(d.series.ts.length, d.width)} · times in IST`);
   } catch (e) { if (id === reqId) fail(e); }
 }
 
@@ -220,7 +226,7 @@ function equityKpis(s) {
     ['Volume', fmtBig(s.volume), `VWAP ${fmt(s.vwap)}`],
     ['Spread', fmt(s.median_spread_bps, 2) + ' bps', `mean ${fmt(s.avg_spread_bps, 2)} bps`],
     ['Realised vol', fmt(s.realised_vol_pct, 1) + '%', 'annualised'],
-    ['Bars', fmtInt(s.bars), `book on ${fmt(s.book_coverage_pct, 0)}%`],
+    [state.width === 0 ? 'Ticks' : 'Bars', fmtInt(s.bars), `book on ${fmt(s.book_coverage_pct, 0)}%`],
   ];
 }
 
@@ -661,7 +667,7 @@ async function loadFoContract(sym) {
     if (id !== fcReq) return;
     state.foContractData = d;
     const s = d.summary;
-    $('fo-contract-meta').textContent = FO_TYPE(sym, state.foData).label + ` · ${WIDTH_LABEL[d.width]} bars`;
+    $('fo-contract-meta').textContent = FO_TYPE(sym, state.foData).label + ` · ${precisionText(d.width)}`;
     renderKpis('fo-contract-cards', [
       ['Last', fmt(s.close), `${signed(s.return_pct, (x) => fmt(x) + '%')} on the open`],
       ['Day high', fmt(s.high), `low ${fmt(s.low)} · VWAP ${fmt(s.vwap)}`],
@@ -671,7 +677,7 @@ async function loadFoContract(sym) {
       ['Realised vol', fmt(s.realised_vol_pct, 1) + '%', 'annualised'],
     ]);
     renderSeries(d, FC);
-    setStatus(`${sym} · ${state.day} · ${fmtInt(d.series.ts.length)} bars of ${WIDTH_LABEL[d.width]} · times in IST`);
+    setStatus(`${sym} · ${state.day} · ${countText(d.series.ts.length, d.width)} · times in IST`);
   } catch (e) { if (id === fcReq) fail(e); }
 }
 
@@ -692,7 +698,7 @@ async function loadGreeks() {
     const d = await api('/api/fo/greeks', { date: state.day, symbol: sym, width: state.width });
     if (id !== gkReq) return;
     state.greeksData = d;
-    $('fo-greeks-meta').textContent = FO_TYPE(sym, state.foData).label + ` · ${WIDTH_LABEL[d.width]} bars`;
+    $('fo-greeks-meta').textContent = FO_TYPE(sym, state.foData).label + ` · ${precisionText(d.width)}`;
     if (!d.available || !d.series.ts || !d.series.ts.length) {
       clearGreeks();
       $('fo-greeks-note').textContent = 'No Greeks were stored for this option on this day. They are collected from the day the feed first ran with Greeks storage on (JARVIS_GREEKS), so earlier days have none.';
@@ -705,7 +711,7 @@ async function loadGreeks() {
         ? 'IV, delta and gamma are as delivered by the exchange feed. Theta, vega and rho were not stored for this day and the underlying future has no bars to compute them from.'
         : 'Values are the last reading in each bar, as delivered by the exchange feed (not recomputed here).');
     renderGreeks(d);
-    setStatus(`${sym} · ${state.day} · ${fmtInt(d.series.ts.length)} bars of ${WIDTH_LABEL[d.width]} · times in IST`);
+    setStatus(`${sym} · ${state.day} · ${countText(d.series.ts.length, d.width)} · times in IST`);
   } catch (e) { if (id === gkReq) fail(e); }
 }
 function renderGreeks(d) {
@@ -770,7 +776,19 @@ setInterval(() => {                                        // one timer; only ca
 }, 1000);
 
 /* ---------------------------------------------------------------- wiring */
-$('date').onchange = (e) => { state.day = e.target.value; state.foContractData = null; state.greeksData = null; setTab(state.tab); };
+$('date').onchange = (e) => {
+  const want = e.target.value;
+  if (!want) { e.target.value = state.day; return; }                              // cleared: keep the current day
+  const day = state.meta.days.includes(want) ? want : nearestDay(state.meta.days, want);
+  const note = $('date-note');
+  note.hidden = day === want;
+  if (day !== want) {                                                             // no data that day: say so and move to the nearest day with data
+    note.textContent = `No data on ${niceDate(want)} · showing ${niceDate(day)}`;
+    clearTimeout(note._t); note._t = setTimeout(() => { note.hidden = true; }, 8000);
+  }
+  e.target.value = day;
+  state.day = day; state.foContractData = null; state.greeksData = null; setTab(state.tab);
+};
 $('symbol').onchange = (e) => { state.symbol = e.target.value; refreshEquity(); };
 const setWidth = (v) => { state.width = +v; $('width').value = v; $('fo-width').value = v; $('fo-greeks-width').value = v; state.greeksData = null; };
 const setWin = (v) => { state.volwin = +v; $('volwin').value = v; $('fo-volwin').value = v; };

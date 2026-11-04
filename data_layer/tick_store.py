@@ -127,6 +127,19 @@ def _folder_lock(folder: Path):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+COMPACT_MEMORY_GB = 1.5            # DuckDB memory the compaction may use; the sort spills to disk beyond it (SCRUM-127)
+
+
+def _compact_memory_limit() -> str:
+    """The compaction's memory limit, e.g. '2.5GB': JARVIS_COMPACT_MEMORY_GB, else COMPACT_MEMORY_GB.  Without a limit DuckDB took
+    about 360 bytes per row (5.5 GB for the 15 million rows of 2026-11-04) and a day twice as large would not fit the box."""
+    try:
+        gb = float(os.environ.get("JARVIS_COMPACT_MEMORY_GB") or COMPACT_MEMORY_GB)
+    except ValueError:
+        gb = COMPACT_MEMORY_GB
+    return f"{max(gb, 0.1):g}GB"
+
+
 def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
     """Merge a day's raw-tick segments into one ticks.parquet.  Returns row count.
 
@@ -136,6 +149,9 @@ def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
     Safe to call from several processes at once: compactions take turns under a lock, each reads and deletes exactly
     the files it listed under the lock (a segment written meanwhile is left for the next compaction, never merged
     twice) and writes through its own temporary file.
+
+    Memory is capped (see _compact_memory_limit): the sort over symbol and time spills to a temporary directory inside the day's
+    folder, which is removed afterwards.  The result is the same file content as without the cap.
     """
     folder = (lake_dir or LAKE_DIR) / "ticks" / f"date={day}"
     if not folder.is_dir():
@@ -146,7 +162,11 @@ def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
             return 0
         con = duckdb.connect()
         tmp = folder / f"ticks.parquet.{os.getpid()}.tmp"
+        spill = folder / f".compact-spill.{os.getpid()}"                 # not *.parquet, so no reader or lister sees it
         try:
+            spill.mkdir(exist_ok=True)
+            con.execute(f"SET memory_limit='{_compact_memory_limit()}'")
+            con.execute(f"SET temp_directory='{spill}'")
             # hive_partitioning=false: the date=YYYY-MM-DD folder must not become a stored column; files compacted before
             # this fix carry one, so it is dropped here too.  An explicit file list, not a glob, so a segment that appears
             # after the listing is not read without also being deleted.
@@ -160,6 +180,7 @@ def compact_ticks_day(day: date, lake_dir: Path | None = None) -> int:
         finally:
             con.close()
             tmp.unlink(missing_ok=True)
+            shutil.rmtree(spill, ignore_errors=True)
         for f in files:
             if f.name != "ticks.parquet":
                 f.unlink(missing_ok=True)

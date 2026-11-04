@@ -14,6 +14,8 @@ Missing tables (e.g. no bars collected yet) simply do not exist as views.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -25,12 +27,35 @@ from .lake import LAKE_DIR
 
 PE_MAX, ROIC_MIN, LT_DEBT_FCF_MAX, PFCF_MAX = 22.5, 0.09, 5.0, 20.0
 TRADING_DAYS = 250
+FO_REGEX = "_(CE|PE|FUT)_"                     # lake symbols of futures and options
+VIEWER_MEMORY_GB = 2.0                         # DuckDB memory per query connection; beyond it sorts and joins spill to disk (SCRUM-129)
+
+_CACHE: dict = {}                              # results per (lake, day, file fingerprint): a finished day never changes, a live day does
+_CACHE_MAX = 12
+
+
+def _cached(key: tuple, compute):
+    if key not in _CACHE:
+        if len(_CACHE) >= _CACHE_MAX:
+            _CACHE.pop(next(iter(_CACHE)))             # oldest first
+        _CACHE[key] = compute()
+    return _CACHE[key]
+
+
+def _memory_limit() -> str:
+    try:
+        gb = float(os.environ.get("JARVIS_VIEWER_MEMORY_GB") or VIEWER_MEMORY_GB)
+    except ValueError:
+        gb = VIEWER_MEMORY_GB
+    return f"{max(gb, 0.25):g}GB"
 
 
 class Lake:
     def __init__(self, lake_dir: Path | str | None = None) -> None:
         self.dir = Path(lake_dir) if lake_dir else LAKE_DIR
         self.con = duckdb.connect()
+        self.con.execute(f"SET memory_limit='{_memory_limit()}'")
+        self.con.execute(f"SET temp_directory='{Path(tempfile.gettempdir()) / 'jarvis-viewer-spill'}'")
         for name in ("income_statement", "balance_sheet", "cash_flow", "ratios",
                      "pillar_metrics", "fund_meta"):
             f = self.dir / "fundamentals" / f"{name}.parquet"
@@ -64,7 +89,7 @@ class Lake:
 
     # -- raw ticks -> bar-shaped rows (SCRUM-77: the live feed stores ticks, not 1-second bars) -----
     @staticmethod
-    def _ticks_bars_sql(pattern: str, width_s: int = 1, exclude_dates: set[str] | None = None) -> str:
+    def _ticks_bars_sql(pattern: str, width_s: int = 1, exclude_dates: set[str] | None = None, where: str | None = None) -> str:
         """
         SQL (no trailing semicolon, usable as a CTE or subquery) that aggregates raw ticks matched by
         `pattern` into bar-shaped rows at `width_s` seconds, aligned to the 03:45 UTC session open —
@@ -78,6 +103,8 @@ class Lake:
             cols = {"ts"}
         ev, od = Lake._time_exprs(cols)
         conds = ["ltp IS NOT NULL"]                                  # a quote-only row (no trade yet today) makes no price bar
+        if where:
+            conds.append(f"({where})")                               # e.g. equities only: cut the rows before the windows run
         if exclude_dates:
             date_list = ", ".join("DATE '{}'".format(d) for d in sorted(exclude_dates))
             conds.append(f"CAST({ev} AS DATE) NOT IN ({date_list})")
@@ -209,6 +236,31 @@ class Lake:
             days |= {p.name.split("=", 1)[1] for p in tdir.glob("date=*") if any(p.glob("*.parquet"))}
         return sorted(days, reverse=True)
 
+    def fingerprint(self, day: str) -> tuple:
+        """Identity of the files a day's results are computed from (name, modification time, size): a cached result is reused only while
+        this is unchanged, so a live day recomputes after each flush and a finished day never does."""
+        out = []
+        for sub in ("ticks", "greeks"):
+            for f in sorted((self.dir / sub / f"date={day}").glob("*.parquet")):
+                st = f.stat()
+                out.append((sub, f.name, st.st_mtime_ns, st.st_size))
+        folder = self.dir / "bars" / "interval=1s" / f"date={day}"
+        for f in sorted(folder.glob("*.parquet")):
+            st = f.stat()
+            out.append(("bars", f.name, st.st_mtime_ns, st.st_size))
+        return tuple(out)
+
+    def day_symbol_set(self, day: str, interval: str = "1s") -> set[str]:
+        """Symbols that have bars on `day`, without building the bars: for ticks, the symbols with at least one traded row (a quote-only
+        row makes no bar).  Reads two columns of the day's file, once per file fingerprint."""
+        tfolder = self._ticks_day_folder(day)
+        if interval == "1s" and any(tfolder.glob("*.parquet")):
+            def compute():
+                return set(self.sql(f"SELECT DISTINCT symbol FROM read_parquet('{tfolder}/*.parquet', union_by_name=true, hive_partitioning=false) "
+                                    f"WHERE ltp IS NOT NULL")["symbol"])
+            return _cached(("symbols", str(self.dir), day, self.fingerprint(day)), compute)
+        return set(self.bar_symbols(day, interval)["symbol"])
+
     def bar_symbols(self, day: str, interval: str = "1s") -> pd.DataFrame:
         """Symbols with bars on `day`: columns symbol, bars.  Reads only that day's folder."""
         tfolder = self._ticks_day_folder(day)
@@ -236,6 +288,28 @@ class Lake:
         df = df.drop_duplicates("ts", keep="last").drop(columns="filename").reset_index(drop=True)   # newest segment wins
         return self.rollup(width_s, symbol, frame=df) if width_s > 1 and not df.empty else df
 
+    def day_ticks(self, day: str, symbol: str) -> pd.DataFrame:
+        """One instrument's raw rows for one day, no aggregation, in the shape of a one-second bar so the same charts read it
+        (SCRUM-131): ts is the event time (fts, else ts); open = high = low = close = the last traded price known at that row (carried
+        over a quote-only row); volume is the rise of the cumulative volume since the previous row (the first row only sets the baseline);
+        bid, ask and their sizes and open interest are the row's own.  Rows before the first trade of the day are left out.  Empty when the
+        day has no raw ticks (a lake of legacy bars cannot show ticks)."""
+        tfolder = self._ticks_day_folder(day)
+        if not any(tfolder.glob("*.parquet")):
+            return pd.DataFrame()
+        pattern = f"{tfolder}/*.parquet"
+        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM read_parquet('{pattern}', union_by_name=true, hive_partitioning=false)").fetchall()}
+        ev, od = self._time_exprs(cols)
+        return self.sql(f"""
+            WITH raw AS (SELECT symbol, ltp, vol_today, bid, ask, bid_qty, ask_qty, oi, {ev} AS _ev, {od} AS _ord
+                         FROM read_parquet('{pattern}', union_by_name=true, hive_partitioning=false) WHERE symbol = ?),
+                 t AS (SELECT *, last_value(ltp IGNORE NULLS) OVER (ORDER BY _ord) AS px FROM raw),
+                 u AS (SELECT *, lag(vol_today) OVER (ORDER BY _ord) AS prev FROM t WHERE px IS NOT NULL)    -- as the bars: the first row is the baseline
+            SELECT symbol, 'IN' AS market, _ev AS ts, px AS open, px AS high, px AS low, px AS close,
+                   CASE WHEN prev IS NULL OR vol_today < prev THEN 0 ELSE vol_today - prev END::BIGINT AS volume,
+                   px AS vwap, 1::BIGINT AS n_ticks, bid, ask, bid_qty, ask_qty, 'live' AS src, oi
+            FROM u ORDER BY _ord""", [symbol])
+
     # -- futures and options (runbook section 17) ---------------------------
     def fo_symbols(self) -> set[str]:
         """Every symbol ever in the F&O instrument table (any day, including expired contracts), used to
@@ -251,11 +325,34 @@ class Lake:
         fo_path = self.dir / "instruments" / "fo.parquet"
         if not fo_path.exists():
             return []
-        syms = self.bar_symbols(day, interval)
-        if syms.empty:
+        syms = self.day_symbol_set(day, interval)
+        if not syms:
             return []
         inst = pd.read_parquet(fo_path, columns=["symbol", "underlying"])
-        return sorted(inst[inst["symbol"].isin(syms["symbol"])]["underlying"].unique().tolist())
+        return sorted(inst[inst["symbol"].isin(syms)]["underlying"].unique().tolist())
+
+    def _tick_stats(self, tfolder: Path, cond: str) -> pd.DataFrame:
+        """Per-symbol day stats straight from the ticks (no bar frames): bars (distinct 1-second buckets with a trade), volume (the per-tick
+        rise of the cumulative volume, the first tick only sets the baseline, a fall counts as zero), last close, first and last open
+        interest.  The same numbers the bars give, from one pass over the matching rows (SCRUM-130: this took 7 s through the bars)."""
+        pattern = f"{tfolder}/*.parquet"
+        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM read_parquet('{pattern}', union_by_name=true, hive_partitioning=false)").fetchall()}
+        ev, od = self._time_exprs(cols)
+        df = self.sql(f"""
+            WITH raw AS (SELECT symbol, ltp, vol_today, oi, {ev} AS _ev, {od} AS _ord
+                         FROM read_parquet('{pattern}', union_by_name=true, hive_partitioning=false)
+                         WHERE ltp IS NOT NULL AND ({cond})),
+                 t AS (SELECT *, lag(vol_today) OVER (PARTITION BY symbol, CAST(_ev AS DATE) ORDER BY _ord) AS prev,
+                              CAST(floor(epoch(_ev - date_trunc('day', _ev)) - 13500) AS BIGINT) AS bk FROM raw),
+                 f AS (SELECT symbol, min(bk) FILTER (WHERE oi IS NOT NULL) AS b0 FROM t GROUP BY symbol)
+            SELECT t.symbol, count(DISTINCT bk)::BIGINT AS bars,
+                   coalesce(sum(CASE WHEN prev IS NULL OR vol_today < prev THEN 0 ELSE vol_today - prev END), 0)::BIGINT AS volume,
+                   arg_max(ltp, _ord) AS close,
+                   arg_max(oi, _ord) FILTER (WHERE oi IS NOT NULL) AS oi_last,
+                   arg_max(oi, _ord) FILTER (WHERE oi IS NOT NULL AND bk = f.b0) AS oi_first    -- the last reading inside the first bar that has one
+            FROM t JOIN f ON t.symbol = f.symbol GROUP BY t.symbol, f.b0""")
+        df["oi_change"] = df["oi_last"] - df["oi_first"]
+        return df
 
     def _fo_day_stats(self, day: str, symbols: list[str], interval: str = "1s") -> pd.DataFrame:
         """Per-contract stats for `day`: bars, volume, last close, and open interest first/last/change
@@ -265,19 +362,14 @@ class Lake:
             return pd.DataFrame(columns=cols)
         tfolder = self._ticks_day_folder(day)
         if interval == "1s" and any(tfolder.glob("*.parquet")):
-            self.con.register("_fo_wanted", pd.DataFrame({"symbol": symbols}))
-            try:
-                df = self.sql(f"""
-                    WITH base AS {self._ticks_bars_sql(f'{tfolder}/*.parquet')}
-                    SELECT symbol, count(*)::BIGINT AS bars, coalesce(sum(volume), 0)::BIGINT AS volume,
-                           arg_max(close, ts) AS close,
-                           arg_max(oi, ts) FILTER (WHERE oi IS NOT NULL) AS oi_last,
-                           arg_min(oi, ts) FILTER (WHERE oi IS NOT NULL) AS oi_first
-                    FROM base WHERE symbol IN (SELECT symbol FROM _fo_wanted) GROUP BY symbol""")
-            finally:
-                self.con.unregister("_fo_wanted")
-            df["oi_change"] = df["oi_last"] - df["oi_first"]
-            return df
+            allfo = _cached(("fostats", str(self.dir), day, self.fingerprint(day)),
+                            lambda: self._tick_stats(tfolder, f"regexp_matches(symbol, '{FO_REGEX}')"))
+            have = allfo[allfo["symbol"].isin(symbols)]
+            missing = [x for x in symbols if x not in set(allfo["symbol"])]
+            if missing:                                              # a symbol that does not look like a contract: compute it on its own
+                names = ", ".join("'" + x.replace("'", "''") + "'" for x in missing)
+                have = pd.concat([have, self._tick_stats(tfolder, f"symbol IN ({names})")], ignore_index=True)
+            return have.reset_index(drop=True)
         folder = self.dir / "bars" / f"interval={interval}" / f"date={day}"
         if not any(folder.glob("*.parquet")):
             return pd.DataFrame(columns=cols)
@@ -367,14 +459,21 @@ class Lake:
         if src is None:
             return pd.DataFrame(columns=["ts", *self.GREEKS])
         last, ev, od = self._greek_exprs(src)
-        df = self.con.execute(f"""
-            WITH t AS (SELECT *, {ev} AS _ev, {od} AS _ord FROM {src} WHERE symbol = ?),
-                 b AS (SELECT *, date_trunc('day', _ev) + to_seconds(13500 + CAST(floor(
-                              (epoch(_ev - date_trunc('day', _ev)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
-                            ) AS bucket FROM t)
-            SELECT bucket AS ts, {last} FROM b GROUP BY bucket ORDER BY bucket""", [symbol]).df()
+        if width_s == 0:                                                   # ticks: every row that carries a Greek, as it arrived
+            have = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+            sel = ", ".join(g if g in have else f"CAST(NULL AS DOUBLE) AS {g}" for g in self.GREEKS)
+            df = self.con.execute(f"""
+                SELECT _ev AS ts, {sel} FROM (SELECT *, {ev} AS _ev, {od} AS _ord FROM {src} WHERE symbol = ?)
+                WHERE {' OR '.join(f"{g} IS NOT NULL" for g in self.CORE_GREEKS if g in have)} ORDER BY _ord""", [symbol]).df()
+        else:
+            df = self.con.execute(f"""
+                WITH t AS (SELECT *, {ev} AS _ev, {od} AS _ord FROM {src} WHERE symbol = ?),
+                     b AS (SELECT *, date_trunc('day', _ev) + to_seconds(13500 + CAST(floor(
+                                  (epoch(_ev - date_trunc('day', _ev)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
+                                ) AS bucket FROM t)
+                SELECT bucket AS ts, {last} FROM b GROUP BY bucket ORDER BY bucket""", [symbol]).df()
         from .greeks_calc import iv_to_percent
-        df = self._with_computed(df, day, symbol, width_s)
+        df = self._with_computed(df, day, symbol, max(width_s, 1))          # the underlying is read at one-second bars in ticks mode
         computed = df.attrs.get("computed", [])
         df["iv"] = iv_to_percent(df["iv"])                                  # stored as delivered (a fraction); shown as a percent
         df.attrs["computed"] = computed
@@ -382,6 +481,16 @@ class Lake:
 
     def greeks_last(self, day: str, symbols: list[str]) -> dict[str, dict]:
         """{symbol: {iv, delta, ...}} -- the last non-null value of each Greek that day, for chain columns."""
+        key = ("greeks_last", str(self.dir), day, self.fingerprint(day), tuple(sorted(symbols)))
+        if key in _CACHE:
+            return _CACHE[key]
+        out = self._greeks_last(day, symbols)
+        _CACHE[key] = out
+        if len(_CACHE) > _CACHE_MAX:
+            _CACHE.pop(next(iter(_CACHE)))
+        return out
+
+    def _greeks_last(self, day: str, symbols: list[str]) -> dict[str, dict]:
         src = self._greek_source(day)
         if src is None or not symbols:
             return {}
@@ -412,10 +521,10 @@ class Lake:
             return {}
         inst = pd.read_parquet(fo_path)
         inst = inst[inst["underlying"] == underlying]
-        syms = self.bar_symbols(day, interval)
-        if syms.empty or inst.empty:
+        syms = self.day_symbol_set(day, interval)
+        if not syms or inst.empty:
             return {}
-        inst = inst[inst["symbol"].isin(syms["symbol"])]
+        inst = inst[inst["symbol"].isin(syms)]
         if inst.empty:
             return {}
         stats = self._fo_day_stats(day, inst["symbol"].tolist(), interval)
@@ -463,14 +572,16 @@ class Lake:
                 "futures": fut_rows, "chain": chain, "pcr": pcr,
                 "total_call_oi": total_call_oi or None, "total_put_oi": total_put_oi or None}
 
-    def day_overview(self, day: str, interval: str = "1s") -> pd.DataFrame:
+    def day_overview(self, day: str, interval: str = "1s", equities_only: bool = False) -> pd.DataFrame:
         """
         One row per instrument for `day`: bars, volume, vwap, open/high/low/close, return %, average and
-        median spread in bps, realised volatility % (annualised), average book sizes.
+        median spread in bps, realised volatility % (annualised), average book sizes.  `equities_only` leaves the futures and options
+        out before any bar is built (they are most of the rows, and the Market tab does not show them).
         """
         tfolder = self._ticks_day_folder(day)
         if interval == "1s" and any(tfolder.glob("*.parquet")):
-            raw_cte = f"raw AS {self._ticks_bars_sql(f'{tfolder}/*.parquet')}"
+            where = f"NOT regexp_matches(symbol, '{FO_REGEX}')" if equities_only else None
+            raw_cte = f"raw AS {self._ticks_bars_sql(f'{tfolder}/*.parquet', where=where)}"
         else:
             folder = self.dir / "bars" / f"interval={interval}" / f"date={day}"
             if not any(folder.glob("*.parquet")):

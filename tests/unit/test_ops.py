@@ -407,3 +407,4 @@ def test_rollout_script_is_valid_bash_and_guards_the_session():
         assert part in text, part
     assert "rm " not in text and "git reset" not in text and "git push" not in text          # it changes no data and rewrites no history
     assert script.stat().st_mode & 0o111                                                    # executable
+    assert text.count("systemctl --user restart jarvis-viewer") == 2                         # after the pull and after the settings (SCRUM-125)

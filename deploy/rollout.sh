@@ -7,7 +7,8 @@
 # What it does, in order (everything is also written to logs/rollout-<day>.log):
 #   0. git pull (fast-forward only)               stops if it fails
 #   1. the tests that cover these fixes           stops if any fails
-#   2. restarts the jarvis-feed user service
+#   2. restarts the jarvis-feed and jarvis-viewer user services (the viewer is a long-running process: without a restart it keeps the
+#      Python it started with, SCRUM-125)
 #   3. re-runs the Greeks calibration on probe_data/stream_fo
 #        PASS -> adds JARVIS_GREEKS_RATE, JARVIS_GREEKS_CARRY, JARVIS_GREEKS_IV_SCALE, JARVIS_GREEKS_THETA_BASIS and JARVIS_GREEKS=core to .env
 #                (a backup copy is made first, values are never printed) and restarts jarvis-feed again
@@ -46,8 +47,9 @@ $PY -m pytest -q -p no:cacheprovider tests/unit/test_greeks_calc.py tests/unit/t
     tests/unit/test_feed_flush.py tests/unit/test_tick_compaction.py tests/unit/test_cron_check.py tests/unit/test_ops.py \
     || stop "tests failed: nothing was changed on the server"
 
-step "2. restart jarvis-feed"
+step "2. restart jarvis-feed and jarvis-viewer"
 systemctl --user restart jarvis-feed
+systemctl --user restart jarvis-viewer
 sleep 5
 echo "jarvis-feed: $(systemctl --user is-active jarvis-feed)"
 
@@ -61,6 +63,7 @@ if [ "$rc" -eq 0 ]; then
         # shellcheck disable=SC2086
         $PY -m data_layer.envfile set $pairs JARVIS_GREEKS=core
         systemctl --user restart jarvis-feed
+        systemctl --user restart jarvis-viewer             # it reads the settings and the code at start
         sleep 5
         echo "calibration PASSED: .env now has the four calibration settings and JARVIS_GREEKS=core; jarvis-feed: $(systemctl --user is-active jarvis-feed)"
     else

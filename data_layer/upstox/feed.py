@@ -375,7 +375,7 @@ async def run_day(feed: UpstoxFeed, end: datetime) -> None:
         t.cancel()
     day = end.date()
     rows = tick_store.compact_ticks_day(day, feed.lake_dir)
-    log.info("session %s done: compacted %d ticks", day, rows)
+    log.info("session %s done: compacted %d ticks (every row now in the day's file, equity and F&O together)", day, rows)
 
 
 async def run_forever(make_feed, once: bool = False) -> None:
