@@ -35,6 +35,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from analytics.microstructure import day_summary, rolling_realised_vol, series_payload, to_ist_strings
 from data_layer import live_book
 from data_layer.lake import LAKE_DIR
+from data_layer import tick_store
 from data_layer.query import Lake
 
 STATIC = Path(__file__).parent / "static"
@@ -116,7 +117,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         df = q.bar_symbols(date, interval)
         if df.empty:
             raise HTTPException(404, f"no bars for {date}")
-        df = df[~df["symbol"].isin(q.fo_symbols())]                 # equities only; F&O has its own tab
+        df = df[~df["symbol"].isin(q.fo_symbols()) & ~df["symbol"].str.startswith(tick_store.INDEX_PREFIX)]   # stocks only; F&O has its own tab
         if df.empty:
             raise HTTPException(404, f"no equity bars for {date}")
         return df.to_dict("records")

@@ -53,6 +53,13 @@ OPTION_ONLY = ("iv", "delta", "theta", "gamma", "vega", "rho", "oi")      # carr
 ZERO_IS_EMPTY = ("delta", "gamma", "oi")        # the feed sends 0.0 for these on stocks: constant zeros carry nothing
 
 
+INDEX_PREFIX = "NSE_INDEX:"                     # lake symbols of indices (India VIX included): stored with the stocks, shown apart from them
+
+
+def is_index(symbol: str) -> bool:
+    return symbol.startswith(INDEX_PREFIX)
+
+
 def segment_of(symbol: str) -> str:
     return "fo" if _FO_RE.search(symbol) else "eq"
 

@@ -105,3 +105,49 @@ def test_changes_policy_notices_trade_size_and_book_totals():
     moved = Tick(datetime(2026, 10, 23, 4, 0, 2), "A", 10.0, 5, 9.9, 1, 10.1, 1, None, ltq=3, tbq=140)
     assert p.apply(base) is not None and p.apply(same) is None and p.apply(moved) is not None
 
+
+
+# ---------------------------------------------------------------------------------- index and VIX keys
+VIX = "NSE_INDEX|India VIX"
+
+
+def index_frame(ltt=None, keys=(VIX,)) -> bytes:
+    r = pb.FeedResponse(type=pb.live_feed, currentTs=ms(4, 0, 0))
+    for k in keys:
+        ix = r.feeds[k].fullFeed.indexFF
+        ix.ltpc.ltp, ix.ltpc.ltt, ix.ltpc.cp = 13.2, ltt or ms(4, 0, 0), 12.9
+    return r.SerializeToString()
+
+
+def test_index_keys_join_the_equity_subscription_only_when_switched_on(monkeypatch):
+    from data_layer.upstox import instruments
+    monkeypatch.setattr(instruments, "build_key_map", lambda *a, **k: ({KEY: "A.NS"}, []))
+    monkeypatch.delenv("JARVIS_INDEX_KEYS", raising=False)
+    assert instruments.segment_key_map("eq") == {KEY: "A.NS"}
+    monkeypatch.setenv("JARVIS_INDEX_KEYS", "1")
+    km = instruments.segment_key_map("eq")
+    assert km[KEY] == "A.NS" and km[VIX] == "NSE_INDEX:India VIX" and km["NSE_INDEX|Nifty 50"] == "NSE_INDEX:Nifty 50"
+    assert all(tick_store.is_index(v) for k, v in km.items() if k != KEY) and not tick_store.is_index("A.NS")
+    assert tick_store.segment_of("NSE_INDEX:India VIX") == "eq"          # stored with the stocks, never in the F&O file
+
+
+def test_a_silent_index_key_is_reported_and_a_live_one_is_not():
+    km = {KEY: "A.NS", VIX: "NSE_INDEX:India VIX", "NSE_INDEX|Nifty 50": "NSE_INDEX:Nifty 50"}
+    p = feed.FeedProcessor(km, ext=True)
+    assert p.silent_index_keys() == [VIX, "NSE_INDEX|Nifty 50"]
+    p.handle(index_frame(), datetime(2026, 10, 23, 5, 0))
+    assert p.silent_index_keys() == ["NSE_INDEX|Nifty 50"]
+    assert feed.FeedProcessor({KEY: "A.NS"}).silent_index_keys() == []
+
+
+def test_index_rows_are_stored_with_their_previous_close_and_stay_out_of_the_stock_lists(tmp_path):
+    from data_layer.query import Lake
+    p = feed.FeedProcessor({KEY: "A.NS", VIX: "NSE_INDEX:India VIX"}, ext=True)
+    p.handle(ext_frame(), datetime(2026, 10, 23, 5, 0))
+    p.handle(index_frame(), datetime(2026, 10, 23, 5, 0))
+    tick_store.write_ticks(p.drain(), tmp_path)
+    tick_store.compact_ticks_day(date(2026, 10, 23), tmp_path, "eq")
+    f = tick_file(tmp_path, "2026-10-23")
+    assert one(f"SELECT ltp, cp FROM read_parquet('{f}') WHERE symbol = 'NSE_INDEX:India VIX'") == (13.2, 12.9)
+    ov = Lake(tmp_path).day_overview("2026-10-23", "1s", equities_only=True)
+    assert list(ov["symbol"]) == ["A.NS"]
