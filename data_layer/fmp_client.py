@@ -155,8 +155,19 @@ class PillarMetrics:
 # ---------------------------------------------------------------------------
 # Rate-limited HTTP session
 # ---------------------------------------------------------------------------
+class FMPAuthError(RuntimeError):
+    """FMP refused the API key (HTTP 401 or 403).  Retrying cannot help, so the run stops."""
+
+
+def key_is_placeholder(key: str) -> bool:
+    """The value copied from .env.example, or nothing: no real key was ever put in .env."""
+    k = (key or "").strip().lower()
+    return not k or k.startswith("your_") or k in ("changeme", "xxx", "todo")
+
+
 class FMPSession:
-    """Thin wrapper around requests.Session with rate limiting + retry."""
+    """Thin wrapper around requests.Session with rate limiting + retry.  `failures` counts calls that ended without an answer
+    (retries exhausted, or an HTTP error other than "not found"): a caller must not treat those as "no data"."""
 
     def __init__(self, api_key: str, delay: float = RATE_LIMIT_DELAY) -> None:
         self._key   = api_key
@@ -164,6 +175,12 @@ class FMPSession:
         self._last  = 0.0
         self._sess  = requests.Session()
         self._sess.headers.update({"Accept": "application/json"})
+        self.failures = 0
+
+    def _scrub(self, text: Any) -> str:
+        """Error text of the requests library quotes the whole URL, key included: never let the key reach a log."""
+        t = str(text)
+        return t.replace(self._key, "***") if self._key else t
 
     def get(self, endpoint: str, **params: Any) -> Any:
         params["apikey"] = self._key
@@ -177,6 +194,14 @@ class FMPSession:
             try:
                 resp = self._sess.get(url, params=params, timeout=30)
                 self._last = time.monotonic()
+
+                if resp.status_code in (401, 403):
+                    self.failures += 1
+                    raise FMPAuthError(f"FMP answered HTTP {resp.status_code} for {endpoint}: the API key is missing, wrong or "
+                                       f"not allowed for this endpoint (check FMP_API_KEY in .env)")
+
+                if resp.status_code == 404:                      # an unknown ticker is an answer, not a failure
+                    return []
 
                 if resp.status_code == 429:
                     wait = RETRY_BACKOFF ** attempt
@@ -195,10 +220,11 @@ class FMPSession:
 
             except requests.RequestException as exc:
                 wait = RETRY_BACKOFF ** attempt
-                log.error("Request error attempt %d: %s — retry in %.1f s", attempt, exc, wait)
+                log.error("Request error attempt %d: %s — retry in %.1f s", attempt, self._scrub(exc), wait)
                 time.sleep(wait)
 
-        log.error("Exhausted retries for %s", url)
+        self.failures += 1
+        log.error("Exhausted retries for %s", f"{BASE_URL}/{endpoint}")
         return []
 
 
@@ -210,6 +236,10 @@ class FMPExtractor:
 
     def __init__(self, api_key: str) -> None:
         self._sess = FMPSession(api_key)
+
+    @property
+    def failures(self) -> int:
+        return getattr(self._sess, "failures", 0)
 
     def income_statement(self, ticker: str, market: str) -> list[IncomeRow]:
         data = self._sess.get(f"income-statement/{ticker}", period="annual", limit=YEARS_BACK)
@@ -603,6 +633,9 @@ def run(
     if not api_key and not dry_run:
         log.error("FMP_API_KEY not set. Copy .env.example → .env and add your key.")
         sys.exit(1)
+    if key_is_placeholder(api_key) and not dry_run:
+        log.error("FMP_API_KEY is still the placeholder from .env.example: put a real key in .env.  Nothing was fetched.")
+        sys.exit(1)
 
     LOG_DIR.mkdir(exist_ok=True)
     universe = _resolve_universe(market, api_key, dry_run, tickers)
@@ -631,14 +664,38 @@ def run(
     all_pillars:   list[PillarMetrics] = []
 
     total = len(universe)
-    fetched_ok: list[str] = []  # symbols successfully fetched (for fund_meta update)
+    fetched_ok: list[str] = []  # symbols answered on every call (for the fund_meta update)
+    failed: list[str] = []      # symbols with at least one call that got no answer: retried at the next run, not stamped
+    empty: list[str] = []       # answered, but FMP has nothing for them
+    auth_error: Exception | None = None
 
     for idx, ticker in enumerate(universe, 1):
         log.info("[%d/%d] %s [%s]", idx, total, ticker, market)
+        before = getattr(extractor, "failures", 0)
         try:
             data = extractor.fetch_ticker(ticker, market)
+        except FMPAuthError as exc:
+            auth_error = exc
+            log.error("%s: stopping the run, the remaining %d tickers are not tried", exc, total - idx)
+            break
         except Exception as exc:
             log.error("Skipping %s — %s", ticker, exc)
+            failed.append(ticker)
+            continue
+
+        if getattr(extractor, "failures", 0) > before:
+            # a call got no answer (rate limit, outage): what came back is partial.  Keep it out of the tables and do not stamp
+            # the ticker as refreshed, or it would not be tried again for a whole rotation (and an all-empty pillar row would
+            # overwrite its last good values).
+            log.warning("%s: %d call(s) got no answer; not stored, not stamped, tried again next run", ticker,
+                        getattr(extractor, "failures", 0) - before)
+            failed.append(ticker)
+            continue
+
+        if not any(data[k] for k in ("income", "balance", "cash_flow", "ratios")):
+            log.warning("%s: FMP has no statements for this ticker", ticker)
+            empty.append(ticker)
+            fetched_ok.append(ticker)                 # a real, empty answer: stamp it, but write no pillar row of nulls
             continue
 
         all_income.extend(data["income"])
@@ -655,9 +712,13 @@ def run(
 
     write_fundamentals(all_income, all_balance, all_cash_flow, all_ratios, market)
     write_pillar_metrics(all_pillars, market)
-    write_fund_meta(fetched_ok, market)  # stamp last_updated for successfully fetched tickers
-    log.info("Done [%s]. %d tickers | %d income rows | fund_meta updated",
-             market, total, len(all_income))
+    write_fund_meta(fetched_ok, market)  # stamp last_updated for tickers FMP answered on every call
+    log.info("Done [%s]. %d tickers | %d with data | %d empty | %d failed (retried next run) | %d income rows | fund_meta updated",
+             market, total, len(all_pillars), len(empty), len(failed), len(all_income))
+    if auth_error is not None:
+        raise auth_error
+    if total and not fetched_ok:
+        raise RuntimeError(f"FMP gave no answer for any of {total} tickers; nothing was stored (see the errors above)")
 
 
 # ---------------------------------------------------------------------------
