@@ -75,6 +75,12 @@ class FeedProcessor:
         self._ticks: list[Tick] = []
         self.status: dict[str, str] = {}
         self.frames = self.ticks = self.dropped_stale = self.dropped_future = self.quote_only = 0
+        self._index_keys = {k for k, v in key_map.items() if tick_store.is_index(v)}
+        self._index_seen: set[str] = set()
+
+    def silent_index_keys(self) -> list[str]:
+        """Index keys subscribed that have not sent a single frame: a wrong key name shows up here, not as an error from the server."""
+        return sorted(self._index_keys - self._index_seen)
 
     def handle(self, data: bytes, now: datetime) -> None:
         resp = decode.parse_frame(data)
@@ -90,6 +96,8 @@ class FeedProcessor:
                 if self._event_state.get(k) != e["status"]:       # record changes only
                     self._event_state[k] = e["status"]
                     self.events.append(e)
+        if self._index_keys and len(self._index_seen) < len(self._index_keys):
+            self._index_seen.update(self._index_keys.intersection(resp.feeds.keys()))
         for sym, ts, ltp, bids, asks in decode.books_from_response(resp, self.key_map):
             self.books.update(sym, ts, ltp, bids, asks)
         for t in decode.ticks_from_response(resp, self.key_map, ext=self.ext):
@@ -375,6 +383,9 @@ async def run_day(feed: UpstoxFeed, end: datetime) -> None:
     finally:
         t.cancel()
     day = end.date()
+    silent = feed.proc.silent_index_keys()
+    if silent:
+        log.warning("index keys that sent no frame this session (check the key names): %s", ", ".join(silent))
     rows = tick_store.compact_ticks_day(day, feed.lake_dir, feed.segment)
     log.info("session %s done: compacted %d ticks (every row of this feed's %s file)", day, rows, feed.segment or "folders")
 

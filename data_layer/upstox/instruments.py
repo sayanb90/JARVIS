@@ -50,9 +50,22 @@ def build_key_map(rows: list[dict] | None = None, master: Path | str | None = No
     return keys, skipped
 
 
+# Index keys (SCRUM-100).  The lake symbol is "NSE_INDEX:<name>", which is how tick_store.is_index tells an index from a stock.  The names
+# are Upstox's own index names; a key that never sends a frame is reported at the end of the session (see feed.silent_keys).
+INDEX_KEYS: dict[str, str] = {f"NSE_INDEX|{n}": f"NSE_INDEX:{n}" for n in (
+    "Nifty 50", "Nifty Bank", "India VIX", "Nifty Fin Service", "Nifty Next 50", "NIFTY MID SELECT")}
+
+
+def index_keys_enabled(env=None) -> bool:
+    import os
+    return (os.environ if env is None else env).get("JARVIS_INDEX_KEYS", "").lower() in ("1", "true", "yes", "on")
+
+
 def segment_key_map(segment: str = "eq", fo_file: Path | str | None = None) -> dict[str, str]:
-    """{instrument_key: symbol} for the collectors: the equity universe ("eq") or the selected contracts ("fo")."""
+    """{instrument_key: symbol} for the collectors: the equity universe ("eq", plus the index keys when JARVIS_INDEX_KEYS is on) or the
+    selected contracts ("fo")."""
     if segment == "fo":
         from .fo_instruments import fo_key_map
         return fo_key_map(Path(fo_file) if fo_file else None)
-    return build_key_map()[0]
+    keys = build_key_map()[0]
+    return {**keys, **INDEX_KEYS} if index_keys_enabled() else keys
