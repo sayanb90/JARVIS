@@ -1,7 +1,7 @@
 @bdd
-Feature: Interim Yahoo intraday bars (India only)
+Feature: Yahoo intraday bars (US, UK and EU by default, India on request)
   As the owner of the platform
-  I want 5-minute bars from Yahoo for India while the live feed is being proven
+  I want intraday bars from Yahoo for the markets the live feed does not cover
   So that intraday history starts accumulating immediately
 
   Background:
@@ -20,15 +20,14 @@ Feature: Interim Yahoo intraday bars (India only)
     And I collect the Yahoo intraday bars for India with the deepest window and load the lake
     Then each symbol has no duplicate bar timestamps
 
-  Scenario Outline: Other markets are not collected intraday
+  Scenario Outline: A market outside the four is refused
     When I try to collect Yahoo intraday bars for <market>
-    Then the request is refused because intraday is India only
+    Then the request is refused because the market is not one of the four
 
     Examples:
       | market |
-      | US     |
-      | UK     |
-      | EU     |
+      | JP     |
+      | SG     |
 
   Scenario: Asking for the deepest window uses what Yahoo allows
     When I plan a deepest-window collection for each bar size

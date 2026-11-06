@@ -44,7 +44,8 @@ ENV_FILE = Path(os.getenv("JARVIS_ENV") or ROOT / ".env")     # the one place se
 LAKE_DIR = Path(os.getenv("JARVIS_LAKE", ROOT / "lake"))
 
 MARKETS = ("IN", "US", "UK", "EU")   # daily OHLC universe
-BARS_MARKETS = ("IN",)                # intraday signals use India only
+BARS_MARKETS = ("IN", "US", "UK", "EU")   # markets whose intraday bars can be collected from Yahoo (India first: verify.py reads [0])
+BARS_YF_DEFAULT = ("US", "UK", "EU")      # what `--market ALL` collects: India is recorded tick by tick by the Upstox feed instead
 FUND_MARKETS = ("IN",)                # fundamentals (FMP free-tier budget) are India only
 
 # table -> (csv stem, key columns, {column: sql type})

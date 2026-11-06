@@ -115,21 +115,37 @@ def test_write_bars_is_idempotent_and_corrections_win(world):
     assert len(lines) == 3 and ",9.0," in lines[1] and ",1.7," in lines[2]
 
 
-@pytest.mark.parametrize("market", ["US", "UK", "EU"])
-def test_run_bars_refuses_non_india(world, market):
+@pytest.mark.parametrize("market", ["JP", "SG"])
+def test_run_bars_refuses_a_market_outside_the_four(world, market):
     with pytest.raises(ValueError, match="intraday"):
         world.yf.run_bars(market=market, tickers=["X"])
 
 
-def test_run_bars_all_means_india_and_backfill_uses_deepest_window(world, monkeypatch):
-    got = {}
-    monkeypatch.setattr(world.yf, "fetch_bars", lambda u, m, iv, d: got.update(m=m, d=d, iv=iv) or [object()])
+def test_run_bars_all_means_us_uk_eu_and_backfill_uses_deepest_window(world, monkeypatch):
+    got = []
+    monkeypatch.setattr(world.yf, "fetch_bars", lambda u, m, iv, d: got.append((m, d, iv, tuple(u))) or [object()])
     monkeypatch.setattr(world.yf, "write_bars", lambda *a: None)
-    world.set_universe({"IN": ["A.NS"]})
-    world.yf.run_bars(market="ALL", interval="5m", backfill=True)
-    assert got == {"m": "IN", "d": 59, "iv": "5m"}
-    world.yf.run_bars(market="IN", interval="60m", backfill=True)
-    assert got["d"] == 729
+    world.set_universe({"IN": ["A.NS"], "US": ["AAPL"], "UK": ["SHEL.L"], "EU": ["SAP.DE"]})
+    world.yf.run_bars(market="ALL", interval="1m", backfill=True)
+    assert got == [("US", 6, "1m", ("AAPL",)), ("UK", 6, "1m", ("SHEL.L",)), ("EU", 6, "1m", ("SAP.DE",))]      # India is not fetched from Yahoo
+    got.clear()
+    world.yf.run_bars(market="IN", interval="60m", backfill=True)                      # but it can be asked for by name
+    assert got[0][:2] == ("IN", 729)
+
+
+def test_one_market_failing_does_not_stop_the_others_and_is_reported(world, monkeypatch):
+    done = []
+    def fetch(u, m, iv, d):
+        if m == "UK":
+            raise RuntimeError("yahoo blocked")
+        done.append(m)
+        return [object()]
+    monkeypatch.setattr(world.yf, "fetch_bars", fetch)
+    monkeypatch.setattr(world.yf, "write_bars", lambda *a: None)
+    world.set_universe({"US": ["AAPL"], "UK": ["SHEL.L"], "EU": ["SAP.DE"]})
+    with pytest.raises(RuntimeError, match="UK"):
+        world.yf.run_bars(market="ALL", interval="1m")
+    assert done == ["US", "EU"]
 
 
 def test_run_ohlc_all_covers_four_markets_and_dry_run_downloads_nothing(world, monkeypatch):

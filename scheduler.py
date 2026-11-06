@@ -14,11 +14,12 @@ fundamentals    Read data/universe.csv + data/fund_meta.csv, pick the
                 update fund_meta.csv, then upsert into the Parquet lake:
                   data_layer.lake.load_fundamentals()  -> lake/fundamentals/
 
-bars            Collect aggregated intraday bars (default 5m) via yfinance and
-                upsert them into per-day Parquet files:
-                  data_layer.lake.load_bars()  -> lake/bars/interval=5m/date=YYYY-MM-DD/
-                Run once after the NSE close (see crontab below).
-                Not part of `all`. Superseded by the Upstox live feed once it is wired.
+bars            Collect aggregated intraday bars (default 5m, use --interval 1m) via yfinance for
+                US, UK and EU (--market ALL) or one market, and upsert them into per-day Parquet files:
+                  data_layer.lake.load_bars()  -> lake/bars/interval=1m/date=YYYY-MM-DD/
+                Yahoo keeps only 7 days of 1m and 60 days of 5m, so history is built forward: run it every
+                weekday after the US close (22:00 UTC).  India is recorded by the Upstox live feed instead.
+                Not part of `all`.
 
 all             Run ohlc-daily then fundamentals.
 
@@ -30,9 +31,8 @@ Crontab examples (crontab -e)
 # Fundamentals rotation — 7:00 PM every weekday (auto-picks stalest stocks)
 0 19 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
 
-# Intraday bars — after each close. Server clock must be UTC.
-#   NSE closes 15:30 IST = 10:00 UTC  -> run 10:20 UTC
-20 10 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job bars --market IN >> logs/scheduler.log 2>&1
+# Intraday bars for US, UK and EU — after the last of those closes (NYSE closes 21:00 UTC in winter). Server clock must be UTC.
+0 22 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job bars --market ALL --interval 1m >> logs/scheduler.log 2>&1
 
 # Both together (if runtime is acceptable)
 0 18 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job all >> logs/scheduler.log 2>&1
@@ -52,7 +52,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 # Ensure project root is on the path so data_layer imports work
@@ -65,7 +65,7 @@ from data_layer.fmp_client import (
     run as fmp_run,
 )
 from data_layer import lake
-from data_layer.yf_client import INTRADAY_INTERVAL, run_bars, run_ohlc_daily
+from data_layer.yf_client import INTRADAY_INTERVAL, INTRADAY_MAX_DAYS, run_bars, run_ohlc_daily
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -196,17 +196,22 @@ def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
              dry_run: bool = False, backfill: bool = False) -> bool:
     """Fetch aggregated intraday bars -> data/bars/ -> upsert recent day files."""
     log.info("=== JOB: bars [market=%s, interval=%s] ===", market, interval)
+    fetched = True
     try:
         run_bars(market=market, interval=interval, dry_run=dry_run, backfill=backfill)
     except Exception as exc:
         log.error("Bars fetch failed: %s", exc)
-        return False
+        fetched = False                                   # the markets that did work wrote day files: still load them
 
     if dry_run:
         log.info("DRY RUN — skipping lake load")
         return True
 
-    return _load_lake("intraday bars", lake.load_bars, interval, markets=lake.BARS_MARKETS)
+    markets = lake.BARS_YF_DEFAULT if market == "ALL" else (market,)
+    since = None                                         # default: the last 7 days of day files
+    if backfill:                                         # a backfill wrote up to 59 days of files: load all of them
+        since = date.today() - timedelta(days=INTRADAY_MAX_DAYS.get(interval, 7) + 1)
+    return _load_lake("intraday bars", lake.load_bars, interval, since, markets=markets) and fetched
 
 
 def job_all(market: str = "ALL", budget: int = FMP_DAILY_BUDGET,

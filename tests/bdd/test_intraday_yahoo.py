@@ -42,7 +42,7 @@ def _try(ctx, market):
         ctx.w.yf.run_bars(market, tickers=["X"], interval="5m")
         ctx.refused = False
     except ValueError as exc:
-        ctx.refused = "India" in str(exc) or "intraday" in str(exc)
+        ctx.refused = "intraday" in str(exc)
 
 
 @when("I plan a deepest-window collection for each bar size")
@@ -68,7 +68,7 @@ def _dups(ctx):
     assert df.empty
 
 
-@then("the request is refused because intraday is India only")
+@then("the request is refused because the market is not one of the four")
 def _refused(ctx):
     assert ctx.refused is True
 

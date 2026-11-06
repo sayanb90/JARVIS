@@ -11,6 +11,10 @@ JARVIS=/home/jarvis/JARVIS
 
 # Daily OHLC for India, US, UK and EU, after the last close (NYSE closes 21:00 UTC in winter)
 30 22 * * 1-5  cd $JARVIS && python scheduler.py --job ohlc-daily  >> logs/scheduler.log 2>&1
+# Intraday 1-minute bars for US, UK and EU from Yahoo, once after the last close.  Yahoo serves only 7 days of 1m, so this builds the
+# history forward; each run re-fetches the last 5 days (idempotent), so a missed day or two is filled in.  India is recorded tick by
+# tick by the Upstox feed instead.
+0 22 * * 1-5   cd $JARVIS && python scheduler.py --job bars --market ALL --interval 1m >> logs/scheduler.log 2>&1
 # Fundamentals rotation (India; spends the FMP free-tier budget on the stalest stocks)
 0 12 * * 1-5   cd $JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
 # Nightly backup snapshot: parked until a separate disk or bucket exists (SCRUM-121); health only warns, cron_check does not require it.

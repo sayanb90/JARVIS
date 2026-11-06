@@ -42,7 +42,7 @@ import pandas as pd
 import yfinance as yf
 
 from .fmp_client import read_universe
-from .lake import BARS_MARKETS, MARKETS
+from .lake import BARS_MARKETS, BARS_YF_DEFAULT, MARKETS
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -276,7 +276,8 @@ BARS_DIR = DATA_DIR / "bars"
 # Max look-back Yahoo allows per interval (calendar days)
 INTRADAY_MAX_DAYS = {"1m": 7, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
 INTRADAY_INTERVAL = "5m"
-INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent)
+INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent).  Yahoo serves 7 days of 1m: a daily run with a
+                           # 5-day overlap survives a missed day or two.
 
 _INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
 _BAR_HEADERS = ["ts", "symbol", "market", "open", "high", "low", "close", "volume"]
@@ -408,12 +409,23 @@ def run_bars(
     backfill: bool = False,
 ) -> None:
     """
-    Intraday bar collection (India only).  backfill=True pulls the deepest window
-    Yahoo allows (about 59 days of 5m, 6 of 1m, 729 of 60m); there is no more.  Run AFTER each market closes, then:
-      python -m data_layer.lake --load bars --interval 5m
+    Intraday bar collection from Yahoo: US, UK and EU by default (`ALL`), India on request (the Upstox feed records India tick by
+    tick, so a Yahoo copy of it adds nothing).  backfill=True pulls the deepest window Yahoo allows (about 59 days of 5m, 6 of 1m,
+    729 of 60m); there is no more, so 1-minute history can only be built forward.  Run AFTER each market closes (the cron job runs
+    once at 22:00 UTC, after the US close in winter and summer), then:
+      python -m data_layer.lake --load bars --interval 1m
     """
     if market == "ALL":
-        market = BARS_MARKETS[0]
+        failed = []
+        for m in BARS_YF_DEFAULT:                                  # one market failing must not stop the others
+            try:
+                run_bars(m, tickers, interval, days_back, dry_run, backfill)
+            except Exception as exc:
+                log.error("bars %s [%s] failed: %s", interval, m, exc)
+                failed.append(m)
+        if failed:
+            raise RuntimeError(f"bars {interval} failed for market(s): {', '.join(failed)}")
+        return
     if market not in BARS_MARKETS:
         raise ValueError(f"intraday bars are collected for {BARS_MARKETS} only, not {market!r}")
     if backfill:

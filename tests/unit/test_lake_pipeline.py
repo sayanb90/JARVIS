@@ -168,12 +168,14 @@ def test_ohlc_all_markets_but_bars_india_only(env):
     w(root / "data/bars/5m/in/2026-10-23.csv", bh, [["2026.10.23D03:45:00.000000000", "INFY.NS", "IN", 1, 2, 1, 1.5, 10]])
     w(root / "data/bars/5m/us/2026-10-23.csv", bh, [["2026.10.23D13:30:00.000000000", "AAPL", "US", 1, 2, 1, 1.5, 10]])
     lake.load_ohlc()
-    lake.load_bars("5m", since=lake.date(2026, 10, 1))           # default markets = India only
+    lake.load_bars("5m", since=lake.date(2026, 10, 1), markets=("IN",))      # India only here
     from data_layer.query import Lake
     q = Lake(root / "lake")
     assert set(q.sql("SELECT DISTINCT market FROM ohlc").market) == {"IN", "US", "UK", "EU"}
     assert set(q.sql("SELECT DISTINCT market FROM bars_5m").market) == {"IN"}
-    assert lake.BARS_MARKETS == ("IN",) and lake.FUND_MARKETS == ("IN",)
+    assert lake.BARS_MARKETS == ("IN", "US", "UK", "EU") and lake.BARS_YF_DEFAULT == ("US", "UK", "EU") and lake.FUND_MARKETS == ("IN",)
+    lake.load_bars("5m", since=lake.date(2026, 10, 1))                                 # default markets now include the others
+    assert set(q.sql("SELECT DISTINCT market FROM bars_5m").market) == {"IN", "US"}
 
 
 # ---------------------------------------------------------------------------

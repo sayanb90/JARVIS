@@ -78,17 +78,28 @@ def test_fundamentals_empty_universe_is_a_noop_success(sched, world, monkeypatch
     assert sched.job_fundamentals() is True
 
 
-def test_bars_job_is_india_only_and_passes_backfill(sched, monkeypatch):
+def test_bars_job_passes_backfill_and_loads_the_whole_window(sched, monkeypatch):
     seen = {}
     monkeypatch.setattr(sched, "run_bars", lambda **kw: seen.update(kw))
-    monkeypatch.setattr(sched.lake, "load_bars", lambda iv, markets: seen.update(load=(iv, markets)))
+    monkeypatch.setattr(sched.lake, "load_bars", lambda iv, since, markets: seen.update(load=(iv, since, markets)))
     assert sched.job_bars("IN", "5m", backfill=True) is True
-    assert seen["backfill"] is True and seen["load"] == ("5m", ("IN",))
+    assert seen["backfill"] is True and seen["load"][0] == "5m" and seen["load"][2] == ("IN",)
+    assert (sched.date.today() - seen["load"][1]).days == 61                  # 60 days of 5m files, not just the last 7
 
 
-def test_bars_job_for_us_fails_cleanly(sched, world):
-    world.set_universe({"IN": ["A.NS"]})
-    assert sched.job_bars("US") is False
+def test_bars_job_for_all_means_us_uk_eu_and_loads_the_last_week(sched, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sched, "run_bars", lambda **kw: seen.update(kw))
+    monkeypatch.setattr(sched.lake, "load_bars", lambda iv, since, markets: seen.update(load=(iv, since, markets)))
+    assert sched.job_bars("ALL", "1m") is True
+    assert seen["market"] == "ALL" and seen["load"] == ("1m", None, ("US", "UK", "EU"))
+
+
+def test_a_failed_market_is_reported_but_the_others_are_still_loaded(sched, monkeypatch):
+    loaded = []
+    monkeypatch.setattr(sched, "run_bars", lambda **kw: (_ for _ in ()).throw(RuntimeError("bars 1m failed for market(s): UK")))
+    monkeypatch.setattr(sched.lake, "load_bars", lambda iv, since, markets: loaded.append(markets))
+    assert sched.job_bars("ALL", "1m") is False and loaded == [("US", "UK", "EU")]
 
 
 def test_job_all_runs_both_and_ands_the_results(sched, monkeypatch):
