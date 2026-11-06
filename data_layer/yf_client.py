@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -42,7 +44,7 @@ import pandas as pd
 import yfinance as yf
 
 from .fmp_client import read_universe
-from .lake import BARS_MARKETS, MARKETS
+from .lake import BARS_MARKETS, BARS_YF_DEFAULT, MARKETS
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -79,9 +81,23 @@ class OHLCRow:
 # Core download helpers
 # ---------------------------------------------------------------------------
 
+_LAST_DOWNLOAD = 0.0
+
+
+def _pace() -> None:
+    """Leave `JARVIS_YF_CHUNK_PAUSE_S` (default 2 s) between two downloads: with a universe of about two thousand tickers Yahoo
+    throttles a client that sends the chunks back to back."""
+    global _LAST_DOWNLOAD
+    gap = float(os.getenv("JARVIS_YF_CHUNK_PAUSE_S", "2")) - (time.monotonic() - _LAST_DOWNLOAD)
+    if gap > 0 and _LAST_DOWNLOAD:
+        time.sleep(gap)
+    _LAST_DOWNLOAD = time.monotonic()
+
+
 def _batch_download(tickers: list[str], **kwargs) -> dict[str, pd.DataFrame]:
     """
-    Download OHLC for a list of tickers via yfinance, returning {ticker: df}.
+    Download OHLC for a list of tickers via yfinance, returning {ticker: df}.  One chunk that raises (a throttled request) is
+    tried once more after a longer pause before the caller gives up on it.
 
     Handles the yfinance quirk where a single-ticker download returns a plain
     DataFrame but a multi-ticker download returns a MultiIndex DataFrame.
@@ -90,14 +106,24 @@ def _batch_download(tickers: list[str], **kwargs) -> dict[str, pd.DataFrame]:
     if not tickers:
         return {}
 
-    raw = yf.download(
-        tickers=tickers,
-        group_by="ticker",
-        auto_adjust=True,   # Close = split+dividend adjusted; no Adj Close column
-        progress=False,
-        threads=True,
-        **kwargs,
-    )
+    for attempt in (1, 2):
+        _pace()
+        try:
+            raw = yf.download(
+                tickers=tickers,
+                group_by="ticker",
+                auto_adjust=True,   # Close = split+dividend adjusted; no Adj Close column
+                progress=False,
+                threads=True,
+                **kwargs,
+            )
+            break
+        except Exception as exc:
+            if attempt == 2:
+                raise
+            wait = 5 * float(os.getenv("JARVIS_YF_CHUNK_PAUSE_S", "2"))
+            log.warning("download of %d tickers failed (%s); trying once more in %.0f s", len(tickers), exc, wait)
+            time.sleep(wait)
 
     if len(tickers) == 1:
         # Single ticker: raw is a plain DataFrame (no MultiIndex)
@@ -276,7 +302,8 @@ BARS_DIR = DATA_DIR / "bars"
 # Max look-back Yahoo allows per interval (calendar days)
 INTRADAY_MAX_DAYS = {"1m": 7, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
 INTRADAY_INTERVAL = "5m"
-INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent)
+INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent).  Yahoo serves 7 days of 1m: a daily run with a
+                           # 5-day overlap survives a missed day or two.
 
 _INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
 _BAR_HEADERS = ["ts", "symbol", "market", "open", "high", "low", "close", "volume"]
@@ -408,12 +435,23 @@ def run_bars(
     backfill: bool = False,
 ) -> None:
     """
-    Intraday bar collection (India only).  backfill=True pulls the deepest window
-    Yahoo allows (about 59 days of 5m, 6 of 1m, 729 of 60m); there is no more.  Run AFTER each market closes, then:
-      python -m data_layer.lake --load bars --interval 5m
+    Intraday bar collection from Yahoo: US, UK and EU by default (`ALL`), India on request (the Upstox feed records India tick by
+    tick, so a Yahoo copy of it adds nothing).  backfill=True pulls the deepest window Yahoo allows (about 59 days of 5m, 6 of 1m,
+    729 of 60m); there is no more, so 1-minute history can only be built forward.  Run AFTER each market closes (the cron job runs
+    once at 22:00 UTC, after the US close in winter and summer), then:
+      python -m data_layer.lake --load bars --interval 1m
     """
     if market == "ALL":
-        market = BARS_MARKETS[0]
+        failed = []
+        for m in BARS_YF_DEFAULT:                                  # one market failing must not stop the others
+            try:
+                run_bars(m, tickers, interval, days_back, dry_run, backfill)
+            except Exception as exc:
+                log.error("bars %s [%s] failed: %s", interval, m, exc)
+                failed.append(m)
+        if failed:
+            raise RuntimeError(f"bars {interval} failed for market(s): {', '.join(failed)}")
+        return
     if market not in BARS_MARKETS:
         raise ValueError(f"intraday bars are collected for {BARS_MARKETS} only, not {market!r}")
     if backfill:

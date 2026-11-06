@@ -24,6 +24,7 @@ def _hermetic_settings(tmp_path, monkeypatch):
     needs a setting sets it itself, after this runs."""
     for name in HOST_SETTINGS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("JARVIS_YF_CHUNK_PAUSE_S", "0")                  # no waiting between Yahoo downloads in tests
     import data_layer.lake as lake
     from data_layer.upstox import auth
     absent = tmp_path / "no-such.env"

@@ -223,6 +223,25 @@ def test_all_green(healthy, capsys):
     assert "latest bar day 2026-10-27" in out and "daily OHLC IN: latest 2026-10-26" in out and "newest backup 2026-10-27" in out
 
 
+def test_yahoo_minute_bars_are_reported_per_market_and_old_ones_warn(healthy, capsys):
+    import pandas as pd
+    world, bk = healthy
+    for day, ts, age_ok in (("2026-10-26", "2026-10-26 14:30:00", True),):
+        d = world.lakedir / "bars" / "interval=1m" / f"date={day}"
+        d.mkdir(parents=True)
+        pd.DataFrame({"ts": [pd.Timestamp(ts)] * 2, "symbol": ["AAPL", "SHEL.L"], "market": ["US", "UK"], "open": 1.0, "high": 1.0,
+                      "low": 1.0, "close": 1.0, "volume": 1}).to_parquet(d / "bars.parquet")
+    run_health(world, bk, after_close=True)
+    out = capsys.readouterr().out
+    assert "[PASS] Yahoo 1-minute bars: 1 days stored, newest 2026-10-26" in out and "UK 1 symbols 1 bars" in out and "US 1 symbols 1 bars" in out
+    (world.lakedir / "bars" / "interval=1m" / "date=2026-10-26" / "bars.parquet").rename(
+        world.lakedir / "bars" / "interval=1m" / "date=2026-10-26" / "old.parquet")
+    old = world.lakedir / "bars" / "interval=1m" / "date=2026-10-20"
+    (world.lakedir / "bars" / "interval=1m" / "date=2026-10-26").rename(old)
+    run_health(world, bk, after_close=True)
+    assert "[WARN] Yahoo 1-minute bars: 1 days stored, newest 2026-10-20" in capsys.readouterr().out
+
+
 def test_each_problem_is_reported(healthy, capsys, monkeypatch):
     world, bk = healthy
     (world.root / "logs/scheduler.log").write_text(
