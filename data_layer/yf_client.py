@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import csv
 import logging
+import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -79,9 +81,23 @@ class OHLCRow:
 # Core download helpers
 # ---------------------------------------------------------------------------
 
+_LAST_DOWNLOAD = 0.0
+
+
+def _pace() -> None:
+    """Leave `JARVIS_YF_CHUNK_PAUSE_S` (default 2 s) between two downloads: with a universe of about two thousand tickers Yahoo
+    throttles a client that sends the chunks back to back."""
+    global _LAST_DOWNLOAD
+    gap = float(os.getenv("JARVIS_YF_CHUNK_PAUSE_S", "2")) - (time.monotonic() - _LAST_DOWNLOAD)
+    if gap > 0 and _LAST_DOWNLOAD:
+        time.sleep(gap)
+    _LAST_DOWNLOAD = time.monotonic()
+
+
 def _batch_download(tickers: list[str], **kwargs) -> dict[str, pd.DataFrame]:
     """
-    Download OHLC for a list of tickers via yfinance, returning {ticker: df}.
+    Download OHLC for a list of tickers via yfinance, returning {ticker: df}.  One chunk that raises (a throttled request) is
+    tried once more after a longer pause before the caller gives up on it.
 
     Handles the yfinance quirk where a single-ticker download returns a plain
     DataFrame but a multi-ticker download returns a MultiIndex DataFrame.
@@ -90,14 +106,24 @@ def _batch_download(tickers: list[str], **kwargs) -> dict[str, pd.DataFrame]:
     if not tickers:
         return {}
 
-    raw = yf.download(
-        tickers=tickers,
-        group_by="ticker",
-        auto_adjust=True,   # Close = split+dividend adjusted; no Adj Close column
-        progress=False,
-        threads=True,
-        **kwargs,
-    )
+    for attempt in (1, 2):
+        _pace()
+        try:
+            raw = yf.download(
+                tickers=tickers,
+                group_by="ticker",
+                auto_adjust=True,   # Close = split+dividend adjusted; no Adj Close column
+                progress=False,
+                threads=True,
+                **kwargs,
+            )
+            break
+        except Exception as exc:
+            if attempt == 2:
+                raise
+            wait = 5 * float(os.getenv("JARVIS_YF_CHUNK_PAUSE_S", "2"))
+            log.warning("download of %d tickers failed (%s); trying once more in %.0f s", len(tickers), exc, wait)
+            time.sleep(wait)
 
     if len(tickers) == 1:
         # Single ticker: raw is a plain DataFrame (no MultiIndex)

@@ -68,7 +68,7 @@ def _dups(ctx):
     assert df.empty
 
 
-@then("the request is refused because the market is not one of the four")
+@then("the request is refused because the market is not in the list")
 def _refused(ctx):
     assert ctx.refused is True
 

@@ -528,12 +528,37 @@ def _load_universe_market_map() -> dict[str, str]:
     return result
 
 
+def global_universe_csv() -> Path:
+    return UNIVERSE_CSV.with_name("universe_global.csv")
+
+
+def _global_rows() -> list[dict]:
+    """The index constituents built by `python -m data_layer.index_universe build` (git-ignored): every market but India."""
+    path = global_universe_csv()
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as f:
+        return [{k: (v or "").strip() for k, v in rec.items()} for rec in csv.DictReader(r for r in f if not r.startswith("#"))
+                if (rec.get("symbol") or "").strip()]
+
+
 def read_universe(market: str | None = None) -> list[dict]:
     """
-    Read the active universe file (see active_universe_csv), optionally filtered by market ("IN").
+    Read the universe, optionally filtered by market.  India comes from the active universe file (see active_universe_csv); the
+    other markets come from data/universe_global.csv when it exists (index constituents), else from the active file's few rows.
     Returns list of dicts with keys: symbol, name, market, exchange, isin, ...
     Falls back to NIFTY_50 if the file doesn't exist.
     """
+    glob = _global_rows()
+    if not glob or market == "IN":
+        return _read_active_universe(market)
+    have = {r.get("market") for r in glob}                    # a market the index build did not cover keeps the active file's rows
+    if market is not None:
+        return [r for r in glob if r.get("market") == market] if market in have else _read_active_universe(market)
+    return [r for r in _read_active_universe(None) if r.get("market") not in have] + glob
+
+
+def _read_active_universe(market: str | None) -> list[dict]:
     path = active_universe_csv()
     if not path.exists():
         log.warning("universe.csv not found — falling back to built-in lists")

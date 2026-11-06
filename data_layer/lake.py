@@ -43,9 +43,11 @@ DATA_DIR = ROOT / "data"
 ENV_FILE = Path(os.getenv("JARVIS_ENV") or ROOT / ".env")     # the one place secrets and settings live (mode 600)
 LAKE_DIR = Path(os.getenv("JARVIS_LAKE", ROOT / "lake"))
 
-MARKETS = ("IN", "US", "UK", "EU")   # daily OHLC universe
-BARS_MARKETS = ("IN", "US", "UK", "EU")   # markets whose intraday bars can be collected from Yahoo (India first: verify.py reads [0])
-BARS_YF_DEFAULT = ("US", "UK", "EU")      # what `--market ALL` collects: India is recorded tick by tick by the Upstox feed instead
+# Daily OHLC universe.  IN = NSE (Upstox feed); US = S&P 500; UK = London listings (FTSE 100 and the UK part of STOXX 600);
+# EU = the rest of STOXX 600; JP = Nikkei 225; KR = KOSPI 200; TW = Taiwan 50; SG = STI; CN = CSI 300; HK = Hang Seng.
+MARKETS = ("IN", "US", "UK", "EU", "JP", "KR", "TW", "SG", "CN", "HK")
+BARS_MARKETS = MARKETS                    # markets whose intraday bars can be collected from Yahoo (India first: verify.py reads [0])
+BARS_YF_DEFAULT = tuple(m for m in MARKETS if m != "IN")   # what `--market ALL` collects: India is recorded tick by tick by the Upstox feed
 FUND_MARKETS = ("IN",)                # fundamentals (FMP free-tier budget) are India only
 
 # table -> (csv stem, key columns, {column: sql type})

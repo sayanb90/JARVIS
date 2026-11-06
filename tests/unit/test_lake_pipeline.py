@@ -173,7 +173,8 @@ def test_ohlc_all_markets_but_bars_india_only(env):
     q = Lake(root / "lake")
     assert set(q.sql("SELECT DISTINCT market FROM ohlc").market) == {"IN", "US", "UK", "EU"}
     assert set(q.sql("SELECT DISTINCT market FROM bars_5m").market) == {"IN"}
-    assert lake.BARS_MARKETS == ("IN", "US", "UK", "EU") and lake.BARS_YF_DEFAULT == ("US", "UK", "EU") and lake.FUND_MARKETS == ("IN",)
+    assert lake.BARS_MARKETS == lake.MARKETS and lake.BARS_YF_DEFAULT == tuple(m for m in lake.MARKETS if m != "IN") and lake.FUND_MARKETS == ("IN",)
+    assert lake.MARKETS[:4] == ("IN", "US", "UK", "EU") and set(lake.MARKETS[4:]) == {"JP", "KR", "TW", "SG", "CN", "HK"}
     lake.load_bars("5m", since=lake.date(2026, 10, 1))                                 # default markets now include the others
     assert set(q.sql("SELECT DISTINCT market FROM bars_5m").market) == {"IN", "US"}
 

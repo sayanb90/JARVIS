@@ -3,7 +3,7 @@ JARVIS Scheduler — cron-invokable data refresh orchestrator.
 
 Jobs
 ----
-ohlc-daily      Fetch last N days of daily OHLC via yfinance for India, US, UK and EU
+ohlc-daily      Fetch last N days of daily OHLC via yfinance for India, US, UK, EU, JP, KR, TW, SG, CN and HK
                 (free, no API key). Bars and fundamentals are India only.
                 Writes data/ohlc/ohlc_daily_*.csv then calls:
                   data_layer.lake.load_ohlc(daily=True)  -> lake/ohlc/year=YYYY/
@@ -15,7 +15,7 @@ fundamentals    Read data/universe.csv + data/fund_meta.csv, pick the
                   data_layer.lake.load_fundamentals()  -> lake/fundamentals/
 
 bars            Collect aggregated intraday bars (default 5m, use --interval 1m) via yfinance for
-                US, UK and EU (--market ALL) or one market, and upsert them into per-day Parquet files:
+                every market but India (--market ALL) or one market, and upsert them into per-day Parquet files:
                   data_layer.lake.load_bars()  -> lake/bars/interval=1m/date=YYYY-MM-DD/
                 Yahoo keeps only 7 days of 1m and 60 days of 5m, so history is built forward: run it every
                 weekday after the US close (22:00 UTC).  India is recorded by the Upstox live feed instead.
@@ -26,7 +26,7 @@ all             Run ohlc-daily then fundamentals.
 Crontab examples (crontab -e)
 ------------------------------
 # Daily OHLC, all four markets — after the last close (UTC server)
-30 22 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job ohlc-daily >> logs/scheduler.log 2>&1
+0 23 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job ohlc-daily >> logs/scheduler.log 2>&1
 
 # Fundamentals rotation — 7:00 PM every weekday (auto-picks stalest stocks)
 0 19 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
