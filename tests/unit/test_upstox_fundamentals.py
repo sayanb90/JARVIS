@@ -148,3 +148,26 @@ def test_command_line_run_and_status(world, monkeypatch, capsys):
 def test_the_admin_catalogue_lists_the_new_tables(world):
     from webapp.admin import BY_KEY
     assert ("fundamentals", "upstox_fundamentals") in BY_KEY and ("fundamentals", "upstox_fundamentals_log") in BY_KEY
+
+
+def test_the_log_records_the_time_of_each_call_and_what_went_wrong(world):
+    class Ticking:                                   # every call to the clock is a second later than the last
+        t = datetime(2026, 11, 3, 12, 0)
+    import data_layer.upstox.fundamentals as mod
+    real = mod.datetime
+
+    class Clock(real):
+        @classmethod
+        def now(cls, tz=None):
+            Ticking.t += timedelta(seconds=1)
+            return Ticking.t.replace(tzinfo=tz)
+    mod.datetime = Clock
+    try:
+        fu.run(client(FakeHttp()), {ISIN: "RELIANCE"})
+    finally:
+        mod.datetime = real
+    lg = pd.read_parquet(fu.store_dir() / "fetch_log.parquet")
+    assert lg["fetched_at"].nunique() > 1                                        # not one stamp for the whole run
+    assert {"error_message", "attempts", "latency_s"} <= set(lg.columns)
+    bad = lg[lg["endpoint"] == "competitors"].iloc[0]
+    assert bad["error_message"] == "Invalid Instrument key" and bad["attempts"] == 1

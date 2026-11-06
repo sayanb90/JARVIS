@@ -14,7 +14,9 @@ Storage, under lake/upstox_fundamentals/:
   versions.parquet   one row per (isin, endpoint, item, period, value) ever seen: value, text, change, first_seen, last_seen.
                      A restated value is a NEW row with its own first_seen, so a backtest can ask "what did we know on day X".
                      first_seen is the day WE first saw it (Upstox publishes no filing date), reliable only from the first load.
-  fetch_log.parquet  one row per call: isin, symbol, endpoint, fetched_at, ok, status, error_code, rows
+  fetch_log.parquet  one row per call: isin, symbol, endpoint, fetched_at (the time of that call), ok, status, error_code, error_message,
+                     attempts (1 = no retry), latency_s, rows.  Runs before 2026-11-05 stamped every call with the time the run started
+                     and have no error_message, attempts or latency_s.
   raw/date=YYYY-MM-DD/<isin>.json.gz   the complete payloads of that day's fetch, so a parser change never loses data
 
 The shared rate limiter (50 a second, 500 a minute, 2,000 per 30 minutes, with a margin) paces the calls: a full pass over 500
@@ -58,7 +60,7 @@ ENDPOINTS: dict[str, tuple[str, dict]] = {
 }
 SETS = {"daily": ("key_ratios",), "full": tuple(ENDPOINTS)}
 VERSION_COLUMNS = ["isin", "endpoint", "item", "period", "value", "text", "change", "first_seen", "last_seen"]
-LOG_COLUMNS = ["isin", "symbol", "endpoint", "fetched_at", "ok", "status", "error_code", "rows"]
+LOG_COLUMNS = ["isin", "symbol", "endpoint", "fetched_at", "ok", "status", "error_code", "error_message", "attempts", "latency_s", "rows"]
 _IO_LOCK = threading.Lock()
 
 
@@ -211,8 +213,12 @@ def run(rest, isins: dict[str, str], endpoints: Iterable[str] = SETS["full"], la
     Load fundamentals for {isin: symbol}.  Companies whose requested endpoints were all fetched within `max_age_days` are
     skipped.  Versions and the log are saved every `save_every` companies and at the end, so a stopped run keeps its work.
     """
+    fixed = now                                                       # tests pass a fixed clock; a real run stamps every call
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     day = now.strftime("%Y-%m-%d")
+
+    def stamp() -> str:
+        return (fixed or datetime.now(timezone.utc).replace(tzinfo=None)).isoformat(timespec="seconds")
     endpoints = list(endpoints)
     unknown = [e for e in endpoints if e not in ENDPOINTS]
     if unknown:
@@ -265,8 +271,10 @@ def run(rest, isins: dict[str, str], endpoints: Iterable[str] = SETS["full"], la
                 raw[ep] = {"ok": r.ok, "status": r.status, "error_code": r.error_code, "data": r.data if r.ok else None}
                 for x in rows:
                     rows_all.append({"isin": isin, "endpoint": ep, **x})
-                new_log.append({"isin": isin, "symbol": symbol, "endpoint": ep, "fetched_at": now.isoformat(timespec="seconds"),
-                                "ok": bool(r.ok), "status": int(r.status), "error_code": r.error_code or "", "rows": len(rows)})
+                new_log.append({"isin": isin, "symbol": symbol, "endpoint": ep, "fetched_at": stamp(),
+                                "ok": bool(r.ok), "status": int(r.status), "error_code": r.error_code or "",
+                                "error_message": (r.error_message or "")[:200], "attempts": int(getattr(r, "attempts", 1)),
+                                "latency_s": round(float(getattr(r, "latency_s", 0.0)), 3), "rows": len(rows)})
             if any(v["ok"] for v in raw.values()):
                 write_raw(lake_dir, isin, raw, day)
             if rows_all:

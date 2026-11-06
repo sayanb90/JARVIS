@@ -57,9 +57,29 @@ def test_session_retries_5xx_and_request_errors_then_gives_up_empty(world, no_sl
     assert len(s._sess.calls) == 3
 
 
-def test_session_4xx_is_not_retried_as_success(world, no_sleep):
+def test_session_rejected_key_stops_at_once_instead_of_retrying(world, no_sleep):
     s = session(world, [FakeResp(403), FakeResp(403), FakeResp(403)])
-    assert s.get("e") == []                       # raise_for_status -> RequestException -> retried -> []
+    with pytest.raises(world.fmp.FMPAuthError):
+        s.get("e")
+    assert len(s._sess.calls) == 1 and no_sleep == [] and s.failures == 1      # 401 and 403 are not retried
+
+
+def test_session_unknown_ticker_is_empty_not_a_failure(world, no_sleep):
+    s = session(world, [FakeResp(404)])
+    assert s.get("e") == [] and s.failures == 0
+
+
+def test_session_counts_exhausted_retries_as_failures(world, no_sleep):
+    s = session(world, [FakeResp(503), FakeResp(503), FakeResp(503)])
+    assert s.get("e") == [] and s.failures == 1
+
+
+def test_session_never_logs_the_api_key(world, no_sleep, caplog):
+    s = world.fmp.FMPSession("SECRETKEY123", delay=0)
+    s._sess = FakeHttp([requests.ConnectionError("failed for url https://x/y?apikey=SECRETKEY123")] * 3)
+    with caplog.at_level("ERROR"):
+        s.get("e")
+    assert "SECRETKEY123" not in caplog.text and "apikey=***" in caplog.text
 
 
 def test_session_enforces_minimum_gap(world, monkeypatch):
@@ -251,6 +271,67 @@ def test_run_skips_failed_ticker_and_stamps_only_successes(world, monkeypatch):
     world.fmp.run(tickers=["OK.NS", "BAD.NS"], market="IN")
     assert set(world.fmp.read_fund_meta()) == {"OK.NS"}
     assert "BAD.NS" not in (world.data / "fundamentals" / "income_statement_in.csv").read_text()
+
+
+class CountingExtractor(StubExtractor):
+    """Like the real extractor: `failures` goes up when a call got no answer.  Per ticker: 'fail' -> a failed call,
+    'auth' -> the key is refused, 'empty' -> FMP has nothing for it."""
+    mode: dict = {}
+    failures = 0
+
+    def fetch_ticker(self, t, m):
+        how = self.mode.get(t)
+        if how == "auth":
+            raise StubExtractor.world.fmp.FMPAuthError("HTTP 401")
+        if how == "fail":
+            self.failures += 1
+            return {"income": [], "balance": [], "cash_flow": [], "ratios": []}
+        if how == "empty":
+            return {"income": [], "balance": [], "cash_flow": [], "ratios": []}
+        return super().fetch_ticker(t, m)
+
+
+def run_with(world, monkeypatch, tickers, mode):
+    StubExtractor.world = world
+    CountingExtractor.mode, CountingExtractor.failures = mode, 0
+    monkeypatch.setattr(world.fmp, "FMPExtractor", CountingExtractor)
+    monkeypatch.setenv("FMP_API_KEY", "K")
+    world.set_universe({"IN": tickers})
+    return world.fmp.run(tickers=tickers, market="IN")
+
+
+def test_a_ticker_whose_call_got_no_answer_is_not_stamped_and_leaves_no_row_of_nulls(world, monkeypatch):
+    run_with(world, monkeypatch, ["OK.NS", "DOWN.NS"], {"DOWN.NS": "fail"})
+    assert set(world.fmp.read_fund_meta()) == {"OK.NS"}                          # DOWN.NS is retried first next run
+    pillars = (world.data / "fundamentals" / "pillar_metrics_in.csv").read_text()
+    assert "OK.NS" in pillars and "DOWN.NS" not in pillars                       # no all-empty row to overwrite good values
+
+
+def test_an_empty_answer_is_stamped_but_writes_no_pillar_row(world, monkeypatch):
+    run_with(world, monkeypatch, ["OK.NS", "NONE.NS"], {"NONE.NS": "empty"})
+    assert set(world.fmp.read_fund_meta()) == {"OK.NS", "NONE.NS"}
+    assert "NONE.NS" not in (world.data / "fundamentals" / "pillar_metrics_in.csv").read_text()
+
+
+def test_a_refused_key_stops_the_run_and_stamps_nothing(world, monkeypatch):
+    with pytest.raises(world.fmp.FMPAuthError):
+        run_with(world, monkeypatch, ["A.NS", "B.NS", "C.NS"], {"A.NS": "auth"})
+    assert world.fmp.read_fund_meta() == {}
+
+
+def test_a_run_where_nothing_was_answered_raises_so_the_job_is_not_called_a_success(world, monkeypatch):
+    with pytest.raises(RuntimeError, match="no answer for any"):
+        run_with(world, monkeypatch, ["A.NS", "B.NS"], {"A.NS": "fail", "B.NS": "fail"})
+    assert world.fmp.read_fund_meta() == {}
+
+
+def test_the_placeholder_key_is_refused_before_any_call(world, monkeypatch):
+    monkeypatch.setattr(world.fmp, "FMPExtractor", lambda k: pytest.fail("must not call FMP"))
+    for k in ("your_fmp_api_key_here", "YOUR_KEY", " "):
+        monkeypatch.setenv("FMP_API_KEY", k)
+        with pytest.raises(SystemExit):
+            world.fmp.run(tickers=["A.NS"], market="IN")
+    assert world.fmp.key_is_placeholder("your_fmp_api_key_here") and not world.fmp.key_is_placeholder("abc123XYZ")
 
 
 def test_run_dry_run_makes_no_calls_and_writes_nothing(world, monkeypatch, caplog):
