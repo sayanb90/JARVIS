@@ -2,6 +2,7 @@
 Build the stock universe for the Yahoo collectors from index constituents (US, UK, Europe, Japan, Korea, Taiwan, Singapore, China, Hong Kong).
 
   python -m data_layer.index_universe fetch  [--only sp500,hsi]    # download each index's list from the web into data/index_sources/<key>.csv
+  python -m data_layer.index_universe import KEY FILE.csv         # a downloaded member list -> data/index_sources/<key>.csv
   python -m data_layer.index_universe build  [--validate]          # source files -> data/universe_global.csv (+ data/index_sources/_rejects.csv)
   python -m data_layer.index_universe status
 
@@ -136,8 +137,12 @@ INDICES: list[Index] = [
     Index("stoxx600", "EU", "STOXX Europe 600", (500, 620), y_eu,
           "https://www.ishares.com/uk/individual/en/products/251931/ishares-stoxx-europe-600-ucits-etf-de-fund/1506575576011.ajax"
           "?fileType=csv&fileName=EXSA_holdings&dataType=fund", kind="ishares"),
-    Index("nikkei225", "JP", "Nikkei 225", (215, 235), y_jp, WIKI + "Nikkei_225", ("code", "ticker", "symbol"), ("company", "name")),
-    Index("kospi200", "KR", "KOSPI 200", (190, 210), y_kr, WIKI + "KOSPI", ("code", "ticker", "symbol"), ("company", "name")),
+    # found on the VPS run of 2026-11-10: the official Nikkei page lists the 225 in 34 sector tables (Code, Company Name); the generic
+    # KOSPI page only lists ten "major components", the dedicated KOSPI 200 page lists all 200 (Company, Symbol, GICS Sector)
+    Index("nikkei225", "JP", "Nikkei 225", (215, 235), y_jp, "https://indexes.nikkei.co.jp/en/nkave/index/component?idx=nk225",
+          ("code",), ("company name", "company", "name")),
+    Index("kospi200", "KR", "KOSPI 200", (190, 210), y_kr, WIKI + "KOSPI_200", ("symbol", "code", "ticker"), ("company", "name"),
+          ("gics sector", "sector")),
     Index("taiwan50", "TW", "FTSE TWSE Taiwan 50", (48, 52), y_tw, WIKI + "FTSE_TWSE_Taiwan_50_Index", ("ticker", "code", "symbol"),
           ("company", "name")),
     Index("sti30", "SG", "Straits Times Index", (28, 32), y_sg, WIKI + "Straits_Times_Index", ("ticker", "code", "symbol"),
@@ -250,6 +255,40 @@ def members_from_ishares(text: str) -> list[dict]:
         out.append({"code": rec["ticker"], "name": rec.get("name", ""), "exchange": rec.get("exchange", ""), "country": rec.get("location", ""),
                     "sector": rec.get("sector", ""), "yahoo": ""})
     return out
+
+
+def members_from_csv(text: str) -> list[dict]:
+    """Members from any CSV that has a code column (ticker, symbol, code, ...) and a name column: an iShares holdings file (whose
+    fund-details lines come first), a file saved from an index provider's page, or one written by hand.  Rows that are cash,
+    derivatives or have no code are skipped."""
+    lines = text.lstrip("\ufeff").splitlines()
+    code_names = ("ticker", "symbol", "code", "stock code", "constituent code")
+    start = next((i for i, l in enumerate(lines) if any(c in [x.strip().strip('"').lower() for x in l.split(",")] for c in code_names)), None)
+    if start is None:
+        return []
+    out = []
+    for rec in csv.DictReader(io.StringIO("\n".join(lines[start:]))):
+        rec = {(k or "").strip().lower(): (v or "").strip() for k, v in rec.items()}
+        code = next((rec[c] for c in code_names if rec.get(c)), "")
+        if not code or code == "-" or rec.get("asset class", "equity").lower() not in ("equity", ""):
+            continue
+        name = next((rec[c] for c in ("name", "company name", "company", "security", "constituent") if rec.get(c)), "")
+        out.append({"code": code, "name": name, "exchange": rec.get("exchange", ""), "country": rec.get("location") or rec.get("country", ""),
+                    "sector": rec.get("sector", ""), "yahoo": rec.get("yahoo", "")})
+    return out
+
+
+def import_file(ix: Index, path: Path, root: Path | None = None) -> tuple[bool, str]:
+    """Turn a downloaded member list into data/index_sources/<key>.csv.  The member count must be in the index's expected range."""
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        return False, f"cannot read {path}: {exc}"
+    members = members_from_csv(text)
+    n = len({m["code"] for m in members})
+    if not ix.expect[0] <= n <= ix.expect[1]:
+        return False, f"{n} members found in the file, expected {ix.expect[0]} to {ix.expect[1]}: not imported"
+    return True, f"{n} members -> {write_source(ix, members, root)}"
 
 
 def download(url: str) -> str:
@@ -406,6 +445,9 @@ def main(argv: list[str] | None = None, root: Path | None = None, getter: Callab
     sub = ap.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fetch", help="download each index's member list into data/index_sources/")
     f.add_argument("--only", default=None, help="comma-separated index keys: " + ", ".join(BY_KEY))
+    i = sub.add_parser("import", help="turn a downloaded member list (CSV) into data/index_sources/<key>.csv")
+    i.add_argument("key", help="index key: " + ", ".join(BY_KEY))
+    i.add_argument("file", type=Path, help="a CSV with a ticker, symbol or code column and a name column (iShares holdings files work)")
     b = sub.add_parser("build", help="source files -> data/universe_global.csv")
     b.add_argument("--only", default=None)
     b.add_argument("--validate", action="store_true", help="drop symbols Yahoo has no daily bars for")
@@ -431,6 +473,14 @@ def main(argv: list[str] | None = None, root: Path | None = None, getter: Callab
                 failed += 1
                 print(f"{ix.key:<10} FAILED {note}")
         return 1 if failed else 0
+
+    if a.cmd == "import":
+        if a.key not in BY_KEY:
+            print("unknown index key; choose from " + ", ".join(BY_KEY))
+            return 2
+        ok, msg = import_file(BY_KEY[a.key], a.file, root)
+        print(("OK     " if ok else "FAILED ") + msg)
+        return 0 if ok else 1
 
     if a.cmd == "status":
         for ix in INDICES:
