@@ -20,7 +20,7 @@ import sys
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from . import backup, tick_store
+from . import backup, market_calendar, tick_store
 from .fmp_client import read_universe
 from .lake import BARS_MARKETS, LAKE_DIR, MARKETS, ROOT
 from .query import Lake
@@ -48,6 +48,35 @@ def in_session(now: datetime) -> bool:
     return now.weekday() < 5 and SESSION_START <= now.time() < SESSION_END
 
 
+def _user_bus_env() -> dict:
+    """The environment `systemctl --user` needs.  Under cron there is no XDG_RUNTIME_DIR, so the call cannot find the user's systemd
+    instance, answers nothing, and a running user service was reported as "inactive" in every health report (SCRUM-144)."""
+    env = dict(os.environ)
+    runtime = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    env["XDG_RUNTIME_DIR"] = runtime
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime}/bus")
+    return env
+
+
+def service_state(service: str) -> tuple[str, str]:
+    """(state, detail) of a system or user service: "active", "active (user)", "inactive" or "unknown" with the reason."""
+    def run(args):
+        return subprocess.run(args, capture_output=True, text=True, timeout=10, env=_user_bus_env())
+    sysr = run(["systemctl", "is-active", service])
+    state = sysr.stdout.strip()
+    if state == "active":
+        return "active", ""
+    usr = run(["systemctl", "--user", "is-active", service])        # a service installed for a user is not seen above
+    ustate = usr.stdout.strip()
+    if ustate == "active":
+        return "active (user)", ""
+    if ustate in ("inactive", "failed", "activating", "deactivating"):
+        return ustate, "user service"
+    if "bus" in (usr.stderr or "").lower() or not ustate:
+        return "unknown", "cannot reach the user systemd instance: " + ((usr.stderr or "").strip().splitlines() or ["no answer"])[0][:80]
+    return state or ustate, ""
+
+
 def check(now: datetime | None = None, after_close: bool = False, probe: bool = False, lake_dir: Path | None = None,
           root: Path | None = None, backup_path: str | Path | None = None, service: str = "jarvis-feed") -> Report:
     r, now = Report(), now or utcnow()
@@ -68,6 +97,18 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
     r.line("PASS" if uni_in else "FAIL", f"universe: {counts}")
     r.line("PASS" if len(with_isin) == len(uni_in) and uni_in else "WARN",
            f"India stocks with a usable ISIN (needed for the live feed): {len(with_isin)} of {len(uni_in)}")
+
+    # market calendar (SCRUM-141): is today a day the exchange should have produced data?
+    cal = market_calendar.load(lake_dir)
+    today_cal = market_calendar.status(today, "NSE", cal, today)
+    if today_cal.state == "unknown":
+        r.line("WARN", f"market calendar: {today_cal.reason}")
+    elif today_cal.state == "closed":
+        r.line("PASS", f"market calendar: NSE is closed today ({today_cal.reason}): no data is expected")
+    elif today_cal.state == "special":
+        r.line("PASS", f"market calendar: special session today ({today_cal.reason})")
+    else:
+        r.line("PASS", "market calendar: NSE is open today")
 
     lake, tables, lake_error = None, [], None
     try:
@@ -105,7 +146,7 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
 
     # intraday bars
     days = lake.bar_days("1s") if lake is not None else []
-    expected_day = today if (after_close and today.weekday() < 5) else prev_weekday(today)
+    expected_day = today if (after_close and today_cal.state != "closed") else market_calendar.previous_open_day(today, "NSE", cal)
     if lake is None:
         pass
     elif not days:
@@ -117,12 +158,16 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
         r.line("PASS" if newest >= expected_day.isoformat() else "WARN", f"latest bar day {newest} (expected {expected_day} or later)")
         syms = lake.bar_symbols(newest, "1s")
         want = max(len(with_isin), 1)
-        r.line("PASS" if len(syms) >= 0.8 * want else "WARN", f"bars on {newest}: {len(syms)} instruments of {len(with_isin)} subscribable")
+        newest_cal = market_calendar.status(date.fromisoformat(newest), "NSE", cal, today)
+        if newest_cal.state == "closed":                      # a holiday the feed sat through: a few stray ticks are not a missing day
+            r.line("PASS", f"bars on {newest}: {len(syms)} instruments; the market was closed that day ({newest_cal.reason})")
+        else:
+            r.line("PASS" if len(syms) >= 0.8 * want else "WARN", f"bars on {newest}: {len(syms)} instruments of {len(with_isin)} subscribable")
         r.line("WARN" if stale_days else "PASS", f"days with uncompacted segment files: {stale_days or 'none'}"
                + (" (run: python -c \"from data_layer.tick_store import compact_ticks_day; ...\")" if stale_days else ""))
 
     # is the feed writing right now?
-    if in_session(now):
+    if in_session(now) and today_cal.state != "closed":
         files = tick_store.day_files(lake_dir, today)                 # every segment's folder, and the older single folder
         newest_age = (now.timestamp() - max((f.stat().st_mtime for f in files), default=0)) if files else None
         # file mtimes are real wall-clock; only compare when `now` is the real now
@@ -134,13 +179,9 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
     # service
     if shutil.which("systemctl"):
         try:
-            state = subprocess.run(["systemctl", "is-active", service], capture_output=True, text=True, timeout=10).stdout.strip()
-            if state and state != "active":                     # a service installed for a user (systemctl --user) is not seen above
-                user = subprocess.run(["systemctl", "--user", "is-active", service], capture_output=True, text=True, timeout=10).stdout.strip()
-                if user == "active":
-                    state = "active (user)"
+            state, detail = service_state(service)
             if state:
-                r.line("PASS" if state.startswith("active") else "WARN", f"systemd service {service}: {state}")
+                r.line("PASS" if state.startswith("active") else "WARN", f"systemd service {service}: {state}" + (f" ({detail})" if detail else ""))
         except Exception:
             pass
 

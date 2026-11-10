@@ -10,7 +10,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from data_layer import backup, health, tick_store, universe
+from data_layer import backup, health, market_calendar, tick_store, universe
 from data_layer.ticks import Tick
 from tests.helpers import OHLC_H, UNI_HEADER, write_csv
 
@@ -184,6 +184,8 @@ def test_universe_cli(tmp_path, monkeypatch, capsys, world):
 
 # ============================== health ==============================
 NOW = datetime(2026, 10, 27, 12, 0)                  # Tuesday, after the close, outside the session
+CAL_HOLIDAYS = [{"date": "2026-10-20", "description": "Dussehra", "holiday_type": "TRADING_HOLIDAY",
+                 "closed_exchanges": ["NSE", "NFO", "BSE"], "open_exchanges": [], "timings": []}]
 
 
 @pytest.fixture(autouse=True)
@@ -203,6 +205,7 @@ def healthy(world, tmp_path, monkeypatch):
                            world.lakedir)
     tick_store.compact_ticks_day(date(2026, 10, 27), world.lakedir)
     (world.root / "logs/scheduler.log").write_text("2026-10-26 22:31:00,100  INFO  [scheduler]  Scheduler finished successfully\n")
+    market_calendar.save(CAL_HOLIDAYS, world.lakedir, now=datetime(2026, 10, 27, 3, 0))
     bk = tmp_path / "bk"
     (bk / "2026-10-27").mkdir(parents=True); (bk / "2026-10-27/MANIFEST.json").write_text("{}")
     monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "tok"); monkeypatch.delenv("UPSTOX_FEED_TOKEN", raising=False)
@@ -240,6 +243,61 @@ def test_yahoo_minute_bars_are_reported_per_market_and_old_ones_warn(healthy, ca
     (world.lakedir / "bars" / "interval=1m" / "date=2026-10-26").rename(old)
     run_health(world, bk, after_close=True)
     assert "[WARN] Yahoo 1-minute bars: 1 days stored, newest 2026-10-20" in capsys.readouterr().out
+
+
+def test_a_market_holiday_is_not_reported_as_missing_data(healthy, capsys):
+    """2026-11-10: both feeds sat through a closed market.  Health must say so, not warn about 0 of 500 instruments."""
+    world, bk = healthy
+    market_calendar.save([{"date": "2026-10-27", "description": "Diwali-Balipratipada", "holiday_type": "TRADING_HOLIDAY",
+                           "closed_exchanges": ["NSE", "NFO"], "open_exchanges": [], "timings": []}], world.lakedir, now=datetime(2026, 10, 26, 3, 0))
+    run_health(world, bk, after_close=True)               # the newest day in the lake (10-27) is the holiday, with one stray tick
+    out = capsys.readouterr().out
+    assert "the market was closed that day (Diwali-Balipratipada)" in out and "[WARN] bars on" not in out
+    assert "NSE is closed today (Diwali-Balipratipada)" in out and "latest bar day 2026-10-27 (expected 2026-10-26 or later)" in out
+
+
+def test_closed_today_expects_no_data_and_names_the_holiday(healthy, capsys, monkeypatch):
+    world, bk = healthy
+    market_calendar.save([{"date": "2026-10-27", "description": "Diwali-Balipratipada", "holiday_type": "TRADING_HOLIDAY",
+                           "closed_exchanges": ["NSE", "NFO"], "open_exchanges": [], "timings": []}], world.lakedir, now=datetime(2026, 10, 26, 3, 0))
+    health.check(datetime(2026, 10, 27, 4, 30), lake_dir=world.lakedir, root=world.root, backup_path=bk)       # inside the session
+    out = capsys.readouterr().out
+    assert "NSE is closed today (Diwali-Balipratipada): no data is expected" in out
+    assert "live feed is NOT writing" not in out and "live feed is writing" not in out
+
+
+def test_no_calendar_file_is_a_warning_not_a_silent_assumption(healthy, capsys):
+    world, bk = healthy
+    (world.lakedir / "reference" / "market_calendar.json").unlink()
+    run_health(world, bk, after_close=True)
+    assert "[WARN] market calendar: no calendar file" in capsys.readouterr().out
+
+
+class _Proc:
+    def __init__(self, out="", err="", code=0):
+        self.stdout, self.stderr, self.returncode = out, err, code
+
+
+def test_a_user_service_is_found_under_cron_where_there_is_no_runtime_dir(monkeypatch):
+    """SCRUM-144: `systemctl --user` was called without XDG_RUNTIME_DIR, so a running service showed as inactive in every report."""
+    seen = []
+
+    def fake_run(args, **kw):
+        seen.append((args, kw.get("env", {})))
+        if "--user" in args:
+            return _Proc("active\n") if kw["env"].get("XDG_RUNTIME_DIR") else _Proc("", "Failed to connect to bus: No medium found", 1)
+        return _Proc("inactive\n", "", 3)
+    monkeypatch.setattr(health.subprocess, "run", fake_run)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    assert health.service_state("jarvis-feed") == ("active (user)", "")
+    assert all(env.get("XDG_RUNTIME_DIR", "").startswith("/run/user/") for _, env in seen)
+
+
+def test_an_unreachable_user_bus_is_unknown_not_inactive(monkeypatch):
+    monkeypatch.setattr(health.subprocess, "run", lambda args, **kw: _Proc("inactive\n", "", 3) if "--user" not in args
+                        else _Proc("", "Failed to connect to bus: No such file or directory", 1))
+    state, detail = health.service_state("jarvis-feed")
+    assert state == "unknown" and "cannot reach the user systemd instance" in detail
 
 
 def test_each_problem_is_reported(healthy, capsys, monkeypatch):

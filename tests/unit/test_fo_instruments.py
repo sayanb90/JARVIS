@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import re
 import json
 from datetime import date, datetime, timedelta, timezone
 
@@ -392,3 +393,11 @@ def test_check_universe_stops_on_a_mismatch_unless_allowed(world, tmp_path, capl
     with caplog.at_level("ERROR"):
         assert len(fo.check_universe(allow_stale=True, day=date(2026, 10, 23))) > 0
     assert "continuing because --allow-stale-universe" in caplog.text
+
+
+def test_the_cron_lines_of_import_and_select_carry_the_time_of_the_run(capsys):
+    """SCRUM-144: fo-select.log had plain print lines, so no line could be tied to a day."""
+    from data_layer.upstox import fo_instruments
+    fo_instruments._say("selected", 1271, "contracts")
+    line = capsys.readouterr().out.strip()
+    assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} selected 1271 contracts$", line)
