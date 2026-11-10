@@ -21,6 +21,8 @@ JARVIS=/home/jarvis/JARVIS
 0 12 * * 1-5   cd $JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
 # Nightly backup snapshot: parked until a separate disk or bucket exists (SCRUM-121); health only warns, cron_check does not require it.
 # When it is set up (JARVIS_BACKUP_DIR in .env), add:  30 23 * * *  cd $JARVIS && python -m data_layer.backup run >> logs/backup.log 2>&1
+# Market calendar: Upstox's holiday list, so every check knows whether a day should have produced data (before the 03:15 health report)
+0 3 * * *      cd $JARVIS && python -m data_layer.market_calendar refresh >> logs/market-calendar.log 2>&1
 # Morning health report, before the session; mail or read logs/health.log
 15 3 * * 1-5   cd $JARVIS && python -m data_layer.health >> logs/health.log 2>&1
 # End-of-day health report, after the feed has compacted the day (10:05 UTC) and Yahoo's daily bar exists

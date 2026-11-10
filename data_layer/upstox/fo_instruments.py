@@ -442,6 +442,13 @@ def _parse_spot(items: list[str] | None) -> dict[str, float]:
     return out
 
 
+def _say(*parts) -> None:
+    """A log line for cron: the first line carries the UTC time, so logs/fo-select.log can say which run a line belongs to."""
+    from datetime import datetime, timezone
+    text = " ".join(str(p) for p in parts)
+    print(f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} {text}")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="NSE futures and options instrument master and contract selection")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -484,14 +491,14 @@ def main(argv: list[str] | None = None) -> None:
         eq = parse_equities(records)
         if not eq.empty:
             save_eq_table(eq)
-            print(f"stored {len(eq)} NSE equities (ticker -> Upstox key) in {eq_table_path()}")
+            _say(f"stored {len(eq)} NSE equities (ticker -> Upstox key) in {eq_table_path()}")
         df = parse_master(records)
         if df.empty:
             raise SystemExit("no NSE_FO futures/options records found: wrong file, or the field names differ. "
                              "Run `peek` and compare with the module docstring")
         n = save_table(df, a.asof or ist_today())
         by = df.groupby("instrument_type").size().to_dict()
-        print(f"imported {len(df)} contracts ({by}), {df.underlying.nunique()} underlyings; table now holds {n}")
+        _say(f"imported {len(df)} contracts ({by}), {df.underlying.nunique()} underlyings; table now holds {n}")
     elif a.cmd == "peek":
         shown = 0
         for r in read_records(a.file):
@@ -533,12 +540,12 @@ def main(argv: list[str] | None = None) -> None:
         if sel.empty:
             raise SystemExit(f"nothing selected; not found: {notes['missing']}")
         p = write_universe(sel, a.out)
-        print(f"selected {len(sel)} contracts -> {p}\n{sel.groupby(['underlying', 'instrument_type']).size().to_string()}")
+        _say(f"selected {len(sel)} contracts -> {p}\n{sel.groupby(['underlying', 'instrument_type']).size().to_string()}")
         if notes["missing"]:
-            print("NOT FOUND:", notes["missing"])
+            _say("NOT FOUND:", notes["missing"])
         if notes["no_spot"]:
-            print("no spot given for", notes["no_spot"], "- strikes are centred on the middle of the ladder; "
-                  "pass --spot NAME=LEVEL for a proper at-the-money window")
+            _say("no spot given for", notes["no_spot"], "- strikes are centred on the middle of the ladder; "
+                 "pass --spot NAME=LEVEL for a proper at-the-money window")
 
 
 if __name__ == "__main__":
