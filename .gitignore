@@ -17,6 +17,8 @@ deploy/local/
 data/fo_universe.csv
 data/NSE.json*
 data/universe.local.csv
+data/universe_global.csv
+data/index_sources/
 data/universe_history/
 
 # Output of the retired Phase 0 probe (SCRUM-99): kept on the VPS as the all-Greeks reference for SCRUM-108

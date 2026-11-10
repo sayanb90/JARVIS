@@ -88,6 +88,21 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
             age = (today - row.d.date()).days
             r.line("WARN" if age > 4 else "PASS", f"daily OHLC {row.market}: latest {row.d.date()} ({age} days old), {row.n} symbols")
 
+    # Yahoo 1-minute bars for US, UK and EU (built forward from the day the cron job started; nothing to say before that)
+    ybars = lake_dir / "bars" / "interval=1m"
+    ydays = sorted(p.name.split("=", 1)[1] for p in ybars.glob("date=*") if any(p.glob("*.parquet"))) if ybars.exists() else []
+    if ydays:
+        age = (today - date.fromisoformat(ydays[-1])).days
+        try:
+            import duckdb
+            per = duckdb.connect().execute(
+                f"SELECT market, count(DISTINCT symbol), count(*) FROM read_parquet('{ybars}/date={ydays[-1]}/*.parquet') GROUP BY 1 ORDER BY 1"
+            ).fetchall()
+            detail = ", ".join(f"{m} {n} symbols {rows:,} bars" for m, n, rows in per)
+        except Exception as exc:                                  # noqa: BLE001
+            detail = f"unreadable: {str(exc).splitlines()[0][:80]}"
+        r.line("WARN" if age > 4 else "PASS", f"Yahoo 1-minute bars: {len(ydays)} days stored, newest {ydays[-1]} ({age} days old); {detail}")
+
     # intraday bars
     days = lake.bar_days("1s") if lake is not None else []
     expected_day = today if (after_close and today.weekday() < 5) else prev_weekday(today)
