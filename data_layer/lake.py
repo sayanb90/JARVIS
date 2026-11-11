@@ -137,6 +137,11 @@ def load_ohlc(markets: tuple[str, ...] = MARKETS, daily: bool = False) -> None:
             log.info("ohlc %d <- %s (partition now %d rows)", yr, f.name, n)
 
 
+def _folder_lock(folder: Path):
+    from .tick_store import _folder_lock as lock         # imported here: tick_store imports this module
+    return lock(folder)
+
+
 def load_bars(interval: str = "5m", since: date | None = None,
               markets: tuple[str, ...] = BARS_MARKETS) -> int:
     """Upsert data/bars/<interval>/<m>/YYYY-MM-DD.csv into per-day Parquet files."""
@@ -149,9 +154,11 @@ def load_bars(interval: str = "5m", since: date | None = None,
                 days.setdefault(p.stem, []).append(p)
     for day, paths in sorted(days.items()):
         target = LAKE_DIR / "bars" / f"interval={interval}" / f"date={day}" / "bars.parquet"
-        for p in paths:
-            n = _upsert(con, target, _read_csv_sql(p, BAR_TYPES),
-                        ["symbol", "ts"], ["symbol", "ts"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with _folder_lock(target.parent):           # the same lock as tick_store.compact_day: the backfill and this load never replace the file at once
+            for p in paths:
+                n = _upsert(con, target, _read_csv_sql(p, BAR_TYPES),
+                            ["symbol", "ts"], ["symbol", "ts"])
         log.info("bars %s %s -> %d rows", interval, day, n)
     if not days:
         log.info("no bar CSVs on/after %s — nothing to load", since)

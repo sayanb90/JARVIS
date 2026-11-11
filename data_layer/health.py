@@ -184,6 +184,12 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
             detail = f"unreadable: {str(exc).splitlines()[0][:80]}"
         r.line("WARN" if age > 4 else "PASS", f"Yahoo 1-minute bars: {len(ydays)} days stored, newest {ydays[-1]} ({age} days old); {detail}")
 
+    # research snapshot (only on a server where the research root exists: research/snapshot.py, workstream 1 of the research build)
+    from research import snapshot as research_snapshot
+    if (research_snapshot.DEFAULT_ROOT / "snapshots").is_dir():
+        ok, line = research_snapshot.status(research_snapshot.DEFAULT_ROOT)
+        r.line("PASS" if ok else "WARN", "research " + line)
+
     # intraday bars
     days = lake.bar_days("1s") if lake is not None else []
     expected_day = today if (after_close and today_cal.state != "closed") else market_calendar.previous_open_day(today, "NSE", cal)

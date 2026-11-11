@@ -182,6 +182,27 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   await p3.waitForSelector('#eq-price .main-svg', { timeout: 20000 });
 
   if (errors.length) fail('browser errors: ' + JSON.stringify(errors.slice(0, 5)));
+    // ---------------- Data tab: coverage, historical run, storage ----------------
+  {
+    const dp = await open(1400, 1000, '#tab=data');
+    await dp.waitForSelector('#dt-cards .kpi', { timeout: 20000 });
+    const kpis = await dp.$$eval('#dt-cards .kpi', (k) => k.length);
+    if (kpis !== 6) fail('the Data tab should show six key figures, not ' + kpis);
+    await dp.waitForSelector('#dt-table tbody tr', { timeout: 20000 });
+    if (!(await dp.$$eval('#dt-table tbody tr', (r) => r.length))) fail('the dataset table is empty');
+    if (await dp.$eval('label.day', (e) => !e.hidden)) fail('the trading-day picker should be hidden on the Data tab');
+    await dp.waitForFunction(() => { const d = document.getElementById('dt-range'); return (d && d.data) || !document.getElementById('dt-range-msg').hidden; }, null, { timeout: 60000 }).catch(() => fail('the range chart or its message never appeared'));
+    await dp.click('.subtabs[data-tab="data"] button[data-sub="run"]');
+    await dp.waitForSelector('#dt-stages li', { timeout: 10000 }).catch(() => fail('the historical-run stages are missing'));
+    if ((await dp.$$eval('#dt-stages li', (l) => l.length)) !== 9) fail('the historical run should list nine stages');
+    await dp.click('.subtabs[data-tab="data"] button[data-sub="storage"]');
+    await dp.waitForSelector('#dt-storage-cards .kpi', { timeout: 10000 }).catch(() => fail('the storage figures are missing'));
+    if (await plotted(dp, 'dt-storage') === false && !(await dp.$eval('#dt-storage', (e) => /empty/.test(e.textContent)))) fail('the storage chart is not drawn');
+    await dp.click('#tab-instrument');                                                          // and back: the trading-day picker returns
+    await dp.waitForSelector('#eq-price .main-svg', { timeout: 20000 });
+    if (await dp.$eval('label.day', (e) => e.hidden)) fail('the trading-day picker should come back on the other tabs');
+  }
+
   await browser.close();
   if (!process.exitCode) console.log('OK');
 })().catch((e) => { console.error('FAIL: ' + e.message); process.exit(1); });

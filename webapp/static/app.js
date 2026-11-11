@@ -1,5 +1,5 @@
 /* JARVIS intraday viewer: plain JS + Plotly (served locally from /vendor/plotly.min.js).
-   Structure: three sections (Equities, Market, Derivatives), each with its own controls, key figures and sub-tabs.
+   Structure: four sections (Equities, Market, Derivatives, Candles), each with its own controls, key figures and sub-tabs.
    Every chart is its own Plotly figure with its own HTML legend; time charts in one section zoom together. */
 const $ = (id) => document.getElementById(id);
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -20,15 +20,20 @@ const precisionText = (w) => (w === 0 ? 'every tick' : `${WIDTH_LABEL[w]} bars`)
 const countText = (n, w) => (w === 0 ? `${fmtInt(n)} ticks (raw)` : `${fmtInt(n)} bars of ${WIDTH_LABEL[w]}`);
 const nearestDay = (days, want) => days.reduce((best, d) => (Math.abs(new Date(d) - new Date(want)) < Math.abs(new Date(best) - new Date(want)) ? d : best), days[0]);
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
-const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'] };
+const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'],
+               candles: ['chart', 'profile'], data: ['coverage', 'run', 'storage'] };
+const CANDLE_LABEL = { 1: '1 minute', 3: '3 minutes', 5: '5 minutes', 15: '15 minutes', 30: '30 minutes', 60: '1 hour' };
+const SOURCE_LABEL = { live: 'live feed', rest: 'REST candle API' };
 
 const state = {
-  meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary' },
+  meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary', candles: 'chart', data: 'coverage' },
+  dt: null, dtMarkets: null, dtRange: 'ohlc',
+  cSymbol: null, cMinutes: 1, cBins: 40, cSource: 'auto', cData: null,
   symbol: null, width: 1, volwin: 300, data: null,
   overview: [], sort: ['volume', -1], heatN: 20, heatMetric: 'realised_vol_pct',
   underlying: null, expiry: null, foData: null, foContract: null, foContractData: null, greeksData: null, range: 10, focus: 'active',
 };
-let reqId = 0, foReq = 0, fcReq = 0;
+let reqId = 0, foReq = 0, fcReq = 0, cdReq = 0;
 const phone = () => window.innerWidth < 640;
 
 /* ---------------------------------------------------------------- plumbing */
@@ -61,6 +66,7 @@ function writeHash() {
   const p = { tab: state.tab, date: state.day || '' };
   p.sub = state.sub[state.tab];
   if (state.tab === 'instrument') Object.assign(p, { symbol: state.symbol || '', width: state.width, volwin: state.volwin });
+  if (state.tab === 'candles') Object.assign(p, { symbol: state.cSymbol || '', minutes: state.cMinutes, bins: state.cBins, source: state.cSource });
   if (state.tab === 'fo') Object.assign(p, { underlying: state.underlying || '', expiry: state.expiry || '', contract: state.foContract || '',
                                               width: state.width, volwin: state.volwin, range: state.range, focus: state.focus });
   history.replaceState(null, '', '#' + new URLSearchParams(p).toString());
@@ -134,6 +140,22 @@ function resizeVisible() {
 }
 
 /* ---------------------------------------------------------------- sections and sub-tabs */
+/* the days a section can show: the Candles section also reads days that only have REST minute candles */
+const daysFor = (tab) => (tab === 'candles' ? state.meta.candle_days : state.meta.days);
+function syncDays(tab) {                               // limit the date picker to this section's days; move to the nearest one if needed
+  const days = daysFor(tab), picker = $('date');
+  if (!days.length) return false;
+  picker.min = days[days.length - 1]; picker.max = days[0];
+  if (!days.includes(state.day)) {
+    const was = state.day, day = nearestDay(days, was);
+    const note = $('date-note');
+    note.textContent = `No data on ${niceDate(was)} in this section · showing ${niceDate(day)}`; note.hidden = false;
+    clearTimeout(note._t); note._t = setTimeout(() => { note.hidden = true; }, 8000);
+    state.day = day; state.foContractData = null; state.greeksData = null;
+  }
+  picker.value = state.day;
+  return true;
+}
 function setTab(tab, load = true) {
   state.tab = tab;
   for (const t of Object.keys(SUBS)) {
@@ -141,9 +163,14 @@ function setTab(tab, load = true) {
     $('view-' + t).hidden = t !== tab;
   }
   showSub(tab, state.sub[tab], false);
+  const dayPicker = document.querySelector('label.day');
+  if (dayPicker) dayPicker.hidden = tab === 'data';                                  // the Data tab is not about one trading day
   if (!load) return;
+  if (tab === 'data') { loadData().catch(fail); return; }
+  if (!syncDays(tab)) { setStatus('No data for this section yet', 'err'); return; }
   if (tab === 'fo') loadFoUnderlyings().catch(fail);
   else if (tab === 'overview') loadOverview().catch(fail);
+  else if (tab === 'candles') loadCandleSymbols().catch(fail);
   else loadSymbols().catch(fail);
 }
 function showSub(tab, sub, rerender = true) {
@@ -159,6 +186,7 @@ document.querySelectorAll('.subtabs').forEach((nav) => nav.querySelectorAll('but
   showSub(nav.dataset.tab, b.dataset.sub);
   if (nav.dataset.tab === 'fo' && b.dataset.sub === 'contract' && !state.foContractData && state.foContract) loadFoContract(state.foContract);
   if (nav.dataset.tab === 'fo' && b.dataset.sub === 'greeks') loadGreeks();
+  if (nav.dataset.tab === 'data' && state.dt) renderData();
 }));
 
 /* ---------------------------------------------------------------- start-up */
@@ -172,18 +200,27 @@ async function init() {
   state.volwin = state.meta.vol_windows.includes(+h.volwin) ? +h.volwin : 300;
   for (const id of ['width', 'fo-width', 'fo-greeks-width']) fillSelect($(id), widths, state.width);
   for (const id of ['volwin', 'fo-volwin']) fillSelect($(id), wins, state.volwin);
-  if (!state.meta.days.length) {
-    $('empty').hidden = false; document.querySelectorAll('.view').forEach((v) => { v.hidden = true; }); setStatus('No data yet', 'err'); return;
+  const cm = (state.meta.candle_minutes || [1]).map((m) => [m, CANDLE_LABEL[m] || m + ' min']);
+  const cb = (state.meta.profile_bins || [40]).map((b) => [b, `about ${b}`]);
+  state.cMinutes = (state.meta.candle_minutes || []).includes(+h.minutes) ? +h.minutes : 1;
+  state.cBins = (state.meta.profile_bins || []).includes(+h.bins) ? +h.bins : 40;
+  state.cSource = ['auto', 'live', 'rest'].includes(h.source) ? h.source : 'auto';
+  fillSelect($('cd-minutes'), cm, state.cMinutes); fillSelect($('cd-bins'), cb, state.cBins); $('cd-source').value = state.cSource;
+  if (!state.meta.days.length && !(state.meta.candle_days || []).length) {        // no intraday data yet: the Data tab still says what there is
+    ['instrument', 'overview', 'fo', 'candles'].forEach((t) => { $('tab-' + t).hidden = true; });
+    $('empty').hidden = false; state.sub.data = SUBS.data.includes(h.sub) ? h.sub : 'coverage'; setTab('data'); return;
   }
   const picker = $('date');                                                       // a date picker limited to the days that have data
-  picker.min = state.meta.days[state.meta.days.length - 1]; picker.max = state.meta.days[0];
-  state.day = state.meta.days.includes(h.date) ? h.date : state.meta.days[0];
+  const all = [...new Set([...state.meta.days, ...(state.meta.candle_days || [])])].sort().reverse();
+  picker.min = all[all.length - 1]; picker.max = all[0];
+  state.day = all.includes(h.date) ? h.date : all[0];
   picker.value = state.day;
   state.symbol = h.symbol || null; state.underlying = h.underlying || null; state.expiry = h.expiry || null; state.foContract = h.contract || null;
+  state.cSymbol = h.tab === 'candles' ? h.symbol || null : null;
   if (['5', '10', '20', '0'].includes(h.range)) state.range = +h.range;
   if (['active', 'atm', 'all'].includes(h.focus)) state.focus = h.focus;
   $('chain-range').value = String(state.range); $('oi-focus').value = state.focus;
-  const tab = SUBS[h.tab] ? h.tab : 'instrument';
+  const tab = SUBS[h.tab] ? h.tab : state.meta.days.length ? 'instrument' : 'candles';
   if (h.sub) state.sub[tab] = h.sub;
   setTab(tab);
 }
@@ -775,11 +812,123 @@ setInterval(() => {                                        // one timer; only ca
   for (const key of Object.keys(BOOKS)) if (bookMode[key] === 'live' && $(BOOKS[key].body).offsetParent !== null) pollLive(key);
 }, 1000);
 
+/* ================================================================ Candles: minute candles and the volume profile */
+async function loadCandleSymbols() {
+  setStatus('Loading instruments…', 'busy');
+  const syms = await api('/api/candles/symbols', { date: state.day });
+  const tag = (s) => (s.live && s.rest ? '' : s.live ? ' · live feed only' : ' · REST only');
+  fillSelect($('cd-symbol'), syms.map((s) => [s.symbol, s.symbol.replace(/\.NS$/, '') + tag(s)]));
+  if (!syms.find((s) => s.symbol === state.cSymbol)) state.cSymbol = syms[0].symbol;
+  $('cd-symbol').value = state.cSymbol;
+  await refreshCandles();
+}
+
+async function refreshCandles() {
+  const id = ++cdReq;
+  writeHash();
+  setStatus('Loading ' + state.cSymbol + '…', 'busy');
+  try {
+    const d = await api('/api/candles', { date: state.day, symbol: state.cSymbol, minutes: state.cMinutes, bins: state.cBins, source: state.cSource });
+    if (id !== cdReq) return;
+    state.cData = d;
+    $('cd-title').textContent = state.cSymbol.replace(/\.NS$/, '');
+    $('cd-sub').textContent = `NSE · ${niceDate(state.day)} · ${d.minutes === 60 ? '1-hour' : d.minutes + '-minute'} candles · from the ${SOURCE_LABEL[d.source]}`;
+    renderKpis('cd-cards', candleKpis(d.summary, d.profile));
+    renderCandles(d);
+    setStatus(`${state.cSymbol} · ${state.day} · ${fmtInt(d.summary.candles)} of ${fmtInt(d.summary.expected)} candles · times in IST`);
+  } catch (e) {
+    if (id !== cdReq) return;
+    state.cData = null; $('cd-cards').innerHTML = '';                       // never leave the previous instrument's charts under an error
+    ['cd-price', 'cd-volume', 'cd-profile'].forEach((c) => { if ($(c).data) Plotly.purge(c); });
+    $('cd-levels').innerHTML = ''; $('cd-note').textContent = '';
+    fail(e);
+  }
+}
+
+function candleKpis(S, P) {
+  const va = P && P.val != null ? `value area ${fmt(P.val)}–${fmt(P.vah)}` : '';
+  return [
+    ['Last', fmt(S.close), `${signed(S.return_pct, (x) => fmt(x) + '%')} on the open`],
+    ['Day high', fmt(S.high), `low ${fmt(S.low)} · open ${fmt(S.open)}`],
+    ['Volume', fmtBig(S.volume), `VWAP ${fmt(S.vwap)}`],
+    ['Point of control', P && P.poc != null ? fmt(P.poc) : '–', va],
+    ['Candles', `${fmtInt(S.candles)} of ${fmtInt(S.expected)}`, `${fmt(S.coverage_pct, 0)}% · ${S.first_time}–${S.last_time}`],
+    ['Up / down', `${fmtInt(S.up_candles)} / ${fmtInt(S.down_candles)}`, `peak volume at ${S.peak_time}`],
+  ];
+}
+
+function renderCandles(d) {
+  const s = d.series, P = d.profile || {}, S = d.summary, T = theme(), t = s.ts, hasP = !!(P.prices && P.prices.length);
+  const day = t[0].slice(0, 10), range = [`${day} 09:10`, `${day} 15:35`];       // the whole session, so a gap in the capture shows as a gap
+  const pocAt = hasP ? P.volume.indexOf(Math.max(...P.volume)) : -1;
+  const hline = (y, color, dash, w = 1) => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: y, y1: y, line: { color, width: w, dash } });
+  const levelShapes = hasP ? [
+    { type: 'rect', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: P.val, y1: P.vah, fillcolor: T.acc, opacity: 0.07, line: { width: 0 }, layer: 'below' },
+    hline(P.poc, T.orange, 'dash', 1.2), hline(P.vah, T.muted, 'dot'), hline(P.val, T.muted, 'dot')] : [];
+
+  // candles, running VWAP and the profile on the same price axis
+  {
+    const tr = [{ type: 'candlestick', x: t, open: s.open, high: s.high, low: s.low, close: s.close, name: 'Price', whiskerwidth: 0.5,
+                  increasing: { line: { color: T.up, width: 1 }, fillcolor: T.up }, decreasing: { line: { color: T.down, width: 1 }, fillcolor: T.down } },
+                { x: t, y: s.vwap, name: 'VWAP', type: 'scatter', mode: 'lines', line: { color: T.yellow, width: 1.4 }, hovertemplate: 'VWAP %{y:,.2f}<extra></extra>' }];
+    const lg = [{ name: 'Candles', color: T.acc, kind: 'bar', traces: [0] }, { name: 'VWAP', color: T.yellow, traces: [1] }];
+    if (hasP) {
+      tr.push({ type: 'bar', orientation: 'h', x: P.volume, y: P.prices, width: P.step * 0.9, xaxis: 'x2', yaxis: 'y', name: 'Volume at price',
+                marker: { color: P.prices.map((_, i) => (i === pocAt ? T.orange : T.acc)), opacity: 0.5 }, hovertemplate: '%{y:,.2f} · %{x:,.0f} shares<extra></extra>' });
+      lg.push({ name: 'Volume profile (right)', key: 'prof', color: T.acc, kind: 'bar', traces: [2] });
+    }
+    const layout = baseLayout({
+      hovermode: 'closest', shapes: levelShapes,
+      xaxis: timeAxis({ domain: [0, hasP ? 0.8 : 1], range, rangeslider: { visible: false }, hoverformat: '%H:%M' }),
+      xaxis2: { domain: [0.82, 1], anchor: 'y', showgrid: false, showticklabels: false, zeroline: false, showline: false, rangemode: 'tozero' },
+      yaxis: valAxis({ tickformat: ',.2f', title: phone() ? '' : { text: '₹', font: { size: 11 } } }),
+    });
+    plot('cd-price', tr, layout, lg);
+  }
+  // volume per candle, coloured by direction
+  {
+    const w = d.minutes * 60000 * 0.85;
+    plot('cd-volume', [{ x: t, y: s.volume, type: 'bar', width: w, marker: { color: s.up.map((u) => (u ? T.up : T.down)), opacity: 0.75 },
+                         hovertemplate: '%{x|%H:%M} · %{y:,.0f}<extra></extra>' }],
+      baseLayout({ bargap: 0, xaxis: timeAxis({ range, hoverformat: '%H:%M' }), yaxis: valAxis({ tickformat: '.2s', rangemode: 'tozero' }) }),
+      [{ name: 'Volume', color: T.acc, kind: 'bar', traces: [0] }]);
+    syncGroup('cd', ['cd-price', 'cd-volume']);
+  }
+  // the profile on its own, up volume against down volume, with the levels marked
+  if (hasP) {
+    const tr = [{ type: 'bar', orientation: 'h', x: P.up, y: P.prices, width: P.step * 0.9, name: 'Up candles', marker: { color: T.up, opacity: 0.65 },
+                  hovertemplate: '%{y:,.2f} · up %{x:,.0f}<extra></extra>' },
+                { type: 'bar', orientation: 'h', x: P.down, y: P.prices, width: P.step * 0.9, name: 'Down candles', marker: { color: T.down, opacity: 0.65 },
+                  hovertemplate: '%{y:,.2f} · down %{x:,.0f}<extra></extra>' }];
+    const note = (y, text, color) => ({ xref: 'paper', x: 1, xanchor: 'right', yref: 'y', y, yanchor: 'bottom', text, showarrow: false, font: { size: 10, color } });
+    plot('cd-profile', tr, baseLayout({
+      barmode: 'stack', hovermode: 'closest', bargap: 0, shapes: levelShapes,
+      annotations: [note(P.vah, 'VAH', T.muted), note(P.poc, 'POC', T.orange), note(P.val, 'VAL', T.muted)],
+      xaxis: { gridcolor: T.grid, linecolor: T.line, zeroline: false, tickformat: '.2s', rangemode: 'tozero' },
+      yaxis: valAxis({ tickformat: ',.2f' }),
+    }), [{ name: 'Up candles', color: T.up, kind: 'bar', traces: [0] }, { name: 'Down candles', color: T.down, kind: 'bar', traces: [1] }]);
+  } else if ($('cd-profile').data) Plotly.purge('cd-profile');
+
+  // key levels against the last price
+  const last = S.close;
+  const rows = [['Day high', S.high], ['Value area high', P.vah], ['VWAP', S.vwap], ['Point of control', P.poc], ['Value area low', P.val], ['Day low', S.low]]
+    .filter(([, v]) => v != null).sort((a, b) => b[1] - a[1]);
+  $('cd-levels').innerHTML = '<thead><tr><th>Level</th><th class="num">Price</th><th class="num">vs last</th></tr></thead><tbody>' +
+    rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${fmt(v)}</td><td class="num">${signed((v / last - 1) * 100, (x) => fmt(x) + '%')}</td></tr>`).join('') +
+    `<tr><td>Last</td><td class="num"><b>${fmt(last)}</b></td><td class="num">–</td></tr></tbody>`;
+  $('cd-note').textContent = hasP
+    ? `Each candle's volume is spread evenly over the prices between its low and high, then summed per price level (${P.value_area_pct.toFixed(0)}% of the volume sits inside the value area; level height ${fmt(P.step)}). ` +
+      'Candle volume comes from the ' + SOURCE_LABEL[d.source] + (d.source === 'rest' ? ', which carries no bid, ask or VWAP, so the VWAP line here is computed from the candles.' : '.')
+    : 'This day has no traded volume, so there is no volume profile.';
+  requestAnimationFrame(resizeVisible);
+}
+
 /* ---------------------------------------------------------------- wiring */
 $('date').onchange = (e) => {
   const want = e.target.value;
   if (!want) { e.target.value = state.day; return; }                              // cleared: keep the current day
-  const day = state.meta.days.includes(want) ? want : nearestDay(state.meta.days, want);
+  const days = daysFor(state.tab);
+  const day = days.includes(want) ? want : nearestDay(days, want);
   const note = $('date-note');
   note.hidden = day === want;
   if (day !== want) {                                                             // no data that day: say so and move to the nearest day with data
@@ -789,6 +938,188 @@ $('date').onchange = (e) => {
   e.target.value = day;
   state.day = day; state.foContractData = null; state.greeksData = null; setTab(state.tab);
 };
+/* ================================================================ Data: what the lake holds */
+const DT_STATE = {                                           // state -> [name, colour code, swatch colour, glyph in the cell]
+  ok: ['Data', 3, '#2997ff', ''], open: ['Open: segments not compacted', 4, '#ff9f0a', '…'], missing: ['Missing', 5, '#ff453a', '×'],
+  closed: ['Closed day', 1, '#2c2c2e', ''], pending: ['Today, not yet', 2, '#55555b', ''], before: ['Before capture began', 0, '#18181b', ''], none: ['', 1, '#2c2c2e', ''],
+};
+const MARKET_NAME = { IN: 'India', US: 'United States', UK: 'United Kingdom', EU: 'Europe', JP: 'Japan', KR: 'South Korea', TW: 'Taiwan', SG: 'Singapore', CN: 'China', HK: 'Hong Kong' };
+const STAGE_INFO = {
+  universe: ['Global stock universe', 'S&P 500, FTSE 100, STOXX 600, Nikkei 225, KOSPI 200, Taiwan 50, STI, CSI 300, Hang Seng'],
+  daily: ['Daily candles', 'Yahoo, all markets, up to 20 years, loaded into the lake'],
+  '1m': ['Yahoo 1-minute bars', 'the last 29 days, every market but India: all Yahoo serves'],
+  fx: ['FX rates', 'daily, against the dollar'],
+  fundamentals: ['Fundamentals', 'Yahoo annual statements, then the pillar inputs and the completeness check'],
+  'trial-spot': ['Upstox trial: candles', 'three stocks and the indices, proves the endpoint before the long run'],
+  'trial-expired': ['Upstox trial: expired contracts', 'one NIFTY expiry; needs the token and Upstox Plus'],
+  spot: ['Upstox 1-minute candles since 2022', '500 stocks and the index keys'],
+  expired: ['Upstox expired options and futures', 'NIFTY and BANKNIFTY, five strikes either side of the money'],
+};
+const BF_NAME = { spot: 'Stocks and indices', expired: 'Expired options and futures', 'expired-list': 'Expired option lists', 'expired-list-fut': 'Expired future lists' };
+const fmtBytes = (n) => (n == null ? '–' : n >= 1e9 ? (n / 1e9).toFixed(n >= 1e10 ? 1 : 2) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? Math.round(n / 1e3) + ' KB' : n + ' B');
+const dtDays = (a, b) => Math.round((new Date(b) - new Date(a)) / 864e5) + 1;
+const years = (a, b) => ((new Date(b) - new Date(a)) / (365.25 * 864e5));
+
+async function loadData() {
+  setStatus('Reading what the lake holds…', 'busy');
+  state.dt = await api('/api/coverage', {});
+  renderData();
+  setStatus(`${state.dt.live_sessions} live sessions · ${state.dt.gaps_recent} gap${state.dt.gaps_recent === 1 ? '' : 's'} in the last ${state.dt.recent_days} days`);
+  if (!state.dtMarkets) api('/api/coverage/markets', {}).then((m) => { state.dtMarkets = m; renderData(); }).catch(fail);
+}
+function renderData() {
+  const j = state.dt;
+  if (!j) return;
+  $('dt-sub').textContent = j.demo ? 'Synthetic demo lake.' : `Read at ${j.generated.replace('T', ' ').replace('Z', ' UTC')}. Nothing here changes the lake.`;
+  renderDataKpis();
+  const sub = state.sub.data;
+  if (sub === 'coverage') { renderStrip(); renderRange(); renderDatasetTable(); renderMarketsTable(); }
+  else if (sub === 'run') renderRun();
+  else renderStorage();
+}
+function renderDataKpis() {
+  const j = state.dt, ds = Object.fromEntries(j.datasets.map((d) => [d.id, d]));
+  const m = state.dtMarkets && !state.dtMarkets.error ? state.dtMarkets : null;
+  const one = ds.bars_1m, daily = ds.ohlc;
+  const ticks = ds.ticks_eq.days ? ds.ticks_eq : ds.ticks_fo;
+  const done = j.history_run.stages.filter((s) => s.status === 'ok').length;
+  const snap = j.snapshot;
+  const age = snap && snap.present && snap.created ? Math.max(0, (Date.now() - new Date(snap.created)) / 864e5) : null;
+  renderKpis('dt-cards', [
+    ['Live sessions', fmtInt(j.live_sessions), ticks.days ? `since ${niceDate(ticks.first)}` : 'none yet'],
+    ['1-minute bars', one.days ? `${fmtInt(one.days)} days` : '–', m && m.bars_1m.length ? `${m.bars_1m.length} market${m.bars_1m.length === 1 ? '' : 's'} · from ${m.bars_1m.map((r) => r.first).sort()[0].slice(0, 4)}` : (one.days ? `${niceDate(one.first)} to ${niceDate(one.last)}` : 'not collected yet')],
+    ['Daily candles', daily.days ? `${years(daily.first, daily.last).toFixed(1)} years` : '–', daily.days ? `${daily.first.slice(0, 4)} to ${daily.last.slice(0, 4)}` : 'none yet'],
+    ['Gaps, last ' + j.recent_days + ' days', j.gaps_recent ? `<span class="neg">× ${j.gaps_recent}</span>` : '0', 'open days, no data'],
+    ['Snapshot', snap && snap.present ? (age == null ? 'present' : age < 1 ? 'today' : `${age.toFixed(0)} d old`) : 'not set up', snap && snap.present && snap.newest_tick_day ? `ticks to ${niceDate(snap.newest_tick_day)}` : 'deploy/research/setup.sh'],
+    ['Historical run', j.history_run.present ? `${done} of ${j.history_run.stages.length}` : 'not run', j.history_run.present ? 'stages done' : 'deploy/historical-run.sh'],
+  ]);
+}
+
+function renderStrip() {
+  const j = state.dt, T = theme();
+  const rows = j.datasets.filter((d) => d.recent.length);
+  const el = $('dt-strip');
+  if (!rows.length) { if (el.data) Plotly.purge(el); el.innerHTML = '<p class="muted">No dated datasets yet.</p>'; $('dt-legend').innerHTML = ''; return; }
+  if (el.querySelector('p')) el.innerHTML = '';
+  const order = ['before', 'closed', 'pending', 'ok', 'open', 'missing'];
+  const colors = order.map((k) => DT_STATE[k][2]);
+  const scale = []; order.forEach((k, i) => { scale.push([i / 6, colors[i]], [(i + 1) / 6, colors[i]]); });
+  const hgt = Math.max(150, rows.length * 34 + 64);
+  el.style.height = hgt + 'px';
+  const days = rows[0].recent.map((r) => r.d);
+  const code = (s) => order.indexOf(s);
+  Plotly.react(el, [{
+    type: 'heatmap', x: days, y: rows.map((d) => d.short), z: rows.map((d) => d.recent.map((r) => code(r.s))), zmin: -0.5, zmax: 5.5, colorscale: scale, showscale: false,
+    text: rows.map((d) => d.recent.map((r) => DT_STATE[r.s][3])), texttemplate: '%{text}', textfont: { size: 11, color: '#fff' },
+    customdata: rows.map((d) => d.recent.map((r) => [d.label, niceDate(r.d), DT_STATE[r.s][0] || 'Not a daily series'])),
+    hovertemplate: '<b>%{customdata[0]}</b><br>%{customdata[1]}<br>%{customdata[2]}<extra></extra>', xgap: 2, ygap: 2,
+  }], baseLayout({ height: hgt, margin: { l: phone() ? 92 : 118, r: 8, t: 6, b: 34 }, xaxis: { type: 'date', tickformat: '%d %b', showgrid: false, linecolor: T.line, tickfont: { size: 10 }, fixedrange: true },
+                   yaxis: { autorange: 'reversed', showgrid: false, tickfont: { size: 11 }, fixedrange: true } }), Object.assign(config(), { displayModeBar: false }));
+  $('dt-legend').innerHTML = ['ok', 'missing', 'open', 'closed', 'pending', 'before'].map((k) =>
+    `<span class="it"><i class="sw" style="background:${DT_STATE[k][2]}${k === 'before' ? ';border:1px solid #3a3a3f' : ''}">${DT_STATE[k][3]}</i>${esc(DT_STATE[k][0])}</span>`).join('');
+}
+
+function renderRange() {
+  const el = $('dt-range'), msg = $('dt-range-msg'), which = state.dtRange;
+  document.querySelectorAll('#dt-range-seg button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.r === which));
+  const m = state.dtMarkets;
+  const hide = (t) => { if (el.data) Plotly.purge(el); el.style.display = 'none'; msg.hidden = false; msg.textContent = t; };
+  if (!m) { hide('Reading the bars tables…'); return; }
+  if (m.error) { hide('The bars tables could not be read: ' + m.error); return; }
+  const rows = m[which];
+  if (!rows.length) { hide(which === 'ohlc' ? 'No daily candles in the lake yet.' : 'No 1-minute bars in the lake yet.'); return; }
+  el.style.display = ''; msg.hidden = true;
+  const T = theme(), t0 = rows.map((r) => r.first).sort()[0], t1 = rows.map((r) => r.last).sort().slice(-1)[0];
+  const span = new Date(t1) - new Date(t0) || 864e5;
+  const hgt = Math.max(150, rows.length * 34 + 60);
+  el.style.height = hgt + 'px';
+  $('dt-range-hint').textContent = which === 'ohlc' ? 'first to last day per market' : 'first to last day per market; India from Upstox, the rest from Yahoo';
+  const count = (r) => (which === 'ohlc' ? `${fmtInt(r.symbols)} symbol${r.symbols === 1 ? '' : 's'}` : `${fmtBig(r.bars)} bars`);
+  const label = (r) => `${niceDate(r.first)} to ${niceDate(r.last)} · ${count(r)}`;
+  const shortLabel = (r) => `${r.first.slice(0, 4)}–${r.last.slice(0, 4)} · ${count(r)}`;
+  Plotly.react(el, [{
+    type: 'bar', orientation: 'h', y: rows.map((r) => MARKET_NAME[r.market] || r.market), base: rows.map((r) => r.first),
+    x: rows.map((r) => Math.max(new Date(r.last) - new Date(r.first), 864e5)), marker: { color: T.acc, line: { color: T.acc, width: 2 } },
+    text: rows.map(phone() ? shortLabel : label), textposition: 'outside', cliponaxis: false, textfont: { size: 11, color: T.fg2 }, width: 0.55,
+    customdata: rows.map(label), hovertemplate: '<b>%{y}</b><br>%{customdata}<extra></extra>',
+  }], baseLayout({ height: hgt, margin: { l: phone() ? 92 : 118, r: 8, t: 6, b: 34 }, bargap: 0.35,
+                   xaxis: Object.assign({ type: 'date', gridcolor: T.grid, linecolor: T.line, tickfont: { size: 10 }, fixedrange: true,
+                                          range: [new Date(new Date(t0) - span * 0.02).toISOString().slice(0, 10), new Date(+new Date(t1) + span * (phone() ? 1.1 : 0.7)).toISOString().slice(0, 10)] }, yearTicks(t0, t1)),
+                   yaxis: { autorange: 'reversed', showgrid: false, tickfont: { size: 11 }, fixedrange: true } }), Object.assign(config(), { displayModeBar: false }));
+}
+/* year ticks only up to the last day, so the axis never shows years that have not happened */
+function yearTicks(t0, t1) {
+  const a = new Date(t0).getFullYear(), b = new Date(t1).getFullYear(), n = b - a;
+  if (n < 1) return { tickformat: '%d %b %Y', nticks: 4 };
+  const step = n <= 6 ? 1 : n <= 14 ? 2 : 5, vals = [];
+  for (let y = Math.ceil(a / step) * step; y <= b; y += step) vals.push(y + '-01-01');
+  return { tickvals: vals, ticktext: vals.map((v) => v.slice(0, 4)) };
+}
+function renderDatasetTable() {
+  const rows = state.dt.datasets;
+  $('dt-table').innerHTML = '<thead><tr><th>Dataset</th><th class="l dt-wide">Kind</th><th class="l dt-wide">Source</th><th class="dt-wide">First</th><th>Last</th><th>Days</th><th>Gaps</th><th class="l dt-wide">What it holds</th></tr></thead><tbody>' +
+    rows.map((d) => `<tr><td>${esc(d.label)}</td><td class="l dt-wide"><span class="badge">${d.kind === 'live' ? 'recorded live' : 'backfillable'}</span></td><td class="l dt-wide">${esc(d.source)}</td>` +
+      `<td class="dt-wide">${d.first ? niceDate(d.first) : '–'}</td><td>${d.last ? niceDate(d.last) : 'none yet'}</td><td>${d.daily ? fmtInt(d.days) : (d.days ? fmtInt(d.days) + ' fetch days' : '–')}</td>` +
+      `<td>${d.daily && d.missing ? `<span class="gaps">× ${fmtInt(d.missing)}</span>` : (d.daily && d.days ? '0' : '–')}</td><td class="note-cell dt-wide">${esc(d.note)}</td></tr>`).join('') + '</tbody>';
+}
+function renderMarketsTable() {
+  const m = state.dtMarkets, panel = $('dt-markets-panel');
+  if (!m || m.error || (!m.ohlc.length && !m.bars_1m.length)) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const by = {};
+  m.ohlc.forEach((r) => { by[r.market] = Object.assign(by[r.market] || {}, { dFirst: r.first, dLast: r.last, dSym: r.symbols }); });
+  m.bars_1m.forEach((r) => { by[r.market] = Object.assign(by[r.market] || {}, { mFirst: r.first, mLast: r.last, mBars: r.bars, mSym: r.symbols_latest }); });
+  $('dt-markets').innerHTML = '<thead><tr><th>Market</th><th>Daily from</th><th>Daily to</th><th>Symbols</th><th>1-minute from</th><th>1-minute to</th><th>Symbols on the last day</th><th>Bars</th></tr></thead><tbody>' +
+    Object.keys(by).sort().map((k) => { const r = by[k]; return `<tr><td>${esc(MARKET_NAME[k] || k)}</td><td>${r.dFirst ? niceDate(r.dFirst) : '–'}</td><td>${r.dLast ? niceDate(r.dLast) : '–'}</td><td>${fmtInt(r.dSym)}</td>` +
+      `<td>${r.mFirst ? niceDate(r.mFirst) : '–'}</td><td>${r.mLast ? niceDate(r.mLast) : '–'}</td><td>${fmtInt(r.mSym)}</td><td>${fmtBig(r.mBars)}</td></tr>`; }).join('') + '</tbody>';
+}
+
+const STAGE_ICON = { ok: ['✓', 'done'], partial: ['◐', 'partial: run again'], failed: ['✕', 'failed'], pending: ['○', 'not run yet'] };
+function renderRun() {
+  const j = state.dt, h = j.history_run;
+  $('dt-stages').innerHTML = (h.present ? '' : '<p class="muted">No historical run recorded yet. On the server: <code>bash deploy/historical-run.sh</code> (a dry run), then <code>--apply</code>.</p>') +
+    '<ol class="stages">' + h.stages.map((s) => { const [ic, txt] = STAGE_ICON[s.status] || STAGE_ICON.pending, [name, what] = STAGE_INFO[s.stage] || [s.stage, ''];
+      return `<li><i class="ico ${s.status}" aria-hidden="true">${ic}</i><b>${esc(name)}</b><span class="st">${txt}${s.date ? ' · ' + niceDate(s.date) : ''}</span><small>${esc(what)}</small></li>`; }).join('') + '</ol>';
+  const sn = j.snapshot;
+  $('dt-snapshot').innerHTML = !sn.present ? '<p class="muted">Not set up. Research reads frozen snapshots of the lake through a read-only user: <code>deploy/research/setup.sh</code>.</p>'
+    : sn.id ? `<dl class="sk"><dt>Latest</dt><dd>${esc(sn.id)}</dd><dt>Made</dt><dd>${esc(sn.created.replace('T', ' ').replace('Z', ' UTC'))}</dd><dt>Files</dt><dd>${fmtInt(sn.files)} · ${fmtBytes(sn.bytes)}</dd>` +
+        `<dt>Newest tick day</dt><dd>${sn.newest_tick_day ? niceDate(sn.newest_tick_day) : '–'}</dd><dt>Snapshots kept</dt><dd>${fmtInt(sn.count)}</dd>` +
+        `<dt>Skipped (open or in flight)</dt><dd>${fmtInt(sn.skipped)}</dd><dt>Warnings</dt><dd>${sn.warnings ? `<span class="gaps">× ${fmtInt(sn.warnings)}</span>` : '0'}</dd></dl>` +
+        (sn.ok ? '' : `<p class="muted" style="margin-top:10px">${esc(sn.line)}</p>`)
+      : `<p class="muted">${esc(sn.line || 'The snapshot cannot be read.')}</p>`;
+  const bf = j.backfill;
+  $('dt-bf-legend').innerHTML = [['ok', 'Stored', '#2997ff'], ['empty', 'Empty (no data that month)', '#5c5c61'], ['error', 'Error: retried next run', '#ff453a']]
+    .map(([k, n, c]) => `<span class="it"><i class="sw" style="background:${c}">${k === 'error' ? '×' : ''}</i>${n}</span>`).join('');
+  $('dt-backfill').innerHTML = !bf.present ? '<p class="muted">No Upstox backfill recorded yet: <code>python -m data_layer.upstox.backfill status</code> on the server.</p>' :
+    bf.kinds.map((k) => { const tot = Math.max(k.ok + k.empty + k.error, 1);
+      return `<div class="meter"><div class="meter-head"><b>${esc(BF_NAME[k.kind] || k.kind)}</b><span>${fmtInt(k.ok)} stored · ${fmtInt(k.empty)} empty · ${k.error ? `<span class="gaps">× ${fmtInt(k.error)} error${k.error === 1 ? '' : 's'}</span>` : '0 errors'} · ${fmtBig(k.rows)} bars</span></div>` +
+        `<div class="meter-bar" aria-hidden="true"><i class="ok" style="width:${100 * k.ok / tot}%"></i><i class="empty" style="width:${100 * k.empty / tot}%"></i><i class="error" style="width:${100 * k.error / tot}%"></i></div></div>`; }).join('') +
+    `<p class="note">Last activity ${bf.last ? esc(bf.last.replace('T', ' ').replace('Z', ' UTC')) : '–'}. The bar shows the split of the pieces fetched so far, not progress: the total is not known until the run ends.</p>` +
+    (bf.errors.length ? '<ul class="errs">' + bf.errors.map((e) => `<li>× ${esc(e.task)} · ${esc(e.msg)}</li>`).join('') + '</ul>' : '');
+}
+
+function renderStorage() {
+  const st = state.dt.storage, T = theme(), el = $('dt-storage');
+  const years = st.runway_days ? st.runway_days / 250 : null;
+  renderKpis('dt-storage-cards', [
+    ['Lake', fmtBytes(st.total), `${st.rows.length} datasets`], ['Disk free', fmtBytes(st.free), ''],
+    ['A tick day', fmtBytes(st.tick_day_avg), st.tick_days_counted ? `average of the last ${st.tick_days_counted} session${st.tick_days_counted === 1 ? '' : 's'}` : 'no ticks yet'],
+    ['Room for ticks', years ? (years > 50 ? '50+ years' : `${years.toFixed(1)} years`) : '–', years ? 'at that rate, 250 sessions a year' : ''],
+  ]);
+  if (!st.rows.length) { if (el.data) Plotly.purge(el); el.style.height = 'auto'; el.innerHTML = '<p class="muted">The lake is empty.</p>'; return; }
+  if (el.querySelector('p')) el.innerHTML = '';
+  const rows = st.rows.filter((r) => r.bytes > 0);
+  const hgt = Math.max(150, rows.length * 30 + 50);
+  el.style.height = hgt + 'px';
+  Plotly.react(el, [{ type: 'bar', orientation: 'h', y: rows.map((r) => r.name), x: rows.map((r) => r.bytes), marker: { color: T.acc }, width: 0.6,
+    text: rows.map((r) => fmtBytes(r.bytes)), textposition: 'outside', cliponaxis: false, textfont: { size: 11, color: T.fg2 },
+    customdata: rows.map((r) => fmtBytes(r.bytes)), hovertemplate: '<b>%{y}</b><br>%{customdata}<extra></extra>' }],
+    baseLayout({ height: hgt, margin: { l: phone() ? 120 : 160, r: 60, t: 6, b: 24 }, bargap: 0.3, xaxis: { showgrid: false, showticklabels: false, fixedrange: true, range: [0, Math.max(...rows.map((r) => r.bytes)) * 1.18] },
+                 yaxis: { autorange: 'reversed', showgrid: false, tickfont: { size: 11 }, fixedrange: true } }), Object.assign(config(), { displayModeBar: false }));
+  $('dt-storage-note').textContent = 'Room for ticks counts only the raw-tick capture growing day by day. The history backfill and the Yahoo bars add a fixed amount on top, estimated at several GB, not a daily rate.';
+}
+document.querySelectorAll('#dt-range-seg button').forEach((b) => b.onclick = () => { state.dtRange = b.dataset.r; renderRange(); });
+
 $('symbol').onchange = (e) => { state.symbol = e.target.value; refreshEquity(); };
 const setWidth = (v) => { state.width = +v; $('width').value = v; $('fo-width').value = v; $('fo-greeks-width').value = v; state.greeksData = null; };
 const setWin = (v) => { state.volwin = +v; $('volwin').value = v; $('fo-volwin').value = v; };
@@ -796,6 +1127,10 @@ $('width').onchange = (e) => { setWidth(e.target.value); refreshEquity(); };
 $('volwin').onchange = (e) => { setWin(e.target.value); refreshEquity(); };
 $('fo-width').onchange = (e) => { setWidth(e.target.value); loadFoContract(state.foContract); };
 $('fo-volwin').onchange = (e) => { setWin(e.target.value); loadFoContract(state.foContract); };
+$('cd-symbol').onchange = (e) => { state.cSymbol = e.target.value; refreshCandles(); };
+$('cd-minutes').onchange = (e) => { state.cMinutes = +e.target.value; refreshCandles(); };
+$('cd-bins').onchange = (e) => { state.cBins = +e.target.value; refreshCandles(); };
+$('cd-source').onchange = (e) => { state.cSource = e.target.value; refreshCandles(); };
 $('heat-n').onchange = (e) => { state.heatN = +e.target.value; renderHeat(); };
 $('heat-metric').onchange = (e) => { state.heatMetric = e.target.value; renderHeat(); };
 $('underlying').onchange = (e) => { state.underlying = e.target.value; state.expiry = null; state.foContract = null; refreshFo(); };
@@ -816,6 +1151,8 @@ window.addEventListener('resize', () => {                // re-layout charts whe
   lastPhone = phone();
   if (state.tab === 'instrument' && state.data) renderSeries(state.data, EQ);
   if (state.tab === 'overview' && state.overview.length) renderOverview();
+  if (state.tab === 'candles' && state.cData) renderCandles(state.cData);
+  if (state.tab === 'data' && state.dt) renderData();
   if (state.tab === 'fo' && state.foData) { renderFo(state.foData); if (state.foContractData) renderSeries(state.foContractData, FC); }
 });
 init();

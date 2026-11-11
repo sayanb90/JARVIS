@@ -253,6 +253,22 @@ class Lake:
             days |= tick_store.tick_days(self.dir)
         return sorted(days, reverse=True)
 
+    def candle_days(self, interval: str = "1s") -> list[str]:
+        """Days that have minute candles from either source: built from the live feed (`interval` bars or ticks) or pulled from the REST
+        candle API (bars/interval=1m).  Newest first."""
+        return sorted(set(self.bar_days(interval)) | set(self.bar_days("1m")), reverse=True)
+
+    def minute_candles(self, day: str, symbol: str, minutes: int = 1, source: str = "auto",
+                       interval: str = "1s") -> tuple[pd.DataFrame, str | None]:
+        """One instrument's candles of `minutes` minutes for one day, and which source they came from.
+        source: "live" = rolled up from the feed's bars/ticks, "rest" = the Upstox candle API's 1-minute bars, "auto" = live first, then REST."""
+        order = {"auto": ("live", "rest"), "live": ("live",), "rest": ("rest",)}[source]
+        for s in order:
+            df = self.day_bars(day, symbol, interval if s == "live" else "1m", int(minutes) * 60)
+            if not df.empty:
+                return df, s
+        return pd.DataFrame(), None
+
     def fingerprint(self, day: str) -> tuple:
         """Identity of the files a day's results are computed from (name, modification time, size): a cached result is reused only while
         this is unchanged, so a live day recomputes after each flush and a finished day never does."""

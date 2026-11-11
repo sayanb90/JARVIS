@@ -10,6 +10,9 @@ the data stays one Parquet lake read by DuckDB, so a "service" is a schema name,
   reference     universe, equity instrument table, F&O contract table, F&O watchlist, selected contracts
   market        raw ticks (live feed), REST minute bars, legacy 1-second bars
   aggregates    daily OHLC, 1-second and 1-minute bars derived from ticks (per day)
+  yahoo         everything the Yahoo Finance collectors store: fundamentals versions, profiles, dividends and splits, fetch
+                and completeness logs, Yahoo intraday bars, FX rates
+  indices       global index constituents (US, UK, EU, Japan, Korea, Taiwan, Singapore, China, Hong Kong) and the rejects
   fundamentals  income statement, balance sheet, cash flow, ratios, pillar metrics, fund meta
   analytics     signals and features (none yet)
 
@@ -50,8 +53,8 @@ QUERY_TIMEOUT_S = 20.0
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 NAME_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9&._|-]{1,40}$")
-SERVICES = [("reference", "Reference"), ("market", "Market data"), ("aggregates", "Aggregates"),
-            ("fundamentals", "Fundamentals"), ("analytics", "Analytics")]
+SERVICES = [("reference", "Reference"), ("market", "Market data"), ("aggregates", "Aggregates"), ("yahoo", "Yahoo Finance"),
+            ("indices", "Global indices"), ("fundamentals", "Fundamentals"), ("analytics", "Analytics")]
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,24 @@ CATALOG = [
     Table("aggregates", "ohlc_daily", "Daily OHLC", "Five years of daily bars for India, US, UK and EU (Yahoo).", "years", "ohlc", "date"),
     Table("aggregates", "bars_1s", "1-second bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 1),
     Table("aggregates", "bars_1m", "1-minute bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 60),
+    Table("yahoo", "yf_versions", "Yahoo fundamentals", "Every statement item the pillars use, per symbol and period, with the day we first and last "
+          "saw each value (a restated value is a new row).", "file", "yf_fundamentals/versions.parquet"),
+    Table("yahoo", "yf_profile", "Yahoo profiles", "One row per symbol: price and reporting currency, market cap, shares, sector, type, name, exchange.",
+          "file", "yf_fundamentals/profile.parquet"),
+    Table("yahoo", "yf_actions", "Yahoo dividends and splits", "Corporate actions per symbol and date: kind (dividend or split) and value.",
+          "file", "yf_fundamentals/actions.parquet"),
+    Table("yahoo", "yf_fetch_log", "Yahoo fetch log", "One row per call: symbol, statement part, time, result class (ok, empty, throttled, exception, parse), attempts and latency.",
+          "file", "yf_fundamentals/fetch_log.parquet"),
+    Table("yahoo", "yf_completeness", "Yahoo four-year completeness", "Per symbol: status (complete, short, incomplete, gap, stale, fetch_failed, pending, no_data) "
+          "and the items or years missing.", "file", "yf_fundamentals/completeness.parquet"),
+    Table("yahoo", "yf_bars", "Yahoo intraday bars", "Regular-session bars from Yahoo (default 5-minute), one folder per UTC day; Yahoo keeps about 60 days.",
+          "days", "bars/interval=5m", "ts"),
+    Table("yahoo", "fx_rates", "FX rates (Yahoo)", "Daily closes of the currency pairs, as US dollars per unit of each currency, used to convert statements into the price's currency.",
+          "file", "fx/rates.parquet"),
+    Table("indices", "index_members", "Index constituents", "Member list of each global index: code, name, market, exchange, sector and the Yahoo symbol the collectors use.",
+          "frame", "index_members"),
+    Table("indices", "index_rejects", "Rejected index members", "Symbols or codes dropped while building the universe, with the index and the reason.",
+          "frame", "index_rejects"),
     Table("fundamentals", "income_statement", "Income statement", "Revenue, net income and EBIT per fiscal year, from the Yahoo statements (reporting currency).",
           "file", "fundamentals/income_statement.parquet", "date"),
     Table("fundamentals", "balance_sheet", "Balance sheet", "Assets, liabilities, long-term debt and equity per fiscal year, from the Yahoo statements.",
@@ -87,16 +108,6 @@ CATALOG = [
           "fundamentals/ratios.parquet", "date"),
     Table("fundamentals", "pillar_metrics", "Pillar metrics", "One row per stock in its price's currency: averages, latest values, ROIC, periods used, currencies, FX rate and flags.",
           "file", "fundamentals/pillar_metrics.parquet"),
-    Table("fundamentals", "yf_fundamentals", "Yahoo statements", "Every kept statement line of the last annual reports, with the day we first and last saw "
-          "each value (a restated value is a new row).", "file", "yf_fundamentals/versions.parquet"),
-    Table("fundamentals", "yf_profile", "Yahoo profile", "Price currency, reporting currency, market cap, shares and sector per stock.", "file",
-          "yf_fundamentals/profile.parquet"),
-    Table("fundamentals", "yf_actions", "Dividends and splits", "Every dividend and split Yahoo knows, per stock and date.", "file", "yf_fundamentals/actions.parquet"),
-    Table("fundamentals", "yf_fetch_log", "Yahoo fetch log", "One row per call: stock, part, time, result class (ok, empty, throttled, exception, parse) and message.",
-          "file", "yf_fundamentals/fetch_log.parquet"),
-    Table("fundamentals", "yf_completeness", "Four-year completeness", "Per stock: complete, short, incomplete, gap, stale, failed or pending, with the missing years and items.",
-          "file", "yf_fundamentals/completeness.parquet"),
-    Table("reference", "fx_rates", "FX rates", "Daily rates from Yahoo: US dollars per unit of each currency.", "file", "fx/rates.parquet", "date"),
     Table("fundamentals", "upstox_fundamentals", "Upstox fundamentals", "Every statement line, ratio, holding and corporate action Upstox returned, "
           "with the day we first and last saw each value (a restated value is a new row).", "file", "upstox_fundamentals/versions.parquet"),
     Table("fundamentals", "upstox_fundamentals_log", "Upstox fundamentals fetch log", "One row per call: company, endpoint, time, result and error code.",
@@ -173,6 +184,12 @@ class Catalog:
                 return pd.read_csv(p) if p.exists() else pd.DataFrame()
             if t.location == "fo_selected":
                 p = self.data / "fo_universe.csv"
+                return pd.read_csv(p) if p.exists() else pd.DataFrame()
+            if t.location == "index_members":           # the build writes a '#' header line above the CSV
+                p = self.data / "universe_global.csv"
+                return pd.read_csv(p, comment="#") if p.exists() else pd.DataFrame()
+            if t.location == "index_rejects":
+                p = self.data / "index_sources" / "_rejects.csv"
                 return pd.read_csv(p) if p.exists() else pd.DataFrame()
         except Exception as exc:                       # noqa: BLE001 -- a bad CSV shows as an empty table, not a 500
             log.warning("could not read %s: %s", t.location, exc)
