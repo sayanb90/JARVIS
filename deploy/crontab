@@ -34,7 +34,7 @@ JARVIS=/home/jarvis/JARVIS
 30 11 * * 1-5  cd $JARVIS && python -m data_layer.health --after-close >> logs/health.log 2>&1
 
 # Futures and options (NSE_FO; runbook section 17): refresh the instrument master and roll the tracked
-# watchlist (data/fo_watchlist.csv: 1 future and 2 option expiries per index, all strikes) to today's nearest
+# watchlist (data/fo_watchlist.csv: 2 futures and 2 option expiries per index, all strikes) to today's nearest
 # expiries before the session opens.  The feed refuses to start if the universe file is not from today or has fewer
 # expiries than the watchlist asks for (--allow-stale-universe overrides it).
 # What is stored comes from .env, read by both the equity service and this job (production, from 2026-11-03):
