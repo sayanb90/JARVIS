@@ -24,6 +24,8 @@ def page(headers, rows) -> str:
     (iu.y_cn, "600519", "", "600519.SS"), (iu.y_cn, "000858", "", "000858.SZ"), (iu.y_cn, "300750", "", "300750.SZ"), (iu.y_cn, "12", "", None),
     (iu.y_hk, "700", "", "0700.HK"), (iu.y_hk, "SEHK: 5", "", "0005.HK"), (iu.y_hk, "09988", "", "9988.HK"),
     (iu.y_eu, "SAP", "Xetra Germany", "SAP.DE"), (iu.y_eu, "ASML", "Euronext Amsterdam", "ASML.AS"),
+    (iu.y_eu, "BP.", "London Stock Exchange", "BP.L"), (iu.y_eu, "BT.A", "London Stock Exchange", "BT-A.L"),
+    (iu.y_tw, "5274", "Gretai Securities Market Taiwan", "5274.TWO"), (iu.y_tw, "2330", "Taiwan Stock Exchange Taiwan", "2330.TW"),
     (iu.y_eu, "VOLV B", "Nasdaq Omx Nordic Sweden", "VOLV-B.ST"), (iu.y_eu, "NOVN.SW", "", "NOVN.SW"), (iu.y_eu, "XYZ", "Unknown Exchange", None),
 ])
 def test_codes_become_yahoo_symbols(fn, code, ex, expected):
@@ -103,6 +105,16 @@ def test_validate_rejects_symbols_yahoo_does_not_know_but_trusts_nothing_from_a_
     assert (rejected, unchecked) == (0, 49) and len(built.rows) == 49
 
 
+def test_validate_asks_again_in_small_batches_before_rejecting(tmp_path):
+    write_source(tmp_path, "taiwan50", [f"{2300 + i},Co {i},,," for i in range(50)])
+    built = iu.assemble(tmp_path, only=["taiwan50"])
+    flaky, gone = "2305.TW", "2310.TW"                                                      # Yahoo drops both from the big batch; only one is really gone
+    rejected, _ = iu.validate(built, batch=lambda chunk: {s: object() for s in chunk if s not in (flaky, gone)},
+                              retry=lambda chunk: {s: object() for s in chunk if s != gone})
+    assert rejected == 1 and len(built.rows) == 49 and flaky in {r["symbol"] for r in built.rows}
+    assert [r[0] for r in built.rejects] == [gone]
+
+
 def test_command_line_fetch_build_and_status(tmp_path, capsys):
     html = page(["Ticker", "Company"], [[f"{2300 + i}", f"Co {i}"] for i in range(50)])
     assert iu.main(["fetch", "--only", "taiwan50"], root=tmp_path, getter=lambda url: html) == 0
@@ -162,3 +174,68 @@ def test_the_nikkei_and_kospi_pages_found_on_the_vps_are_read():
     kospi = page(["Company", "Symbol", "GICS Sector"], [[f"Co {i}", f"{5930 + i:06d}", "Information Technology"] for i in range(200)])
     members, note = iu.fetch_index(iu.BY_KEY["kospi200"], lambda url: kospi)
     assert iu.BY_KEY["kospi200"].url.endswith("/KOSPI_200") and len(members) == 200 and members[0]["sector"] == "Information Technology"
+
+
+def holdings_file(path, n, extra=""):
+    path.write_text("iShares Fund\nFund Holdings as of,\"Nov 10, 2026\"\n\nTicker,Name,Sector,Asset Class,Market Value,Weight (%),Location,Exchange\n"
+                    + "".join(f"{2300 + i},Co {i},Tech,Equity,1,\"{50 - i * 0.5:.2f}\",Taiwan,Taiwan Stock Exchange\n" for i in range(n))
+                    + "TWD,Cash,Cash,Cash,1,9.99,-,-\n" + extra)
+    return path
+
+
+def test_the_fallback_command_keeps_the_top_n_equities_and_labels_the_file(tmp_path, capsys):
+    f = holdings_file(tmp_path / "ewt.csv", 85)
+    assert iu.main(["fallback", "taiwan50", str(f), "--top", "50", "--note", "approximation"], root=tmp_path) == 0
+    target = tmp_path / "data" / "index_fallback" / "taiwan50.csv"
+    text = target.read_text()
+    assert text.startswith("# Fallback list for taiwan50") and "Nov 10, 2026" in text.splitlines()[0] and "the 50 largest by weight" in text.splitlines()[0]
+    assert "# approximation" in text and "TWD" not in text                                  # cash rows are not members
+    rows = iu.read_source(iu.BY_KEY["taiwan50"], tmp_path)
+    assert len(rows) == 50 and rows[0]["code"] == "2300" and rows[-1]["code"] == "2349"      # the 50 heaviest, comments skipped on read
+    assert iu.main(["fallback", "taiwan50", str(f)], root=tmp_path) == 1                    # 85 members is out of range without --top
+    assert "try --top N" in capsys.readouterr().out
+    assert iu.main(["fallback", "nope", str(f)], root=tmp_path) == 2
+
+
+def test_build_uses_the_fallback_only_when_the_fetch_left_nothing_and_status_says_so(tmp_path, capsys):
+    iu.main(["fallback", "taiwan50", str(holdings_file(tmp_path / "ewt.csv", 60)), "--top", "50"], root=tmp_path)
+    built = iu.assemble(tmp_path, only=["taiwan50"])
+    assert len(built.rows) == 50 and "FALLBACK list" in built.notes[0]
+    assert iu.main(["status"], root=tmp_path) == 0 and "FALLBACK list" in capsys.readouterr().out
+    html = page(["Ticker", "Company"], [[f"{7000 + i}", f"Fetched {i}"] for i in range(50)])
+    assert iu.main(["fetch", "--only", "taiwan50"], root=tmp_path, getter=lambda url: html) == 0     # a fetch that works wins
+    built = iu.assemble(tmp_path, only=["taiwan50"])
+    assert built.rows[0]["symbol"] == "7000.TW" and "FALLBACK" not in built.notes[0]
+    assert iu.main(["fetch", "--only", "hsi"], root=tmp_path, getter=lambda url: "<html></html>") == 1
+    assert "build will use" not in capsys.readouterr().out                                     # hsi has no fallback list
+
+
+def test_a_failed_fetch_says_the_fallback_will_be_used(tmp_path, capsys):
+    iu.main(["fallback", "taiwan50", str(holdings_file(tmp_path / "ewt.csv", 60)), "--top", "50"], root=tmp_path)
+    capsys.readouterr()
+    assert iu.main(["fetch", "--only", "taiwan50"], root=tmp_path, getter=lambda url: "<html></html>") == 1
+    assert "build will use data/index_fallback/taiwan50.csv" in capsys.readouterr().out
+
+
+def test_the_lists_committed_in_the_repository_are_in_range_and_map_to_yahoo_symbols():
+    for key in ("stoxx600", "taiwan50"):
+        ix = iu.BY_KEY[key]
+        rows = iu.read_source(ix, iu.ROOT) if (iu.fallback_dir(iu.ROOT) / f"{key}.csv").exists() else []
+        assert rows and ix.expect[0] <= len({r["code"] for r in rows}) <= ix.expect[1], key
+    built = iu.assemble(None, only=["stoxx600", "taiwan50"])
+    assert iu.counts(built.rows)["TW"] == 50 and iu.counts(built.rows)["EU"] > 400 and not built.rejects
+
+
+@pytest.mark.parametrize("raw,shown", [
+    ("ASML HOLDING", "ASML Holding"), ("HSBC HOLDINGS PLC", "HSBC Holdings plc"), ("TAIWAN SEMICONDUCTOR MANUFACTURING", "Taiwan Semiconductor Manufacturing"),
+    ("DANSKE BANK A/S", "Danske Bank A/S"), ("E.SUN FINANCIAL HOLDING", "E.SUN Financial Holding"), ("LVMH MOET HENNESSY LOUIS VUITTON", "LVMH Moet Hennessy Louis Vuitton"),
+    ("CHINA STEEL CORP", "China Steel Corp"), ("Aberdeen Group", "Aberdeen Group"), ("BP", "BP"), ("", ""),
+])
+def test_names_a_provider_shouts_are_shown_in_normal_case_and_mixed_case_names_are_left_alone(raw, shown):
+    assert iu.tidy_name(raw) == shown
+
+
+def test_the_fallback_lists_in_the_repository_have_readable_names():
+    for key in ("stoxx600", "taiwan50"):
+        names = [r["name"] for r in iu.read_source(iu.BY_KEY[key], iu.ROOT)] if (iu.fallback_dir(iu.ROOT) / f"{key}.csv").exists() else []
+        assert names and sum(1 for n in names if n == n.upper() and len(n) > 6) < len(names) * 0.1, key

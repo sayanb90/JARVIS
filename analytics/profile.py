@@ -42,29 +42,38 @@ def _running_vwap(d: pd.DataFrame) -> pd.Series:
     return (pv / vol.where(vol > 0)).astype("float64")
 
 
+def _times(ts: pd.Series, tz: str | None) -> list[str]:
+    """UTC timestamps -> wall-clock strings: IST by default, or the exchange's own zone `tz`."""
+    if tz is None or tz == "Asia/Kolkata":
+        return to_ist_strings(ts)
+    t = pd.to_datetime(ts)
+    t = t.dt.tz_localize("UTC") if t.dt.tz is None else t.dt.tz_convert("UTC")
+    return t.dt.tz_convert(tz).dt.strftime("%Y-%m-%d %H:%M:%S").tolist()
+
+
 def _num(x):
     return None if x is None or (isinstance(x, float) and not math.isfinite(x)) else float(x)
 
 
-def candles_payload(df: pd.DataFrame) -> dict:
-    """Candle series for the charts.  NaN becomes null; `up` marks candles that closed at or above their open."""
+def candles_payload(df: pd.DataFrame, tz: str | None = None) -> dict:
+    """Candle series for the charts (times in `tz`, IST by default).  NaN becomes null; `up` marks candles that closed at or above their open."""
     d = _clean(df)
     if d.empty:
         return {"ts": []}
     d["vwap"] = _running_vwap(d)
-    out = {"ts": to_ist_strings(d["ts"])}
+    out = {"ts": _times(d["ts"], tz)}
     for c in ("open", "high", "low", "close", "volume", "vwap"):
         out[c] = [None if np.isnan(v) else float(v) for v in d[c].astype("float64").round(6)]
     out["up"] = (d["close"] >= d["open"]).tolist()
     return out
 
 
-def candle_summary(df: pd.DataFrame, minutes: int = 1) -> dict:
+def candle_summary(df: pd.DataFrame, minutes: int = 1, tz: str | None = None, session_minutes: int = SESSION_MINUTES) -> dict:
     d = _clean(df)
     if d.empty:
         return {}
     d["vwap"] = _running_vwap(d)
-    expected = max(SESSION_MINUTES // max(int(minutes), 1), 1)
+    expected = max(int(session_minutes) // max(int(minutes), 1), 1)
     peak = d.loc[d["volume"].idxmax()]
     return {
         "candles": int(len(d)), "expected": expected, "coverage_pct": _num(min(len(d) / expected, 1.0) * 100),
@@ -72,8 +81,8 @@ def candle_summary(df: pd.DataFrame, minutes: int = 1) -> dict:
         "return_pct": _num((d["close"].iloc[-1] / d["open"].iloc[0] - 1) * 100),
         "volume": int(d["volume"].sum()), "vwap": _num(d["vwap"].iloc[-1]),
         "up_candles": int((d["close"] >= d["open"]).sum()), "down_candles": int((d["close"] < d["open"]).sum()),
-        "peak_volume": int(peak["volume"]), "peak_time": to_ist_strings(pd.Series([peak["ts"]]))[0][11:16],
-        "first_time": to_ist_strings(d["ts"].iloc[:1])[0][11:16], "last_time": to_ist_strings(d["ts"].iloc[-1:])[0][11:16],
+        "peak_volume": int(peak["volume"]), "peak_time": _times(pd.Series([peak["ts"]]), tz)[0][11:16],
+        "first_time": _times(d["ts"].iloc[:1], tz)[0][11:16], "last_time": _times(d["ts"].iloc[-1:], tz)[0][11:16],
     }
 
 

@@ -114,8 +114,9 @@ def test_meta_lists_the_days_that_have_candles_from_either_source(client):
 
 def test_symbols_say_which_source_each_instrument_has(client):
     rows = client.get("/api/candles/symbols", params={"date": DAY}).json()
-    assert rows == [{"symbol": "A.NS", "live": True, "rest": True}, {"symbol": "B.NS", "live": False, "rest": True}]
-    assert client.get("/api/candles/symbols", params={"date": REST_ONLY_DAY}).json() == [{"symbol": "C.NS", "live": False, "rest": True}]
+    extra = {"market": "IN", "name": "", "group": "Other"}                                   # no universe file in the test lake: the market comes from the suffix
+    assert rows == [{"symbol": "A.NS", "live": True, "rest": True, **extra}, {"symbol": "B.NS", "live": False, "rest": True, **extra}]
+    assert client.get("/api/candles/symbols", params={"date": REST_ONLY_DAY}).json() == [{"symbol": "C.NS", "live": False, "rest": True, **extra}]
     assert client.get("/api/candles/symbols", params={"date": "2020-01-01"}).status_code == 404
 
 

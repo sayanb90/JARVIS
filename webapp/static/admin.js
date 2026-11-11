@@ -2,7 +2,7 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtInt = (x) => (x == null ? '–' : Math.round(x).toLocaleString('en-IN'));
-const state = { tab: 'data', catalog: [], service: null, table: null, day: null, page: 1, size: 200, symbol: '', order: 'stored',
+const state = { tab: 'data', catalog: [], service: null, vendor: '', table: null, day: null, page: 1, size: 200, symbol: '', order: 'stored',
                 qpage: 1, sql: '', subs: null, subSub: 'eq', eqFilter: '', eqPage: 1, plan: null };
 let req = 0;
 
@@ -24,7 +24,7 @@ function readHash() { return Object.fromEntries(new URLSearchParams(location.has
 function writeHash() {
   const p = { tab: state.tab };
   if (state.tab === 'data') Object.assign(p, { service: state.service || '', table: state.table || '', day: state.day || '', page: state.page,
-                                                size: state.size, symbol: state.symbol, order: state.order });
+                                                size: state.size, symbol: state.symbol, order: state.order, vendor: state.vendor });
   if (state.tab === 'subs') p.sub = state.subSub;
   history.replaceState(null, '', '#' + new URLSearchParams(p).toString());
 }
@@ -69,12 +69,13 @@ for (const t of ['data', 'query', 'subs']) $('tab-' + t).onclick = () => setTab(
 /* ================================================================ Data */
 const svc = () => state.catalog.find((s) => s.service === state.service);
 const tbl = () => (svc() ? svc().tables.find((t) => t.name === state.table) : null);
+const shown = () => (svc() ? svc().tables.filter((t) => !state.vendor || t.vendors.includes(state.vendor)) : []);       // the vendor filter narrows the tables of a service
 
 function renderServiceCards() {
   const s = svc();
-  $('svc-cards').innerHTML = s.tables.length ? s.tables.map((t) => `<button class="svc-card${t.available ? '' : ' off'}" data-t="${t.name}" aria-pressed="${t.name === state.table}">
-      <b>${esc(t.title)}</b><small>${t.available ? (t.days.length ? `${t.days.length} day${t.days.length > 1 ? 's' : ''} · latest ${t.days[0]}` : esc(t.query_name || 'derived per day')) : 'no data yet'}</small></button>`).join('')
-    : '<div class="empty" style="grid-column:1/-1"><p>No tables in this service yet. Signals and features will appear here once they are produced.</p></div>';
+  $('svc-cards').innerHTML = shown().length ? shown().map((t) => `<button class="svc-card${t.available ? '' : ' off'}" data-t="${t.name}" aria-pressed="${t.name === state.table}">
+      <b>${esc(t.title)}</b><small>${esc(t.vendor || '')}${t.vendor ? ' · ' : ''}${t.available ? (t.days.length ? `${t.days.length} day${t.days.length > 1 ? 's' : ''} · latest ${t.days[0]}` : esc(t.query_name || 'derived per day')) : 'no data yet'}</small></button>`).join('')
+    : `<div class="empty" style="grid-column:1/-1"><p>${state.vendor ? `No ${esc(state.vendor)} tables in this service.` : 'No tables in this service yet. Signals and features will appear here once they are produced.'}</p></div>`;
   $('svc-cards').querySelectorAll('.svc-card').forEach((b) => b.onclick = () => selectTable(b.dataset.t));
 }
 
@@ -82,8 +83,9 @@ function selectService(name, keepTable) {
   state.service = name;
   $('service').value = name;
   const s = svc();
-  fill($('table-name'), s.tables.map((t) => [t.name, t.title + (t.available ? '' : ' (no data)')]));
-  const pick = keepTable && s.tables.find((t) => t.name === keepTable) ? keepTable : (s.tables.find((t) => t.available) || s.tables[0] || {}).name;
+  const list = shown();
+  fill($('table-name'), list.map((t) => [t.name, t.title + (t.available ? '' : ' (no data)')]));
+  const pick = keepTable && list.find((t) => t.name === keepTable) ? keepTable : (list.find((t) => t.available) || list[0] || {}).name;
   renderServiceCards();
   if (pick) selectTable(pick, keepTable ? state.day : null, keepTable ? state.page : 1);
   else { state.table = null; renderGrid($('grid'), [], []); $('pager').innerHTML = ''; $('tbl-title').textContent = s.title; $('tbl-meta').textContent = ''; writeHash(); }
@@ -119,7 +121,7 @@ async function loadPage() {
     state.page = d.page;
     const first = (d.page - 1) * state.size + 1;
     renderGrid($('grid'), d.columns, d.rows, first);
-    $('tbl-meta').textContent = t.about;
+    $('tbl-meta').textContent = (t.vendor ? `Vendor: ${t.vendor} · ` : '') + t.about;
     const info = d.total ? `Rows ${fmtInt(first)}–${fmtInt(first + d.rows.length - 1)} of ${fmtInt(d.total)} · ${d.elapsed_ms} ms` : 'No rows';
     renderPager($('pager'), d.page, d.total ? d.pages : 0, info, (p) => { state.page = p; loadPage(); $('grid').parentElement.scrollTop = 0; });
     writeHash();
@@ -128,6 +130,7 @@ async function loadPage() {
 }
 
 $('service').onchange = (e) => selectService(e.target.value);
+$('vendor').onchange = (e) => { state.vendor = e.target.value; selectService(state.service, state.table); };
 $('table-name').onchange = (e) => selectTable(e.target.value);
 $('day').onchange = (e) => {
   const days = state.days || [];
@@ -295,6 +298,9 @@ async function init() {
   const h = readHash();
   try { state.catalog = await api('/admin/api/catalog'); } catch (e) { fail(e); return; }
   fill($('service'), state.catalog.map((s) => [s.service, s.title]));
+  const vendors = [...new Set(state.catalog.flatMap((s) => s.tables.flatMap((t) => t.vendors)))].sort();
+  fill($('vendor'), [['', 'All vendors'], ...vendors.map((v) => [v, v])]);
+  if (vendors.includes(h.vendor)) { state.vendor = h.vendor; $('vendor').value = h.vendor; }
   if (['50', '100', '200', '500'].includes(h.size)) { state.size = +h.size; $('size').value = h.size; }
   if (['stored', 'asc', 'desc'].includes(h.order)) { state.order = h.order; $('order').value = h.order; }
   if (h.symbol) { state.symbol = h.symbol.toUpperCase(); $('symbol').value = state.symbol; }

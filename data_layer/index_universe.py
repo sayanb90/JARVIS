@@ -3,6 +3,7 @@ Build the stock universe for the Yahoo collectors from index constituents (US, U
 
   python -m data_layer.index_universe fetch  [--only sp500,hsi]    # download each index's list from the web into data/index_sources/<key>.csv
   python -m data_layer.index_universe import KEY FILE.csv         # a downloaded member list -> data/index_sources/<key>.csv
+  python -m data_layer.index_universe fallback KEY FILE.csv [--top N] # a downloaded member list -> data/index_fallback/<key>.csv (tracked in git)
   python -m data_layer.index_universe build  [--validate]          # source files -> data/universe_global.csv (+ data/index_sources/_rejects.csv)
   python -m data_layer.index_universe status
 
@@ -14,6 +15,9 @@ How it works, and where it can go wrong:
     not under our control, so every index has an expected member count: a list outside it is rejected, never half-written.
   * An index whose page cannot be read is supplied as a file instead: data/index_sources/<key>.csv with the columns
     code, name [, exchange, country, sector, yahoo].  A `yahoo` value wins over the symbol worked out from `code`.
+  * Fallback lists: data/index_fallback/<key>.csv is tracked in git, in the same format.  `build` uses it only when the fetched
+    data/index_sources/<key>.csv is missing (the web fetch failed), so a fetch that works always wins.  Make or refresh one with the
+    `fallback` command from any downloaded holdings or member list; `status` shows which index runs on its fallback and how old it is.
   * `build` turns codes into Yahoo symbols (7203 -> 7203.T, 005930 -> 005930.KS, 600519 -> 600519.SS, 700 -> 0700.HK ...), drops
     duplicates across indices, and with --validate asks Yahoo for five days of daily bars: symbols with no data are rejected and listed.
   * The result is data/universe_global.csv (git-ignored).  universe_files.read_universe uses it for every market but India.
@@ -39,6 +43,7 @@ UA = {"User-Agent": "Mozilla/5.0 (compatible; JARVIS-research/1.0)"}
 HEADER = ["symbol", "name", "market", "exchange", "isin", "cusip", "ric", "bbg_code", "sector", "currency"]
 CURRENCY = {"US": "USD", "UK": "GBp", "JP": "JPY", "KR": "KRW", "TW": "TWD", "SG": "SGD", "CN": "CNY", "HK": "HKD"}   # EU is mixed: left blank
 SOURCE_COLUMNS = ["code", "name", "exchange", "country", "sector", "yahoo"]
+FALLBACK_STALE_DAYS = 180                                 # status warns when a fallback list is older than this
 
 
 # ---------------------------------------------------------------------------------------------- code -> Yahoo symbol
@@ -70,7 +75,9 @@ def y_kr(code, ex=""):
 
 def y_tw(code, ex=""):
     d = _digits(code)
-    return f"{d}.TW" if len(d) == 4 else None
+    if len(d) != 4:
+        return None
+    return f"{d}.TWO" if "gretai" in ex.lower() else f"{d}.TW"           # the OTC market (Taipei Exchange, "Gretai") has its own suffix
 
 
 def y_sg(code, ex=""):
@@ -103,12 +110,13 @@ def y_eu(code, ex=""):
     c = code.strip().upper().replace(" ", "-").replace("/", "-")
     if not c:
         return None
-    if re.search(r"\.[A-Z]{1,3}$", c):                    # already a Yahoo-style symbol
+    m = re.search(r"(\.[A-Z]{1,3})$", c)
+    if m and m.group(1) in {suffix for _, suffix in EU_SUFFIX}:       # already a Yahoo-style symbol (BT.A is a share class, not a suffix)
         return c
     low = ex.lower()
     for key, suffix in EU_SUFFIX:
         if key in low:
-            return c.replace(".", "-") + suffix
+            return c.rstrip(".").replace(".", "-") + suffix                   # London tickers such as "BP." end in a dot
     return None
 
 
@@ -274,7 +282,7 @@ def members_from_csv(text: str) -> list[dict]:
             continue
         name = next((rec[c] for c in ("name", "company name", "company", "security", "constituent") if rec.get(c)), "")
         out.append({"code": code, "name": name, "exchange": rec.get("exchange", ""), "country": rec.get("location") or rec.get("country", ""),
-                    "sector": rec.get("sector", ""), "yahoo": rec.get("yahoo", "")})
+                    "sector": rec.get("sector", ""), "yahoo": rec.get("yahoo", ""), "weight": _number(rec.get("weight (%)") or rec.get("weight") or "")})
     return out
 
 
@@ -329,12 +337,101 @@ def write_source(ix: Index, members: list[dict], root: Path | None = None) -> Pa
     return path
 
 
+def fallback_dir(root: Path | None = None) -> Path:
+    return (root or ROOT) / "data" / "index_fallback"
+
+
+def source_path(ix: Index, root: Path | None = None) -> tuple[Optional[Path], str]:
+    """(path, "fetched" | "fallback" | "none"): the fetched list wins; the tracked fallback list is used only when it is missing."""
+    fetched = sources_dir(root) / f"{ix.key}.csv"
+    if fetched.exists():
+        return fetched, "fetched"
+    fb = fallback_dir(root) / f"{ix.key}.csv"
+    return (fb, "fallback") if fb.exists() else (None, "none")
+
+
 def read_source(ix: Index, root: Path | None = None) -> list[dict]:
-    path = sources_dir(root) / f"{ix.key}.csv"
-    if not path.exists():
+    path, _ = source_path(ix, root)
+    if path is None:
         return []
-    with path.open(newline="", encoding="utf-8-sig") as f:
-        return [{k.strip().lower(): (v or "").strip() for k, v in rec.items() if k} for rec in csv.DictReader(f)]
+    with path.open(newline="", encoding="utf-8-sig") as f:                  # leading "# ..." lines are comments
+        return [{k.strip().lower(): (v or "").strip() for k, v in rec.items() if k}
+                for rec in csv.DictReader(l for l in f if not l.startswith("#"))]
+
+
+def fallback_comment(path: Path) -> str:
+    """The first comment line of a fallback list (what it was made from and when)."""
+    with path.open(encoding="utf-8-sig") as f:
+        first = f.readline().strip()
+    return first.lstrip("# ").strip() if first.startswith("#") else ""
+
+
+LEGAL = {"PLC": "plc", "INC": "Inc", "LTD": "Ltd", "CO": "Co", "CORP": "Corp", "OYJ": "Oyj", "SPA": "SpA", "KGAA": "KGaA", "LLC": "LLC", "LP": "LP"}
+SMALL_WORDS = {"AND", "OF", "THE", "DE", "DI", "LA", "ET", "FOR", "IN", "DEL", "VAN", "VON"}
+ACRONYMS = {"ASML", "BASF", "AXA", "ABB", "SKF", "KBC", "DSM", "EDP", "OMV", "TUI", "ING", "UBS", "SGS", "BAE", "BMW", "SAP"}
+WORDS = {"BANK", "CORP", "FUND", "GOLD", "GAS", "OIL", "LAND", "HOME", "CARE", "LINE", "PORT", "RAIL", "AUTO", "TECH", "LIFE", "BIO", "WORK", "WEST", "EAST",
+         "NORD", "SOUTH", "NORTH", "FOOD", "FIRST", "MEGA", "NEW", "OLD", "BLUE", "STAR", "SUN", "PEAK", "CITY", "REAL", "FAST", "SAFE", "TRUST", "CAPITAL",
+         "ENERGY", "GROUP", "STEEL", "POWER", "WATER", "PAPER", "METAL", "RETAIL", "HOTEL", "MARINE", "SHIP", "AIR", "SEA", "RE", "RIO", "ONE", "SKY", "NET", "TOP", "KEY"}
+
+
+def tidy_name(name: str) -> str:
+    """Display case for a name a provider shouts in capitals ("ASML HOLDING" -> "ASML Holding", "HSBC HOLDINGS PLC" -> "HSBC Holdings plc").  Short
+    tokens that look like tickers stay upper case; names that are not all capitals are returned as given."""
+    n = " ".join((name or "").split())
+    if not n or n != n.upper() or not any(c.isalpha() for c in n):
+        return n
+    out = []
+    for i, tok in enumerate(n.split(" ")):
+        core = tok.strip(".,()&-")
+        if core in LEGAL:
+            out.append(tok.replace(core, LEGAL[core]))
+        elif core in SMALL_WORDS and i > 0:
+            out.append(tok.lower())
+        elif "/" in core or "." in core.strip(".") or core in ACRONYMS or (core.isalpha() and core not in WORDS and (len(core) <= 3 or not set(core) & set("AEIOUY"))):
+            out.append(tok)                                          # A/S, E.SUN, SAP, BMW, UBS, HSBC, LVMH, ASML ... (best effort: a four-letter word with vowels is a word)
+        else:
+            out.append("-".join(w.capitalize() for w in tok.split("-")) if "-" in tok else tok.capitalize())
+    return " ".join(out)
+
+
+def _number(text: str) -> float:
+    try:
+        return float(re.sub(r"[^0-9.\-]", "", text.replace(",", "").replace("\u2019", "").replace("'", "")) or "nan")
+    except ValueError:
+        return float("nan")
+
+
+def make_fallback(ix: Index, path: Path, top: Optional[int] = None, note: str = "", root: Path | None = None) -> tuple[bool, str]:
+    """Write data/index_fallback/<key>.csv from a downloaded member list.  With `top`, only the N largest holdings by weight are kept (for
+    an index that is only available as a broader fund).  The member count must be in the index's expected range."""
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        return False, f"cannot read {path}: {exc}"
+    members = members_from_csv(text)
+    if top:
+        members = sorted(members, key=lambda m: -(m.get("weight") if m.get("weight") == m.get("weight") else -1))[:top]
+    seen, rows = set(), []
+    for m in members:
+        if m["code"] not in seen:
+            seen.add(m["code"])
+            rows.append({**m, "name": tidy_name(m.get("name", ""))})
+    if not ix.expect[0] <= len(rows) <= ix.expect[1]:
+        return False, f"{len(rows)} members found, expected {ix.expect[0]} to {ix.expect[1]}: no fallback written" + ("" if top else " (try --top N)")
+    asof = next((re.sub(r'^[^,]*,', "", l).strip().strip('"') for l in text.splitlines()[:6] if "as of" in l.lower()), "")
+    out = fallback_dir(root)
+    out.mkdir(parents=True, exist_ok=True)
+    target = out / f"{ix.key}.csv"
+    with target.open("w", newline="", encoding="utf-8") as f:
+        f.write(f"# Fallback list for {ix.key} ({ix.title}), made {datetime.now():%Y-%m-%d} from {Path(path).name}" + (f", holdings as of {asof}" if asof else "")
+                + (f", the {top} largest by weight" if top else "") + "\n")
+        f.write(f"# Used by `index_universe build` only when the web fetch left no data/index_sources/{ix.key}.csv.  Refresh: index_universe fallback {ix.key} FILE\n")
+        if note:
+            f.write(f"# {note}\n")
+        w = csv.DictWriter(f, SOURCE_COLUMNS)
+        w.writeheader()
+        w.writerows({k: m.get(k, "") for k in SOURCE_COLUMNS} for m in rows)
+    return True, f"{len(rows)} members -> {target}"
 
 
 # ---------------------------------------------------------------------------------------------- build
@@ -352,9 +449,10 @@ def assemble(root: Path | None = None, only: list[str] | None = None) -> Built:
         if only and ix.key not in only:
             continue
         members = read_source(ix, root)
+        kind = source_path(ix, root)[1]
         n = len({m.get("code", "") for m in members})
         if not members:
-            out.notes.append(f"{ix.key:<10} no source file (run fetch, or supply data/index_sources/{ix.key}.csv)")
+            out.notes.append(f"{ix.key:<10} no source file (run fetch, or supply data/index_sources/{ix.key}.csv or data/index_fallback/{ix.key}.csv)")
             out.problems += 1
             continue
         if not ix.expect[0] <= n <= ix.expect[1]:
@@ -375,21 +473,24 @@ def assemble(root: Path | None = None, only: list[str] | None = None) -> Built:
             out.rows.append({"symbol": sym, "name": m.get("name", ""), "market": market, "exchange": m.get("exchange", ""), "isin": "",
                              "cusip": "", "ric": "", "bbg_code": "", "sector": m.get("sector", ""), "currency": CURRENCY.get(market, "")})
             added += 1
-        out.notes.append(f"{ix.key:<10} {n} members -> {added} symbols" + (f", {dup} already listed under another index" if dup else ""))
+        out.notes.append(f"{ix.key:<10} {n} members -> {added} symbols" + (f", {dup} already listed under another index" if dup else "")
+                         + (" [FALLBACK list: the web fetch left no file]" if kind == "fallback" else ""))
     order = {m: i for i, m in enumerate(MARKETS)}
     out.rows.sort(key=lambda r: (order.get(r["market"], 99), r["symbol"]))
     return out
 
 
-def validate(built: Built, batch: Callable | None = None) -> tuple[int, int]:
+def validate(built: Built, batch: Callable | None = None, retry: Callable | None = None) -> tuple[int, int]:
     """Ask Yahoo for five daily bars per symbol; a symbol with none is moved to the rejects.  A chunk with no answer at all (Yahoo down
     or blocking us) proves nothing, so its symbols stay.  Returns (rejected, unchecked)."""
     if batch is None:
         from .yf_client import CHUNK_SIZE, _batch_download
         size = CHUNK_SIZE
         batch = lambda chunk: _batch_download(chunk, period="5d")          # noqa: E731
+        retry = retry or (lambda chunk: _batch_download(chunk, period="1mo"))        # a halted stock has no bars in 5 days but some in a month
     else:
         size = 100
+        retry = retry or batch
     keep, rejected, unchecked = [], 0, 0
     syms = [r["symbol"] for r in built.rows]
     bad: set[str] = set()
@@ -403,6 +504,13 @@ def validate(built: Built, batch: Callable | None = None) -> tuple[int, int]:
             unchecked += len(chunk)
             continue
         bad |= set(chunk) - set(got)
+    todo = sorted(bad)
+    for i in range(0, len(todo), 10):                      # Yahoo drops symbols from a big batch now and then: ask again in small ones before rejecting
+        chunk = todo[i:i + 10]
+        try:
+            bad -= set(retry(chunk) or {})
+        except Exception:                                  # noqa: BLE001
+            pass
     for r in built.rows:
         if r["symbol"] in bad:
             built.rejects.append((r["symbol"], r["market"], "Yahoo has no daily bars for this symbol"))
@@ -448,6 +556,11 @@ def main(argv: list[str] | None = None, root: Path | None = None, getter: Callab
     i = sub.add_parser("import", help="turn a downloaded member list (CSV) into data/index_sources/<key>.csv")
     i.add_argument("key", help="index key: " + ", ".join(BY_KEY))
     i.add_argument("file", type=Path, help="a CSV with a ticker, symbol or code column and a name column (iShares holdings files work)")
+    fb = sub.add_parser("fallback", help="a downloaded member list -> data/index_fallback/<key>.csv, used when the web fetch fails")
+    fb.add_argument("key", help="index key: " + ", ".join(BY_KEY))
+    fb.add_argument("file", type=Path, help="a holdings or member CSV (iShares holdings files work)")
+    fb.add_argument("--top", type=int, default=None, help="keep only the N largest holdings by weight")
+    fb.add_argument("--note", default="", help="a comment line stored in the file, e.g. how it differs from the official list")
     b = sub.add_parser("build", help="source files -> data/universe_global.csv")
     b.add_argument("--only", default=None)
     b.add_argument("--validate", action="store_true", help="drop symbols Yahoo has no daily bars for")
@@ -471,7 +584,8 @@ def main(argv: list[str] | None = None, root: Path | None = None, getter: Callab
                 print(f"{ix.key:<10} OK     {note} -> {write_source(ix, members, root)}")
             else:
                 failed += 1
-                print(f"{ix.key:<10} FAILED {note}")
+                has_fb = (fallback_dir(root) / f"{ix.key}.csv").exists()
+                print(f"{ix.key:<10} FAILED {note}" + ("  (build will use data/index_fallback/%s.csv)" % ix.key if has_fb else ""))
         return 1 if failed else 0
 
     if a.cmd == "import":
@@ -482,12 +596,23 @@ def main(argv: list[str] | None = None, root: Path | None = None, getter: Callab
         print(("OK     " if ok else "FAILED ") + msg)
         return 0 if ok else 1
 
+    if a.cmd == "fallback":
+        if a.key not in BY_KEY:
+            print("unknown index key; choose from " + ", ".join(BY_KEY))
+            return 2
+        ok, msg = make_fallback(BY_KEY[a.key], a.file, a.top, a.note, root)
+        print(("OK     " if ok else "FAILED ") + msg)
+        return 0 if ok else 1
+
     if a.cmd == "status":
         for ix in INDICES:
-            p = sources_dir(root) / f"{ix.key}.csv"
+            p, kind = source_path(ix, root)
             n = len(read_source(ix, root))
-            age = f"{(datetime.now() - datetime.fromtimestamp(p.stat().st_mtime)).days} days old" if p.exists() else "missing"
-            ok = "ok" if ix.expect[0] <= n <= ix.expect[1] else "OUT OF RANGE" if p.exists() else ""
+            days = (datetime.now() - datetime.fromtimestamp(p.stat().st_mtime)).days if p else 0
+            age = "missing" if p is None else f"fetched {days} days ago" if kind == "fetched" else f"FALLBACK list ({fallback_comment(p)[:70]})"
+            ok = "ok" if ix.expect[0] <= n <= ix.expect[1] else "OUT OF RANGE" if p else ""
+            if kind == "fallback" and days > FALLBACK_STALE_DAYS:
+                ok += f" (list is {days} days old: refresh it)"
             print(f"{ix.key:<10} {ix.market}  {n:>4} members (expect {ix.expect[0]}-{ix.expect[1]})  {age}  {ok}")
         g = universe_files._global_rows() if root == ROOT else []
         print("universe_global.csv:", counts(g) or "not built")

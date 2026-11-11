@@ -5,6 +5,10 @@ const $ = (id) => document.getElementById(id);
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const fmt = (x, d = 2) => (x == null || Number.isNaN(x) ? '–' : Number(x).toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d }));
 const fmtInt = (x) => (x == null || Number.isNaN(x) ? '–' : Math.round(x).toLocaleString('en-IN'));
+const CURRENCY_NAME = { GBp: 'GBp (pence)' };
+const shM = (x) => (x == null ? '–' : Math.abs(x) >= 1e5 ? (x / 1e6).toLocaleString('en-US', { maximumFractionDigits: 2 }) + ' M' : fmtInt(x));           // shares in millions ...
+const shL = (x) => (x == null || Math.abs(x) < 1e5 ? '' : (x / 1e5).toLocaleString('en-IN', { maximumFractionDigits: 2 }) + ' L');                        // ... and in lakhs
+const shBoth = (x) => (shL(x) ? `${shM(x)} (${shL(x)})` : shM(x));
 const fmtBig = (x) => {                           // Indian lakh / crore, as traders read them
   if (x == null) return '–';
   const a = Math.abs(x);
@@ -29,7 +33,7 @@ const state = {
   meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary', candles: 'chart', data: 'coverage', history: 'chart' },
   hx: { instruments: null, symbol: null, tf: '1d', span: 365, type: 'candle', data: null, vol: { market: '', date: '', sort: 'volume', n: 20 } },
   dt: null, dtMarkets: null, dtRange: 'ohlc',
-  cSymbol: null, cMinutes: 1, cBins: 40, cSource: 'auto', cData: null,
+  cSymbol: null, cMarket: null, cList: [], cMinutes: 1, cBins: 40, cSource: 'auto', cData: null,
   symbol: null, width: 1, volwin: 300, data: null,
   overview: [], sort: ['volume', -1], heatN: 20, heatMetric: 'realised_vol_pct',
   underlying: null, expiry: null, foData: null, foContract: null, foContractData: null, greeksData: null, range: 10, focus: 'active',
@@ -248,7 +252,7 @@ async function refreshEquity() {
     if (id !== reqId) return;
     state.data = d;
     $('eq-title').textContent = state.symbol.replace(/\.NS$/, '');
-    $('eq-sub').textContent = `NSE · ${niceDate(state.day)} · ${precisionText(d.width)}`;
+    $('eq-sub').textContent = `NSE · ${precisionText(d.width)}`;
     renderKpis('cards', equityKpis(d.summary));
     renderSeries(d, EQ);
     setStatus(`${state.symbol} · ${state.day} · ${countText(d.series.ts.length, d.width)} · times in IST`);
@@ -264,7 +268,7 @@ function equityKpis(s) {
   return [
     ['Last', fmt(s.close), `${signed(s.return_pct, (x) => fmt(x) + '%')} on the open`],
     ['Day high', fmt(s.high), `low ${fmt(s.low)} · open ${fmt(s.open)}`],
-    ['Volume', fmtBig(s.volume), `VWAP ${fmt(s.vwap)}`],
+    ['Volume', shM(s.volume), [shL(s.volume), `VWAP ${fmt(s.vwap)}`].filter(Boolean).join(' · ')],
     ['Spread', fmt(s.median_spread_bps, 2) + ' bps', `mean ${fmt(s.avg_spread_bps, 2)} bps`],
     ['Realised vol', fmt(s.realised_vol_pct, 1) + '%', 'annualised'],
     [state.width === 0 ? 'Ticks' : 'Bars', fmtInt(s.bars), `book on ${fmt(s.book_coverage_pct, 0)}%`],
@@ -398,7 +402,7 @@ async function loadOverview() {
 
 function renderOverview() {
   const rows = state.overview, T = theme();
-  $('mk-sub').textContent = `NSE · ${niceDate(state.day)} · ${rows.length} instruments`;
+  $('mk-sub').textContent = `NSE · ${rows.length} instruments`;
   const tot = rows.reduce((a, r) => a + (r.turnover || 0), 0);
   const ups = rows.filter((r) => r.return_pct > 0).length;
   const vols = rows.map((r) => r.realised_vol_pct).filter((v) => v != null).sort((a, b) => a - b);
@@ -494,7 +498,7 @@ async function loadFoUnderlyings() {
   if (!meta.underlyings.length) {
     fillSelect($('underlying'), []); fillSelect($('expiry'), []);
     state.foData = null; $('fo-empty').hidden = false; $('fo-body').hidden = true;
-    $('fo-title').textContent = 'Derivatives'; $('fo-sub').textContent = niceDate(state.day);
+    $('fo-title').textContent = 'Derivatives'; $('fo-sub').textContent = 'NSE';
     setStatus('No futures or options collected on ' + state.day); return;
   }
   fillSelect($('underlying'), meta.underlyings.map((u) => [u, u]),
@@ -534,7 +538,7 @@ function renderFo(d) {
   $('fo-empty').hidden = !!has; $('fo-body').hidden = !has;
   if (!has) return;
   $('fo-title').textContent = d.underlying;
-  $('fo-sub').textContent = `NSE derivatives · ${niceDate(state.day)}${d.lot_size ? ' · lot ' + fmtInt(d.lot_size) : ''}`;
+  $('fo-sub').textContent = `NSE${d.lot_size ? ' · lot size ' + fmtInt(d.lot_size) : ''}`;
   const fut = d.futures[0];
   const mp = d.chain.length ? maxPain(d.chain) : null;
   renderKpis('fo-cards', [
@@ -731,7 +735,7 @@ async function loadGreeks() {
   if (!state.day) return;
   if (!sym || !OPTION_RE.test(sym)) {
     clearGreeks(); $('fo-greeks-meta').textContent = '';
-    $('fo-greeks-note').textContent = 'Greeks belong to options. Pick a call or put above, or click one in the option chain (this underlying has no options collected on this day).'; return;
+    $('fo-greeks-note').textContent = 'Greeks apply to options: pick a call or put, or click one in the option chain.'; return;
   }
   const id = ++gkReq;
   setStatus('Loading Greeks for ' + sym + '…', 'busy');
@@ -742,15 +746,15 @@ async function loadGreeks() {
     $('fo-greeks-meta').textContent = FO_TYPE(sym, state.foData).label + ` · ${precisionText(d.width)}`;
     if (!d.available || !d.series.ts || !d.series.ts.length) {
       clearGreeks();
-      $('fo-greeks-note').textContent = 'No Greeks were stored for this option on this day. They are collected from the day the feed first ran with Greeks storage on (JARVIS_GREEKS), so earlier days have none.';
+      $('fo-greeks-note').textContent = 'No Greeks stored for this option on this day.';
       setStatus(`${sym} · ${state.day} · no Greeks stored`); return;
     }
     const comp = d.computed || [];
     $('fo-greeks-note').textContent = comp.length
-      ? `Values are the last reading in each bar. IV, delta and gamma are as delivered by the exchange feed; ${comp.join(', ')} ${comp.length > 1 ? 'are' : 'is'} computed here from IV and the underlying future's price (Black-Scholes, expiry 15:30 IST).`
+      ? `Last reading in each bar. ${comp.join(', ')} ${comp.length > 1 ? 'are' : 'is'} computed from IV and the underlying future (Black-Scholes); the rest come from the feed.`
       : (['theta', 'vega', 'rho'].every((k) => d.series[k].every((v) => v == null))
-        ? 'IV, delta and gamma are as delivered by the exchange feed. Theta, vega and rho were not stored for this day and the underlying future has no bars to compute them from.'
-        : 'Values are the last reading in each bar, as delivered by the exchange feed (not recomputed here).');
+        ? 'IV, delta and gamma from the feed. Theta, vega and rho are not available for this day.'
+        : 'Last reading in each bar, as delivered by the feed.');
     renderGreeks(d);
     setStatus(`${sym} · ${state.day} · ${countText(d.series.ts.length, d.width)} · times in IST`);
   } catch (e) { if (id === gkReq) fail(e); }
@@ -820,26 +824,31 @@ setInterval(() => {                                        // one timer; only ca
 async function loadCandleSymbols() {
   setStatus('Loading instruments…', 'busy');
   const syms = await api('/api/candles/symbols', { date: state.day });
-  const tag = (s) => (s.live && s.rest ? '' : s.live ? ' · live feed only' : ' · REST only');
-  fillSelect($('cd-symbol'), syms.map((s) => [s.symbol, s.symbol.replace(/\.NS$/, '') + tag(s)]));
-  if (!syms.find((s) => s.symbol === state.cSymbol)) state.cSymbol = syms[0].symbol;
-  $('cd-symbol').value = state.cSymbol;
+  state.cList = syms;
+  $('cd-list').innerHTML = searchOptions(syms);
+  if (!syms.find((x) => x.symbol === state.cSymbol)) {                                // keep the market the viewer was in, else India, else the first
+    state.cSymbol = (syms.find((x) => x.market === state.cMarket) || syms.find((x) => x.market === 'IN') || syms[0]).symbol;
+  }
+  state.cMarket = syncPickers(CD_PICK, syms, state.cSymbol).market;
   await refreshCandles();
 }
+function pickCd(sym) { state.cSymbol = sym; state.cMarket = syncPickers(CD_PICK, state.cList, sym).market; refreshCandles(); }
 
 async function refreshCandles() {
   const id = ++cdReq;
   writeHash();
   setStatus('Loading ' + state.cSymbol + '…', 'busy');
+  $('cd-source-field').hidden = state.cMarket !== 'IN';                               // only India has both a live feed and REST candles
   try {
-    const d = await api('/api/candles', { date: state.day, symbol: state.cSymbol, minutes: state.cMinutes, bins: state.cBins, source: state.cSource });
+    const d = await api('/api/candles', { date: state.day, symbol: state.cSymbol, minutes: state.cMinutes, bins: state.cBins, source: state.cMarket === 'IN' ? state.cSource : 'auto' });
     if (id !== cdReq) return;
     state.cData = d;
-    $('cd-title').textContent = state.cSymbol.replace(/\.NS$/, '');
-    $('cd-sub').textContent = `NSE · ${niceDate(state.day)} · ${d.minutes === 60 ? '1-hour' : d.minutes + '-minute'} candles · from the ${SOURCE_LABEL[d.source]}`;
-    renderKpis('cd-cards', candleKpis(d.summary, d.profile));
+    const ex = d.exchange, ticker = d.symbol.replace(/\.NS$/, '');
+    $('cd-title').textContent = d.name ? `${d.name} (${ticker})` : ticker;
+    $('cd-sub').textContent = `${ex.exchange} · ${CURRENCY_NAME[ex.currency] || ex.currency} · ${ex.tz_label}`;
+    renderKpis('cd-cards', candleKpis(d.summary, d.profile, ex));
     renderCandles(d);
-    setStatus(`${state.cSymbol} · ${state.day} · ${fmtInt(d.summary.candles)} of ${fmtInt(d.summary.expected)} candles · times in IST`);
+    setStatus(`${ticker} · ${fmtInt(d.summary.candles)} candles · times in ${ex.tz_label}`);
   } catch (e) {
     if (id !== cdReq) return;
     state.cData = null; $('cd-cards').innerHTML = '';                       // never leave the previous instrument's charts under an error
@@ -849,21 +858,25 @@ async function refreshCandles() {
   }
 }
 
-function candleKpis(S, P) {
-  const va = P && P.val != null ? `value area ${fmt(P.val)}–${fmt(P.vah)}` : '';
+function candleKpis(S, P, ex) {
+  const c = ex.currency, has = P && P.poc != null;
   return [
-    ['Last', fmt(S.close), `${signed(S.return_pct, (x) => fmt(x) + '%')} on the open`],
-    ['Day high', fmt(S.high), `low ${fmt(S.low)} · open ${fmt(S.open)}`],
-    ['Volume', fmtBig(S.volume), `VWAP ${fmt(S.vwap)}`],
-    ['Point of control', P && P.poc != null ? fmt(P.poc) : '–', va],
-    ['Candles', `${fmtInt(S.candles)} of ${fmtInt(S.expected)}`, `${fmt(S.coverage_pct, 0)}% · ${S.first_time}–${S.last_time}`],
+    ['Last price', `${fmt(S.close)} ${c}`, `${signed(S.return_pct, (x) => fmt(x) + '%')} on the open`],
+    ['Day high', `${fmt(S.high)} ${c}`, `low ${fmt(S.low)} · open ${fmt(S.open)}`],
+    ['Volume', shM(S.volume), shL(S.volume) ? `${shL(S.volume)} shares` : 'shares'],
+    ['Most traded price', has ? `${fmt(P.poc)} ${c}` : '–', has ? `value area ${fmt(P.val)}–${fmt(P.vah)}` : ''],
+    ['Candles', fmtInt(S.candles), `${S.first_time}–${S.last_time} ${ex.tz_label}`],
     ['Up / down', `${fmtInt(S.up_candles)} / ${fmtInt(S.down_candles)}`, `peak volume at ${S.peak_time}`],
   ];
 }
 
 function renderCandles(d) {
   const s = d.series, P = d.profile || {}, S = d.summary, T = theme(), t = s.ts, hasP = !!(P.prices && P.prices.length);
-  const day = t[0].slice(0, 10), range = [`${day} 09:10`, `${day} 15:35`];       // the whole session, so a gap in the capture shows as a gap
+  const ex = d.exchange, cur = ex.currency, day = t[0].slice(0, 10);
+  const hm = (v, add) => { const [h, m] = v.split(':').map(Number), x = h * 60 + m + add; return `${String(Math.floor(x / 60)).padStart(2, '0')}:${String(x % 60).padStart(2, '0')}`; };
+  const range = [`${day} ${hm(ex.open, -5)}`, `${day} ${hm(ex.close, 5)}`];        // this exchange's session in its own time, so a gap in the capture shows as a gap
+  const breaks = ex.lunch ? [{ pattern: 'hour', bounds: ex.lunch.map((v) => { const [h, m] = v.split(':').map(Number); return h + m / 60; }) }] : [];
+  $('cd-price-hint').textContent = `${ex.tz_label} · ${cur}`;
   const pocAt = hasP ? P.volume.indexOf(Math.max(...P.volume)) : -1;
   const hline = (y, color, dash, w = 1) => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: y, y1: y, line: { color, width: w, dash } });
   const levelShapes = hasP ? [
@@ -883,9 +896,9 @@ function renderCandles(d) {
     }
     const layout = baseLayout({
       hovermode: 'closest', shapes: levelShapes,
-      xaxis: timeAxis({ domain: [0, hasP ? 0.8 : 1], range, rangeslider: { visible: false }, hoverformat: '%H:%M' }),
+      xaxis: timeAxis({ domain: [0, hasP ? 0.8 : 1], range, rangebreaks: breaks, rangeslider: { visible: false }, hoverformat: '%H:%M' }),
       xaxis2: { domain: [0.82, 1], anchor: 'y', showgrid: false, showticklabels: false, zeroline: false, showline: false, rangemode: 'tozero' },
-      yaxis: valAxis({ tickformat: ',.2f', title: phone() ? '' : { text: '₹', font: { size: 11 } } }),
+      yaxis: valAxis({ tickformat: ',.2f', title: phone() ? '' : { text: cur, font: { size: 11 } } }),
     });
     plot('cd-price', tr, layout, lg);
   }
@@ -894,7 +907,7 @@ function renderCandles(d) {
     const w = d.minutes * 60000 * 0.85;
     plot('cd-volume', [{ x: t, y: s.volume, type: 'bar', width: w, marker: { color: s.up.map((u) => (u ? T.up : T.down)), opacity: 0.75 },
                          hovertemplate: '%{x|%H:%M} · %{y:,.0f}<extra></extra>' }],
-      baseLayout({ bargap: 0, xaxis: timeAxis({ range, hoverformat: '%H:%M' }), yaxis: valAxis({ tickformat: '.2s', rangemode: 'tozero' }) }),
+      baseLayout({ bargap: 0, xaxis: timeAxis({ range, rangebreaks: breaks, hoverformat: '%H:%M' }), yaxis: valAxis({ tickformat: '.2s', rangemode: 'tozero' }) }),
       [{ name: 'Volume', color: T.acc, kind: 'bar', traces: [0] }]);
     syncGroup('cd', ['cd-price', 'cd-volume']);
   }
@@ -915,15 +928,15 @@ function renderCandles(d) {
 
   // key levels against the last price
   const last = S.close;
-  const rows = [['Day high', S.high], ['Value area high', P.vah], ['VWAP', S.vwap], ['Point of control', P.poc], ['Value area low', P.val], ['Day low', S.low]]
+  const rows = [['Day high', S.high], ['Value area high', P.vah], ['VWAP', S.vwap], ['Most traded price', P.poc], ['Value area low', P.val], ['Day low', S.low]]
     .filter(([, v]) => v != null).sort((a, b) => b[1] - a[1]);
-  $('cd-levels').innerHTML = '<thead><tr><th>Level</th><th class="num">Price</th><th class="num">vs last</th></tr></thead><tbody>' +
+  $('cd-levels').innerHTML = `<thead><tr><th>Level</th><th class="num">Price (${cur})</th><th class="num">vs last</th></tr></thead><tbody>` +
     rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${fmt(v)}</td><td class="num">${signed((v / last - 1) * 100, (x) => fmt(x) + '%')}</td></tr>`).join('') +
     `<tr><td>Last</td><td class="num"><b>${fmt(last)}</b></td><td class="num">–</td></tr></tbody>`;
   $('cd-note').textContent = hasP
-    ? `Each candle's volume is spread evenly over the prices between its low and high, then summed per price level (${P.value_area_pct.toFixed(0)}% of the volume sits inside the value area; level height ${fmt(P.step)}). ` +
-      'Candle volume comes from the ' + SOURCE_LABEL[d.source] + (d.source === 'rest' ? ', which carries no bid, ask or VWAP, so the VWAP line here is computed from the candles.' : '.')
-    : 'This day has no traded volume, so there is no volume profile.';
+    ? `Volume by price: each candle's volume is spread across its price range. Most traded price (POC) is the level with the most volume; the value area (VAL to VAH) holds ${P.value_area_pct.toFixed(0)}% of the day's volume.`
+      + (d.source === 'rest' ? ' VWAP is computed from the candles.' : '')
+    : 'No traded volume on this day.';
   requestAnimationFrame(resizeVisible);
 }
 
@@ -953,15 +966,12 @@ const HX_RANGES = {
 };
 const HX_BAR = { '1d': 'daily', '1m': '1-minute', '5m': '5-minute', '15m': '15-minute', '60m': 'hourly' };
 const HX_DEFAULT = { '1d': 365, '1m': 5, '5m': 30, '15m': 90, '60m': 365 };
-const hxLabel = (i) => (i.name ? `${i.name} · ${i.market}` : i.market);
 async function loadHistory() {
   setStatus('Reading the instrument list…', 'busy');
   if (!state.hx.instruments) {
     state.hx.instruments = await api('/api/history/instruments', {});
-    $('hx-list').innerHTML = state.hx.instruments.map((i) => `<option value="${esc(i.symbol)}">${esc(hxLabel(i))}</option>`).join('');
+    $('hx-list').innerHTML = searchOptions(state.hx.instruments);
     fillSelect($('hx-tf'), HX_TF, state.hx.tf);
-    const hmk = [...new Set(state.hx.instruments.map((i) => i.market))].sort((a, b) => (a === 'IN' ? -1 : b === 'IN' ? 1 : a.localeCompare(b)));
-    fillSelect($('hx-market'), hmk.map((m) => [m, MARKET_NAME[m] || m]), hmk[0]);
     const mk = [...new Set(state.hx.instruments.filter((i) => i.daily_days).map((i) => i.market))].sort();
     fillSelect($('hv-market'), [['', 'All markets'], ...mk.map((m) => [m, MARKET_NAME[m] || m])], state.hx.vol.market);
   }
@@ -976,16 +986,34 @@ async function loadHistory() {
   if (state.sub.history === 'volume') await loadVolume(); else await loadHxChart();
 }
 // Market -> Group (Indices, then sectors) -> Instrument: each list stays short. Index membership is not stored, so a stock is grouped by sector.
-function syncHxPickers() {
-  const all = state.hx.instruments, cur = all.find((i) => i.symbol === state.hx.symbol) || all[0];
-  const mkEl = $('hx-market'), grEl = $('hx-group'), inEl = $('hx-inst');
-  mkEl.value = cur.market;
+const instLabel = (i) => (i.name ? `${i.name} (${i.symbol.replace(/^[A-Z_]+:/, '').replace(/\.NS$/, '')})` : i.symbol.replace(/\.NS$/, ''));
+function syncPickers(ids, all, symbol) {
+  const cur = all.find((i) => i.symbol === symbol) || all[0];
+  const markets = [...new Set(all.map((i) => i.market))].sort((a, b) => (a === 'IN' ? -1 : b === 'IN' ? 1 : a.localeCompare(b)));
+  fillSelect($(ids.market), markets.map((m) => [m, MARKET_NAME[m] || m]), cur.market);
   const inMarket = all.filter((i) => i.market === cur.market);
   const groups = [...new Set(inMarket.map((i) => i.group))].sort((a, b) => (a === 'Indices' ? -1 : b === 'Indices' ? 1 : a.localeCompare(b)));
-  fillSelect(grEl, groups.map((g) => [g, `${g} (${inMarket.filter((i) => i.group === g).length})`]), cur.group);
-  const members = inMarket.filter((i) => i.group === cur.group);
-  fillSelect(inEl, members.map((i) => [i.symbol, i.name ? `${i.name} (${i.symbol.replace(/^[A-Z_]+:/, '')})` : i.symbol]), cur.symbol);
+  fillSelect($(ids.group), groups.map((g) => [g, `${g} (${inMarket.filter((i) => i.group === g).length})`]), cur.group);
+  fillSelect($(ids.inst), inMarket.filter((i) => i.group === cur.group).map((i) => [i.symbol, instLabel(i)]), cur.symbol);
+  return cur;
 }
+function bindPickers(ids, getAll, onPick) {
+  const first = (pred) => (getAll() || []).find(pred);
+  $(ids.market).onchange = (e) => { const f = first((i) => i.market === e.target.value && i.group === 'Indices') || first((i) => i.market === e.target.value); if (f) onPick(f.symbol); };
+  $(ids.group).onchange = (e) => { const f = first((i) => i.market === $(ids.market).value && i.group === e.target.value); if (f) onPick(f.symbol); };
+  $(ids.inst).onchange = (e) => onPick(e.target.value);
+  $(ids.search).onchange = (e) => {
+    const v = e.target.value.trim().toLowerCase();
+    const hit = first((i) => i.symbol.toLowerCase() === v) || first((i) => (i.name || '').toLowerCase() === v) || first((i) => i.symbol.replace(/\.NS$/, '').toLowerCase() === v);
+    if (!hit) { setStatus(`No instrument called "${e.target.value.trim()}"`, 'err'); return; }
+    e.target.value = ''; onPick(hit.symbol);
+  };
+  $(ids.search).onfocus = (e) => e.target.select();
+}
+const searchOptions = (all) => all.map((i) => `<option value="${esc(i.symbol)}">${esc((i.name ? i.name + ' · ' : '') + (MARKET_NAME[i.market] || i.market))}</option>`).join('');
+const HX_PICK = { market: 'hx-market', group: 'hx-group', inst: 'hx-inst', search: 'hx-symbol' };
+const CD_PICK = { market: 'cd-market', group: 'cd-group', inst: 'cd-symbol', search: 'cd-search' };
+function syncHxPickers() { syncPickers(HX_PICK, state.hx.instruments, state.hx.symbol); }
 function pickHx(sym) { state.hx.symbol = sym; syncHxPickers(); loadHxChart().catch(fail); }
 function fillHxRanges() {
   const rs = HX_RANGES[state.hx.tf];
@@ -1010,16 +1038,16 @@ function renderHxChart() {
   const d = state.hx.data, T = theme(), el = $('hx-chart'), inst = (state.hx.instruments || []).find((i) => i.symbol === d.symbol) || {};
   el.style.display = ''; $('hx-msg').hidden = true;
   const candle = state.hx.type === 'candle', intraday = d.tf !== '1d';
-  $('hx-title').textContent = inst.name ? `${inst.name}` : d.symbol;
-  $('hx-sub').textContent = `${d.symbol} · ${MARKET_NAME[d.market] || d.market || ''} · ${HX_BAR[d.tf]} bars · times in ${d.tz}`;
+  $('hx-title').textContent = inst.name ? `${inst.name} (${d.symbol.replace(/^[A-Z_]+:/, '')})` : d.symbol;
+  $('hx-sub').textContent = [MARKET_NAME[d.market] || d.market, CURRENCY_NAME[d.currency] || d.currency, intraday ? `${HX_BAR[d.tf]} bars · ${d.tz}` : 'daily bars'].filter(Boolean).join(' · ');
   $('hx-chart-title').textContent = candle ? 'Candles' : 'Close';
   const n = d.close.length, first = d.close[0], last = d.close[n - 1], chg = (last / first - 1) * 100;
   const hi = Math.max(...d.high), lo = Math.min(...d.low), totVol = d.volume.reduce((a, b) => a + b, 0);
   const volKpi = !d.has_volume ? ['Volume', 'none', d.is_index ? 'an index has no traded volume' : 'no volume in the bars']
-    : intraday ? ['Volume in range', fmtBig(totVol), `${fmtBig(totVol / n)} a bar`] : ['Average volume', fmtBig(totVol / n), 'per day over the range'];
+    : intraday ? ['Volume in range', shM(totVol), [shL(totVol), `${shBoth(totVol / n)} a bar`].filter(Boolean).join(' · ')] : ['Average volume', shM(totVol / n), [shL(totVol / n), 'per day'].filter(Boolean).join(' · ')];
   renderKpis('hx-cards', [
-    ['Last', fmt(last), intraday ? d.t[n - 1] : niceDate(d.t[n - 1])], ['Change over the range', signed(chg, (x) => fmt(x) + '%'), `from ${fmt(first)}`],
-    ['High', fmt(hi), ''], ['Low', fmt(lo), ''], volKpi, ['Bars', fmtInt(d.bars), d.clipped ? 'range cut to fit a chart' : `since ${niceDate(d.from.slice(0, 10))}`],
+    ['Last price', `${fmt(last)} ${d.currency}`, intraday ? d.t[n - 1] : niceDate(d.t[n - 1])], ['Change over the range', signed(chg, (x) => fmt(x) + '%'), `from ${fmt(first)}`],
+    ['High', `${fmt(hi)} ${d.currency}`, ''], ['Low', `${fmt(lo)} ${d.currency}`, ''], volKpi, ['Bars', fmtInt(d.bars), d.clipped ? 'range cut to fit a chart' : `since ${niceDate(d.from.slice(0, 10))}`],
   ]);
   const x = d.t, volTrace = d.has_volume ? [{ type: 'bar', x, y: d.volume, yaxis: 'y2', name: 'Volume', marker: { color: d.close.map((c, i) => (c >= d.open[i] ? T.up : T.down)), opacity: 0.55 },
                                               hovertemplate: 'Volume %{y:,.0f}<extra></extra>' }] : [];
@@ -1056,7 +1084,7 @@ async function loadVolume() {
   catch (e) { if (me === hvReq) { const el = $('hv-chart'); if (el.data) Plotly.purge(el); el.style.display = 'none'; $('hv-msg').hidden = false; $('hv-msg').textContent = e.message; $('hv-table').innerHTML = ''; setStatus(e.message, 'err'); } return; }
   if (me !== hvReq) return;
   v.date = d.date; $('hv-date').value = d.date; $('hv-date').max = d.latest;
-  $('hx-title').textContent = 'Most traded'; $('hx-sub').textContent = 'The tickers with the most shares traded on a day, with how unusual that volume is.';
+  $('hx-title').textContent = 'Most traded'; $('hx-sub').textContent = 'Most shares traded on a day, and how unusual that volume is.';
   renderVolume(d);
   setStatus(`${d.rows.length} tickers on ${niceDate(d.date)}`);
 }
@@ -1082,16 +1110,7 @@ function renderVolume(d) {
   $('hv-table').querySelectorAll('tbody tr').forEach((tr) => tr.onclick = () => { state.hx.symbol = tr.dataset.s; state.hx.tf = '1d'; state.sub.history = 'chart'; fillHxRanges(); setTab('history'); });
   $('hv-note').textContent = d.note + (d.market ? '' : ' Across markets, traded value is not ranked because each market uses its own currency.');
 }
-$('hx-symbol').onchange = (e) => {
-  const v = e.target.value.trim();
-  const hit = (state.hx.instruments || []).find((i) => i.symbol === v) || (state.hx.instruments || []).find((i) => i.symbol.toLowerCase() === v.toLowerCase() || (i.name || '').toLowerCase() === v.toLowerCase());
-  if (!hit) { setStatus(`No instrument called "${v}"`, 'err'); return; }
-  e.target.value = ''; pickHx(hit.symbol);
-};
-$('hx-market').onchange = (e) => { const f = state.hx.instruments.find((i) => i.market === e.target.value && i.group === 'Indices') || state.hx.instruments.find((i) => i.market === e.target.value); pickHx(f.symbol); };
-$('hx-group').onchange = (e) => { const f = state.hx.instruments.find((i) => i.market === $('hx-market').value && i.group === e.target.value); pickHx(f.symbol); };
-$('hx-inst').onchange = (e) => pickHx(e.target.value);
-$('hx-symbol').onfocus = (e) => e.target.select();
+bindPickers(HX_PICK, () => state.hx.instruments, pickHx);
 $('hx-tf').onchange = (e) => { state.hx.tf = e.target.value; state.hx.span = HX_DEFAULT[state.hx.tf]; fillHxRanges(); loadHxChart().catch(fail); };
 $('hx-range').onchange = (e) => { state.hx.span = +e.target.value; loadHxChart().catch(fail); };
 document.querySelectorAll('#hx-type button').forEach((b) => b.onclick = () => {
@@ -1134,7 +1153,7 @@ async function loadData() {
 function renderData() {
   const j = state.dt;
   if (!j) return;
-  $('dt-sub').textContent = j.demo ? 'Synthetic demo lake.' : `Read at ${j.generated.replace('T', ' ').replace('Z', ' UTC')}. Nothing here changes the lake.`;
+  $('dt-sub').textContent = j.demo ? 'Synthetic demo lake.' : `Read at ${j.generated.replace('T', ' ').replace('Z', ' UTC')}`;
   renderDataKpis();
   const sub = state.sub.data;
   if (sub === 'coverage') { renderStrip(); renderRange(); renderDatasetTable(); renderMarketsTable(); }
@@ -1280,7 +1299,7 @@ function renderStorage() {
     customdata: rows.map((r) => fmtBytes(r.bytes)), hovertemplate: '<b>%{y}</b><br>%{customdata}<extra></extra>' }],
     baseLayout({ height: hgt, margin: { l: phone() ? 120 : 160, r: 60, t: 6, b: 24 }, bargap: 0.3, xaxis: { showgrid: false, showticklabels: false, fixedrange: true, range: [0, Math.max(...rows.map((r) => r.bytes)) * 1.18] },
                  yaxis: { autorange: 'reversed', showgrid: false, tickfont: { size: 11 }, fixedrange: true } }), Object.assign(config(), { displayModeBar: false }));
-  $('dt-storage-note').textContent = 'Room for ticks counts only the raw-tick capture growing day by day. The history backfill and the Yahoo bars add a fixed amount on top, estimated at several GB, not a daily rate.';
+  $('dt-storage-note').textContent = 'Room for ticks counts only the daily raw-tick growth. The history backfill and Yahoo bars add a fixed several GB on top.';
 }
 document.querySelectorAll('#dt-range-seg button').forEach((b) => b.onclick = () => { state.dtRange = b.dataset.r; renderRange(); });
 
@@ -1291,7 +1310,7 @@ $('width').onchange = (e) => { setWidth(e.target.value); refreshEquity(); };
 $('volwin').onchange = (e) => { setWin(e.target.value); refreshEquity(); };
 $('fo-width').onchange = (e) => { setWidth(e.target.value); loadFoContract(state.foContract); };
 $('fo-volwin').onchange = (e) => { setWin(e.target.value); loadFoContract(state.foContract); };
-$('cd-symbol').onchange = (e) => { state.cSymbol = e.target.value; refreshCandles(); };
+bindPickers(CD_PICK, () => state.cList, pickCd);
 $('cd-minutes').onchange = (e) => { state.cMinutes = +e.target.value; refreshCandles(); };
 $('cd-bins').onchange = (e) => { state.cBins = +e.target.value; refreshCandles(); };
 $('cd-source').onchange = (e) => { state.cSource = e.target.value; refreshCandles(); };

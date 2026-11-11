@@ -86,7 +86,7 @@ def test_viewer_and_admin_credentials_are_separate(lake, monkeypatch):
 # -- catalog and paging ----------------------------------------------------------------------------
 def test_catalog_groups_tables_into_services(client):
     cat = client.get("/admin/api/catalog", auth=A).json()
-    assert [s["service"] for s in cat] == ["reference", "market", "aggregates", "yahoo", "indices", "fundamentals", "analytics"]
+    assert [s["service"] for s in cat] == ["reference", "market", "aggregates", "fundamentals", "indices", "operations", "analytics"]
     tables = {(s["service"], t["name"]): t for s in cat for t in s["tables"]}
     assert tables[("market", "ticks")]["days"] == ["2026-10-23", "2026-10-22"] and tables[("market", "ticks")]["available"]
     assert tables[("reference", "eq_instruments")]["available"] and tables[("reference", "universe")]["available"]
@@ -122,8 +122,8 @@ def test_filter_order_page_size_and_earlier_days(client):
 def test_derived_bars_reference_tables_and_empty_tables(client):
     m = client.get("/admin/api/table", params={"service": "aggregates", "name": "bars_1m", "symbol": "RELIANCE.NS"}, auth=A).json()
     assert m["total"] == 2 and m["columns"][:3] == ["symbol", "market", "ts"]  # 250 ticks at 4 a second span two minutes
-    rest = client.get("/admin/api/table", params={"service": "market", "name": "bars_1m_rest"}, auth=A).json()
-    assert rest["total"] == 10
+    rest = client.get("/admin/api/table", params={"service": "market", "name": "candles_1m"}, auth=A).json()
+    assert rest["total"] == 10 and "vendor" in rest["columns"] and {r[rest["columns"].index("vendor")] for r in rest["rows"]} == {"Upstox"}      # India candles come from Upstox
     u = client.get("/admin/api/table", params={"service": "reference", "name": "universe"}, auth=A).json()
     assert u["total"] == 4 and "source" in u["columns"]
     eq = client.get("/admin/api/table", params={"service": "reference", "name": "eq_instruments", "symbol": "M&M"}, auth=A).json()
@@ -277,3 +277,53 @@ def test_feed_rereads_the_subscription_list_at_each_session(monkeypatch, tmp_pat
     monkeypatch.setattr(sys, "argv", ["feed"])
     feed.main()
     assert seen == [["NSE_EQ|A", "NSE_EQ|B"], ["NSE_EQ|A", "NSE_EQ|B"]]      # third read failed: last good list kept
+
+
+# -- a vendor-neutral catalog --------------------------------------------------------------------------------------
+def write_vendor_files(lake_dir):
+    """What the Yahoo and Upstox fundamentals jobs store, in their own column layouts."""
+    yf, up = lake_dir / "yf_fundamentals", lake_dir / "upstox_fundamentals"
+    yf.mkdir(parents=True), up.mkdir(parents=True)
+    d = date(2026, 11, 10)
+    pd.DataFrame([{"symbol": "AAPL", "statement": "income", "item": "revenue", "period_end": date(2025, 9, 30), "value": 391.0, "currency": "USD",
+                   "first_seen": d, "last_seen": d}]).to_parquet(yf / "versions.parquet")
+    pd.DataFrame([{"isin": "INE002A01018", "endpoint": "ratios", "item": "pe", "period": "2025-03", "value": 24.5, "text": None, "change": 1.2,
+                   "first_seen": d, "last_seen": d}]).to_parquet(up / "versions.parquet")
+    pd.DataFrame([{"symbol": "AAPL", "part": "income", "fetched_at": datetime(2026, 11, 10, 1), "ok": True, "error_class": "ok", "rows": 12,
+                   "attempts": 1, "latency_s": 0.4, "message": ""}]).to_parquet(yf / "fetch_log.parquet")
+    pd.DataFrame([{"isin": "INE002A01018", "symbol": "RELIANCE.NS", "endpoint": "ratios", "fetched_at": datetime(2026, 11, 10, 12), "ok": False, "status": 429,
+                   "error_code": "UDAPI100072", "error_message": "too many requests", "attempts": 3, "latency_s": 1.1, "rows": 0}]).to_parquet(up / "fetch_log.parquet")
+
+
+def test_table_names_never_carry_a_vendor_and_every_table_names_its_vendor():
+    for t in admin.CATALOG:
+        assert not any(v in t.name.lower() for v in ("yahoo", "yf_", "upstox", "refinitiv", "thomson")), t.name
+        assert t.vendor, t.name
+    assert {v for t in admin.CATALOG for v in t.vendor.replace("·", ",").split(",") if v.strip()} >= {"Upstox", "Yahoo", "Internal"}
+
+
+def test_vendors_with_different_layouts_share_one_table_with_a_vendor_column(client, lake):
+    write_vendor_files(lake.lakedir)
+    items = client.get("/admin/api/table", params={"service": "fundamentals", "name": "items"}, auth=A).json()
+    assert items["total"] == 2 and items["columns"][:2] == ["vendor", "symbol"]
+    by = {r[0]: dict(zip(items["columns"], r)) for r in items["rows"]}
+    assert by["Yahoo"]["symbol"] == "AAPL" and by["Yahoo"]["isin"] is None and by["Yahoo"]["section"] == "income" and by["Yahoo"]["period"] == "2025-09-30"
+    assert by["Upstox"]["isin"] == "INE002A01018" and by["Upstox"]["symbol"] is None and by["Upstox"]["change"] == 1.2
+    log = client.get("/admin/api/table", params={"service": "operations", "name": "fetch_log"}, auth=A).json()
+    rows = {r[0]: dict(zip(log["columns"], r)) for r in log["rows"]}
+    assert log["total"] == 2 and rows["Yahoo"]["endpoint"] == "income" and rows["Upstox"]["error_class"] == "UDAPI100072" and rows["Upstox"]["status"] == 429
+    assert client.get("/admin/api/table", params={"service": "fundamentals", "name": "items", "symbol": "AAPL"}, auth=A).json()["total"] == 1
+    r = q(client, "SELECT vendor, count(*) AS n FROM fundamentals.items GROUP BY 1 ORDER BY 1").json()
+    assert r["rows"] == [["Upstox", 1], ["Yahoo", 1]]
+    assert "operations.fetch_log" in client.get("/admin/api/schema", auth=A).json()
+
+
+def test_the_catalog_lists_each_tables_vendors_and_works_with_one_vendor_missing(client, lake):
+    cat = client.get("/admin/api/catalog", auth=A).json()
+    tables = {(s["service"], t["name"]): t for s in cat for t in s["tables"]}
+    assert tables[("fundamentals", "items")]["vendors"] == ["Upstox", "Yahoo"] and tables[("market", "ticks")]["vendors"] == ["Upstox"]
+    assert not tables[("fundamentals", "items")]["available"]                                  # no vendor file yet
+    write_vendor_files(lake.lakedir)
+    (lake.lakedir / "yf_fundamentals" / "versions.parquet").unlink()                           # only Upstox has stored anything
+    one = client.get("/admin/api/table", params={"service": "fundamentals", "name": "items"}, auth=A).json()
+    assert one["total"] == 1 and one["rows"][0][0] == "Upstox"
