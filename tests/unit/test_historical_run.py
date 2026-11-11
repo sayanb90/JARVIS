@@ -47,8 +47,9 @@ def test_syntax_and_dry_run_print_every_stage_in_order_and_run_nothing(box):
     assert stages == ["universe", "daily", "1m", "fx", "fundamentals", "trial-spot", "trial-expired", "spot", "expired"]
     for frag in ("--mode full --market ALL --years 20", "--load ohlc", "scheduler.py --job bars --market ALL --interval 1m --backfill",
                  "data_layer.fx refresh", "yf_fundamentals run", "yf_pillars build", "backfill spot --limit 3", "backfill expired --underlying NIFTY --limit 1",
-                 "backfill spot --from 2022-01-01 --budget-30min 1500 --max-minutes", "backfill expired --from 2022-01-01"):
+                 "backfill spot --from 2022-01-01 --to 2026-11-02 --budget-30min 1500 --max-minutes", "backfill expired --from 2022-01-01"):
         assert frag in out.stdout, frag
+    assert "--to 2026-11-02 --budget-30min 1500 --dump-raw 2" in out.stdout            # the trial stops before the live feed's first day too
     assert calls(box) == [] and (box / "logs" / "historical-run.state").read_text() == ""
 
 

@@ -27,7 +27,7 @@
 # 21:30-10:30 UTC unless FORCE=1.  Upstox REST calls use BUDGET calls per 30 minutes (default 1500 of the 2000 allowed), leaving room for the
 # 12:50 UTC fundamentals job that shares the quota.
 #
-# Environment: PY (default .venv/bin/python)  DAILY_YEARS (20)  STOP_BY (21:30)  BUDGET (1500)  FROM_UPSTOX (2022-01-01)  MIN_FREE_GB (40)  FORCE
+# Environment: PY (default .venv/bin/python)  DAILY_YEARS (20)  STOP_BY (21:30)  BUDGET (1500)  FROM_UPSTOX (2022-01-01)  TO_UPSTOX (2026-11-02)  MIN_FREE_GB (40)  FORCE
 # Exit code: 0 everything done, 75 something partial (run again), 1 something failed.  Nothing is deleted.  Logs: logs/historical-run-<day>.log.
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -36,6 +36,7 @@ DAILY_YEARS="${DAILY_YEARS:-20}"
 STOP_BY="${STOP_BY:-21:30}"
 BUDGET="${BUDGET:-1500}"
 FROM_UPSTOX="${FROM_UPSTOX:-2022-01-01}"
+TO_UPSTOX="${TO_UPSTOX:-2026-11-02}"           # the live feed has recorded India since 2026-11-03: REST candles must not replace those bars
 MIN_FREE_GB="${MIN_FREE_GB:-40}"
 STATE="logs/historical-run.state"
 ALL_STAGES="universe daily 1m fx fundamentals trial-spot trial-expired spot expired"
@@ -131,14 +132,14 @@ st_fundamentals() {
     return 0
 }
 st_trial_spot() {
-    run "$PY" -m data_layer.upstox.backfill spot --limit 3 --from "$(date -u -d '40 days ago' +%F)" --budget-30min "$BUDGET" --dump-raw 2
+    run "$PY" -m data_layer.upstox.backfill spot --limit 3 --from "$(date -u -d '40 days ago' +%F)" --to "$TO_UPSTOX" --budget-30min "$BUDGET" --dump-raw 2
 }
 st_trial_expired() {
     run "$PY" -m data_layer.upstox.backfill expired --underlying NIFTY --limit 1 --budget-30min "$BUDGET" --dump-raw 5
 }
 st_spot() {
     [ "$APPLY" = 0 ] || [ "$(state_of trial-spot)" = ok ] || { echo "trial-spot is not done: run it first"; return 1; }
-    run "$PY" -m data_layer.upstox.backfill spot --from "$FROM_UPSTOX" --budget-30min "$BUDGET" --max-minutes "$LIMIT_MIN"
+    run "$PY" -m data_layer.upstox.backfill spot --from "$FROM_UPSTOX" --to "$TO_UPSTOX" --budget-30min "$BUDGET" --max-minutes "$LIMIT_MIN"
 }
 st_expired() {
     [ "$APPLY" = 0 ] || [ "$(state_of trial-expired)" = ok ] || { echo "trial-expired is not done (it needs the Upstox token and Upstox Plus): skipping"; return 1; }
