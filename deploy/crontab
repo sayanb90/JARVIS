@@ -26,6 +26,11 @@ JARVIS=/home/jarvis/JARVIS
 0 2 * * *      cd $JARVIS && python -m data_layer.yf_pillars build >> logs/yf-pillars.log 2>&1 && python -m data_layer.yf_fundamentals check >> logs/yf-completeness.log 2>&1
 # Nightly backup snapshot: parked until a separate disk or bucket exists (SCRUM-121); health only warns, cron_check does not require it.
 # When it is set up (JARVIS_BACKUP_DIR in .env), add:  30 23 * * *  cd $JARVIS && python -m data_layer.backup run >> logs/backup.log 2>&1
+# Research snapshot (research/snapshot.py): hard links to the lake's closed files, so the read-only research user never opens a file the
+# collector can still change.  After the end-of-day health report (11:30) and the 10:05 compaction; nice and ionice keep it out of the way.
+# Needs the research root on the lake's filesystem: run deploy/research/setup.sh (it prints what it would do first).  Pruning removes only
+# old snapshot links, never lake files; each kept snapshot costs only the files that were rewritten since (about 50 MB).
+45 11 * * *    cd $JARVIS && nice -n 19 ionice -c3 python -m research.snapshot create --keep 45 >> logs/research-snapshot.log 2>&1
 # Market calendar: Upstox's holiday list, so every check knows whether a day should have produced data (before the 03:15 health report)
 0 3 * * *      cd $JARVIS && python -m data_layer.market_calendar refresh >> logs/market-calendar.log 2>&1
 # Morning health report, before the session; mail or read logs/health.log
