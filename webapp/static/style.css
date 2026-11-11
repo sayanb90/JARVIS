@@ -187,3 +187,4 @@ table.clickable tbody tr:hover td{background:var(--panel2)}
   .subtabs{gap:0}.subtabs button{padding:10px 9px 11px;font-size:13.5px}
   th,td{padding:8px 9px}
 }
+#cd-levels th.num,#cd-levels td.num{text-align:right}

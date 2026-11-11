@@ -8,6 +8,8 @@ API (JSON):
   GET /api/meta                                    days available, demo flag, allowed precisions (width 0 = raw ticks, else bar seconds)
   GET /api/symbols?date=YYYY-MM-DD                 equities with bars that day (F&O contracts are listed under /api/fo/*)
   GET /api/day?date=&symbol=&width=1&vol_window=300   summary + chart series for one instrument (equity or F&O); width=0 returns every tick
+  GET /api/candles/symbols?date=                   equities with minute candles that day, and from which source (live feed, REST candle API)
+  GET /api/candles?date=&symbol=&minutes=1&bins=40&source=auto   candles, summary and volume profile for one equity (Candles section)
   GET /api/overview?date=                          one row per equity: volume, spread, volatility, ...
   GET /api/fo/meta?date=                           underlyings with derivative bars that day
   GET /api/fo/chain?date=&underlying=&expiry=      futures + option chain snapshot (section 17)
@@ -33,6 +35,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from analytics.microstructure import day_summary, rolling_realised_vol, series_payload, to_ist_strings
+from analytics.profile import candle_summary, candles_payload, volume_profile
 from data_layer import live_book
 from data_layer.lake import LAKE_DIR
 from data_layer import tick_store
@@ -41,6 +44,8 @@ from data_layer.query import Lake
 STATIC = Path(__file__).parent / "static"
 WIDTHS = (0, 1, 5, 15, 30, 60, 300)              # precision offered in the UI: 0 = raw ticks (no aggregation), else a bar width in seconds
 VOL_WINDOWS = (60, 300, 900, 1800)
+CANDLE_MINUTES = (1, 3, 5, 15, 30, 60)           # candle size offered in the Candles section
+PROFILE_BINS = (20, 40, 60, 100)                 # about how many price levels the volume profile is split into
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9&._-]{1,32}$")
 UNDERLYING_RE = re.compile(r"^[A-Za-z0-9&]{1,20}$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -107,8 +112,9 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
 
     @app.get("/api/meta")
     def meta():
-        return {"demo": (lake_path / "DEMO").exists(), "interval": interval, "days": lake().bar_days(interval),
-                "widths": list(WIDTHS), "vol_windows": list(VOL_WINDOWS)}
+        q = lake()
+        return {"demo": (lake_path / "DEMO").exists(), "interval": interval, "days": q.bar_days(interval), "candle_days": q.candle_days(interval),
+                "widths": list(WIDTHS), "vol_windows": list(VOL_WINDOWS), "candle_minutes": list(CANDLE_MINUTES), "profile_bins": list(PROFILE_BINS)}
 
     @app.get("/api/symbols")
     def symbols(date: str):
@@ -155,6 +161,38 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             "has_book": bool(df[["bid", "ask"]].notna().all(axis=1).any()),
             "has_oi": bool("oi" in df.columns and df["oi"].notna().any()),
             "series": series}))
+
+    @app.get("/api/candles/symbols")
+    def candle_symbols(date: str):
+        _check_date(date)
+        q = lake()
+        skip = q.fo_symbols()
+        live, rest = q.bar_symbols(date, interval), q.bar_symbols(date, "1m")
+        have = {s: {"symbol": s, "live": False, "rest": False} for s in set(live["symbol"]) | set(rest["symbol"])}
+        for s in live["symbol"]:
+            have[s]["live"] = True
+        for s in rest["symbol"]:
+            have[s]["rest"] = True
+        rows = sorted((r for s, r in have.items() if s not in skip and not s.startswith(tick_store.INDEX_PREFIX)), key=lambda r: r["symbol"])
+        if not rows:
+            raise HTTPException(404, f"no minute candles for {date}")
+        return rows
+
+    @app.get("/api/candles")
+    def candles(date: str, symbol: str, minutes: int = Query(1), bins: int = Query(40), source: str = Query("auto")):
+        _check_date(date); _check_symbol(symbol)
+        if minutes not in CANDLE_MINUTES:
+            raise HTTPException(422, f"minutes must be one of {CANDLE_MINUTES}")
+        if bins not in PROFILE_BINS:
+            raise HTTPException(422, f"bins must be one of {PROFILE_BINS}")
+        if source not in ("auto", "live", "rest"):
+            raise HTTPException(422, "source must be auto, live or rest")
+        df, used = lake().minute_candles(date, symbol, minutes, source, interval)
+        if df.empty:
+            raise HTTPException(404, f"no {'minute ' if source == 'auto' else source + ' '}candles for {symbol} on {date}")
+        return JSONResponse(_json_safe({
+            "symbol": symbol, "date": date, "minutes": minutes, "bins": bins, "source": used,
+            "summary": candle_summary(df, minutes), "series": candles_payload(df), "profile": volume_profile(df, bins)}))
 
     @app.get("/api/overview")
     def overview(date: str):

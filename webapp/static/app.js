@@ -1,5 +1,5 @@
 /* JARVIS intraday viewer: plain JS + Plotly (served locally from /vendor/plotly.min.js).
-   Structure: three sections (Equities, Market, Derivatives), each with its own controls, key figures and sub-tabs.
+   Structure: four sections (Equities, Market, Derivatives, Candles), each with its own controls, key figures and sub-tabs.
    Every chart is its own Plotly figure with its own HTML legend; time charts in one section zoom together. */
 const $ = (id) => document.getElementById(id);
 const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
@@ -20,15 +20,18 @@ const precisionText = (w) => (w === 0 ? 'every tick' : `${WIDTH_LABEL[w]} bars`)
 const countText = (n, w) => (w === 0 ? `${fmtInt(n)} ticks (raw)` : `${fmtInt(n)} bars of ${WIDTH_LABEL[w]}`);
 const nearestDay = (days, want) => days.reduce((best, d) => (Math.abs(new Date(d) - new Date(want)) < Math.abs(new Date(best) - new Date(want)) ? d : best), days[0]);
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
-const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'] };
+const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'], candles: ['chart', 'profile'] };
+const CANDLE_LABEL = { 1: '1 minute', 3: '3 minutes', 5: '5 minutes', 15: '15 minutes', 30: '30 minutes', 60: '1 hour' };
+const SOURCE_LABEL = { live: 'live feed', rest: 'REST candle API' };
 
 const state = {
-  meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary' },
+  meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary', candles: 'chart' },
+  cSymbol: null, cMinutes: 1, cBins: 40, cSource: 'auto', cData: null,
   symbol: null, width: 1, volwin: 300, data: null,
   overview: [], sort: ['volume', -1], heatN: 20, heatMetric: 'realised_vol_pct',
   underlying: null, expiry: null, foData: null, foContract: null, foContractData: null, greeksData: null, range: 10, focus: 'active',
 };
-let reqId = 0, foReq = 0, fcReq = 0;
+let reqId = 0, foReq = 0, fcReq = 0, cdReq = 0;
 const phone = () => window.innerWidth < 640;
 
 /* ---------------------------------------------------------------- plumbing */
@@ -61,6 +64,7 @@ function writeHash() {
   const p = { tab: state.tab, date: state.day || '' };
   p.sub = state.sub[state.tab];
   if (state.tab === 'instrument') Object.assign(p, { symbol: state.symbol || '', width: state.width, volwin: state.volwin });
+  if (state.tab === 'candles') Object.assign(p, { symbol: state.cSymbol || '', minutes: state.cMinutes, bins: state.cBins, source: state.cSource });
   if (state.tab === 'fo') Object.assign(p, { underlying: state.underlying || '', expiry: state.expiry || '', contract: state.foContract || '',
                                               width: state.width, volwin: state.volwin, range: state.range, focus: state.focus });
   history.replaceState(null, '', '#' + new URLSearchParams(p).toString());
@@ -134,6 +138,22 @@ function resizeVisible() {
 }
 
 /* ---------------------------------------------------------------- sections and sub-tabs */
+/* the days a section can show: the Candles section also reads days that only have REST minute candles */
+const daysFor = (tab) => (tab === 'candles' ? state.meta.candle_days : state.meta.days);
+function syncDays(tab) {                               // limit the date picker to this section's days; move to the nearest one if needed
+  const days = daysFor(tab), picker = $('date');
+  if (!days.length) return false;
+  picker.min = days[days.length - 1]; picker.max = days[0];
+  if (!days.includes(state.day)) {
+    const was = state.day, day = nearestDay(days, was);
+    const note = $('date-note');
+    note.textContent = `No data on ${niceDate(was)} in this section · showing ${niceDate(day)}`; note.hidden = false;
+    clearTimeout(note._t); note._t = setTimeout(() => { note.hidden = true; }, 8000);
+    state.day = day; state.foContractData = null; state.greeksData = null;
+  }
+  picker.value = state.day;
+  return true;
+}
 function setTab(tab, load = true) {
   state.tab = tab;
   for (const t of Object.keys(SUBS)) {
@@ -142,8 +162,10 @@ function setTab(tab, load = true) {
   }
   showSub(tab, state.sub[tab], false);
   if (!load) return;
+  if (!syncDays(tab)) { setStatus('No data for this section yet', 'err'); return; }
   if (tab === 'fo') loadFoUnderlyings().catch(fail);
   else if (tab === 'overview') loadOverview().catch(fail);
+  else if (tab === 'candles') loadCandleSymbols().catch(fail);
   else loadSymbols().catch(fail);
 }
 function showSub(tab, sub, rerender = true) {
@@ -172,18 +194,26 @@ async function init() {
   state.volwin = state.meta.vol_windows.includes(+h.volwin) ? +h.volwin : 300;
   for (const id of ['width', 'fo-width', 'fo-greeks-width']) fillSelect($(id), widths, state.width);
   for (const id of ['volwin', 'fo-volwin']) fillSelect($(id), wins, state.volwin);
-  if (!state.meta.days.length) {
+  const cm = (state.meta.candle_minutes || [1]).map((m) => [m, CANDLE_LABEL[m] || m + ' min']);
+  const cb = (state.meta.profile_bins || [40]).map((b) => [b, `about ${b}`]);
+  state.cMinutes = (state.meta.candle_minutes || []).includes(+h.minutes) ? +h.minutes : 1;
+  state.cBins = (state.meta.profile_bins || []).includes(+h.bins) ? +h.bins : 40;
+  state.cSource = ['auto', 'live', 'rest'].includes(h.source) ? h.source : 'auto';
+  fillSelect($('cd-minutes'), cm, state.cMinutes); fillSelect($('cd-bins'), cb, state.cBins); $('cd-source').value = state.cSource;
+  if (!state.meta.days.length && !(state.meta.candle_days || []).length) {
     $('empty').hidden = false; document.querySelectorAll('.view').forEach((v) => { v.hidden = true; }); setStatus('No data yet', 'err'); return;
   }
   const picker = $('date');                                                       // a date picker limited to the days that have data
-  picker.min = state.meta.days[state.meta.days.length - 1]; picker.max = state.meta.days[0];
-  state.day = state.meta.days.includes(h.date) ? h.date : state.meta.days[0];
+  const all = [...new Set([...state.meta.days, ...(state.meta.candle_days || [])])].sort().reverse();
+  picker.min = all[all.length - 1]; picker.max = all[0];
+  state.day = all.includes(h.date) ? h.date : all[0];
   picker.value = state.day;
   state.symbol = h.symbol || null; state.underlying = h.underlying || null; state.expiry = h.expiry || null; state.foContract = h.contract || null;
+  state.cSymbol = h.tab === 'candles' ? h.symbol || null : null;
   if (['5', '10', '20', '0'].includes(h.range)) state.range = +h.range;
   if (['active', 'atm', 'all'].includes(h.focus)) state.focus = h.focus;
   $('chain-range').value = String(state.range); $('oi-focus').value = state.focus;
-  const tab = SUBS[h.tab] ? h.tab : 'instrument';
+  const tab = SUBS[h.tab] ? h.tab : state.meta.days.length ? 'instrument' : 'candles';
   if (h.sub) state.sub[tab] = h.sub;
   setTab(tab);
 }
@@ -775,11 +805,123 @@ setInterval(() => {                                        // one timer; only ca
   for (const key of Object.keys(BOOKS)) if (bookMode[key] === 'live' && $(BOOKS[key].body).offsetParent !== null) pollLive(key);
 }, 1000);
 
+/* ================================================================ Candles: minute candles and the volume profile */
+async function loadCandleSymbols() {
+  setStatus('Loading instruments…', 'busy');
+  const syms = await api('/api/candles/symbols', { date: state.day });
+  const tag = (s) => (s.live && s.rest ? '' : s.live ? ' · live feed only' : ' · REST only');
+  fillSelect($('cd-symbol'), syms.map((s) => [s.symbol, s.symbol.replace(/\.NS$/, '') + tag(s)]));
+  if (!syms.find((s) => s.symbol === state.cSymbol)) state.cSymbol = syms[0].symbol;
+  $('cd-symbol').value = state.cSymbol;
+  await refreshCandles();
+}
+
+async function refreshCandles() {
+  const id = ++cdReq;
+  writeHash();
+  setStatus('Loading ' + state.cSymbol + '…', 'busy');
+  try {
+    const d = await api('/api/candles', { date: state.day, symbol: state.cSymbol, minutes: state.cMinutes, bins: state.cBins, source: state.cSource });
+    if (id !== cdReq) return;
+    state.cData = d;
+    $('cd-title').textContent = state.cSymbol.replace(/\.NS$/, '');
+    $('cd-sub').textContent = `NSE · ${niceDate(state.day)} · ${d.minutes === 60 ? '1-hour' : d.minutes + '-minute'} candles · from the ${SOURCE_LABEL[d.source]}`;
+    renderKpis('cd-cards', candleKpis(d.summary, d.profile));
+    renderCandles(d);
+    setStatus(`${state.cSymbol} · ${state.day} · ${fmtInt(d.summary.candles)} of ${fmtInt(d.summary.expected)} candles · times in IST`);
+  } catch (e) {
+    if (id !== cdReq) return;
+    state.cData = null; $('cd-cards').innerHTML = '';                       // never leave the previous instrument's charts under an error
+    ['cd-price', 'cd-volume', 'cd-profile'].forEach((c) => { if ($(c).data) Plotly.purge(c); });
+    $('cd-levels').innerHTML = ''; $('cd-note').textContent = '';
+    fail(e);
+  }
+}
+
+function candleKpis(S, P) {
+  const va = P && P.val != null ? `value area ${fmt(P.val)}–${fmt(P.vah)}` : '';
+  return [
+    ['Last', fmt(S.close), `${signed(S.return_pct, (x) => fmt(x) + '%')} on the open`],
+    ['Day high', fmt(S.high), `low ${fmt(S.low)} · open ${fmt(S.open)}`],
+    ['Volume', fmtBig(S.volume), `VWAP ${fmt(S.vwap)}`],
+    ['Point of control', P && P.poc != null ? fmt(P.poc) : '–', va],
+    ['Candles', `${fmtInt(S.candles)} of ${fmtInt(S.expected)}`, `${fmt(S.coverage_pct, 0)}% · ${S.first_time}–${S.last_time}`],
+    ['Up / down', `${fmtInt(S.up_candles)} / ${fmtInt(S.down_candles)}`, `peak volume at ${S.peak_time}`],
+  ];
+}
+
+function renderCandles(d) {
+  const s = d.series, P = d.profile || {}, S = d.summary, T = theme(), t = s.ts, hasP = !!(P.prices && P.prices.length);
+  const day = t[0].slice(0, 10), range = [`${day} 09:10`, `${day} 15:35`];       // the whole session, so a gap in the capture shows as a gap
+  const pocAt = hasP ? P.volume.indexOf(Math.max(...P.volume)) : -1;
+  const hline = (y, color, dash, w = 1) => ({ type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: y, y1: y, line: { color, width: w, dash } });
+  const levelShapes = hasP ? [
+    { type: 'rect', xref: 'paper', x0: 0, x1: 1, yref: 'y', y0: P.val, y1: P.vah, fillcolor: T.acc, opacity: 0.07, line: { width: 0 }, layer: 'below' },
+    hline(P.poc, T.orange, 'dash', 1.2), hline(P.vah, T.muted, 'dot'), hline(P.val, T.muted, 'dot')] : [];
+
+  // candles, running VWAP and the profile on the same price axis
+  {
+    const tr = [{ type: 'candlestick', x: t, open: s.open, high: s.high, low: s.low, close: s.close, name: 'Price', whiskerwidth: 0.5,
+                  increasing: { line: { color: T.up, width: 1 }, fillcolor: T.up }, decreasing: { line: { color: T.down, width: 1 }, fillcolor: T.down } },
+                { x: t, y: s.vwap, name: 'VWAP', type: 'scatter', mode: 'lines', line: { color: T.yellow, width: 1.4 }, hovertemplate: 'VWAP %{y:,.2f}<extra></extra>' }];
+    const lg = [{ name: 'Candles', color: T.acc, kind: 'bar', traces: [0] }, { name: 'VWAP', color: T.yellow, traces: [1] }];
+    if (hasP) {
+      tr.push({ type: 'bar', orientation: 'h', x: P.volume, y: P.prices, width: P.step * 0.9, xaxis: 'x2', yaxis: 'y', name: 'Volume at price',
+                marker: { color: P.prices.map((_, i) => (i === pocAt ? T.orange : T.acc)), opacity: 0.5 }, hovertemplate: '%{y:,.2f} · %{x:,.0f} shares<extra></extra>' });
+      lg.push({ name: 'Volume profile (right)', key: 'prof', color: T.acc, kind: 'bar', traces: [2] });
+    }
+    const layout = baseLayout({
+      hovermode: 'closest', shapes: levelShapes,
+      xaxis: timeAxis({ domain: [0, hasP ? 0.8 : 1], range, rangeslider: { visible: false }, hoverformat: '%H:%M' }),
+      xaxis2: { domain: [0.82, 1], anchor: 'y', showgrid: false, showticklabels: false, zeroline: false, showline: false, rangemode: 'tozero' },
+      yaxis: valAxis({ tickformat: ',.2f', title: phone() ? '' : { text: '₹', font: { size: 11 } } }),
+    });
+    plot('cd-price', tr, layout, lg);
+  }
+  // volume per candle, coloured by direction
+  {
+    const w = d.minutes * 60000 * 0.85;
+    plot('cd-volume', [{ x: t, y: s.volume, type: 'bar', width: w, marker: { color: s.up.map((u) => (u ? T.up : T.down)), opacity: 0.75 },
+                         hovertemplate: '%{x|%H:%M} · %{y:,.0f}<extra></extra>' }],
+      baseLayout({ bargap: 0, xaxis: timeAxis({ range, hoverformat: '%H:%M' }), yaxis: valAxis({ tickformat: '.2s', rangemode: 'tozero' }) }),
+      [{ name: 'Volume', color: T.acc, kind: 'bar', traces: [0] }]);
+    syncGroup('cd', ['cd-price', 'cd-volume']);
+  }
+  // the profile on its own, up volume against down volume, with the levels marked
+  if (hasP) {
+    const tr = [{ type: 'bar', orientation: 'h', x: P.up, y: P.prices, width: P.step * 0.9, name: 'Up candles', marker: { color: T.up, opacity: 0.65 },
+                  hovertemplate: '%{y:,.2f} · up %{x:,.0f}<extra></extra>' },
+                { type: 'bar', orientation: 'h', x: P.down, y: P.prices, width: P.step * 0.9, name: 'Down candles', marker: { color: T.down, opacity: 0.65 },
+                  hovertemplate: '%{y:,.2f} · down %{x:,.0f}<extra></extra>' }];
+    const note = (y, text, color) => ({ xref: 'paper', x: 1, xanchor: 'right', yref: 'y', y, yanchor: 'bottom', text, showarrow: false, font: { size: 10, color } });
+    plot('cd-profile', tr, baseLayout({
+      barmode: 'stack', hovermode: 'closest', bargap: 0, shapes: levelShapes,
+      annotations: [note(P.vah, 'VAH', T.muted), note(P.poc, 'POC', T.orange), note(P.val, 'VAL', T.muted)],
+      xaxis: { gridcolor: T.grid, linecolor: T.line, zeroline: false, tickformat: '.2s', rangemode: 'tozero' },
+      yaxis: valAxis({ tickformat: ',.2f' }),
+    }), [{ name: 'Up candles', color: T.up, kind: 'bar', traces: [0] }, { name: 'Down candles', color: T.down, kind: 'bar', traces: [1] }]);
+  } else if ($('cd-profile').data) Plotly.purge('cd-profile');
+
+  // key levels against the last price
+  const last = S.close;
+  const rows = [['Day high', S.high], ['Value area high', P.vah], ['VWAP', S.vwap], ['Point of control', P.poc], ['Value area low', P.val], ['Day low', S.low]]
+    .filter(([, v]) => v != null).sort((a, b) => b[1] - a[1]);
+  $('cd-levels').innerHTML = '<thead><tr><th>Level</th><th class="num">Price</th><th class="num">vs last</th></tr></thead><tbody>' +
+    rows.map(([k, v]) => `<tr><td>${k}</td><td class="num">${fmt(v)}</td><td class="num">${signed((v / last - 1) * 100, (x) => fmt(x) + '%')}</td></tr>`).join('') +
+    `<tr><td>Last</td><td class="num"><b>${fmt(last)}</b></td><td class="num">–</td></tr></tbody>`;
+  $('cd-note').textContent = hasP
+    ? `Each candle's volume is spread evenly over the prices between its low and high, then summed per price level (${P.value_area_pct.toFixed(0)}% of the volume sits inside the value area; level height ${fmt(P.step)}). ` +
+      'Candle volume comes from the ' + SOURCE_LABEL[d.source] + (d.source === 'rest' ? ', which carries no bid, ask or VWAP, so the VWAP line here is computed from the candles.' : '.')
+    : 'This day has no traded volume, so there is no volume profile.';
+  requestAnimationFrame(resizeVisible);
+}
+
 /* ---------------------------------------------------------------- wiring */
 $('date').onchange = (e) => {
   const want = e.target.value;
   if (!want) { e.target.value = state.day; return; }                              // cleared: keep the current day
-  const day = state.meta.days.includes(want) ? want : nearestDay(state.meta.days, want);
+  const days = daysFor(state.tab);
+  const day = days.includes(want) ? want : nearestDay(days, want);
   const note = $('date-note');
   note.hidden = day === want;
   if (day !== want) {                                                             // no data that day: say so and move to the nearest day with data
@@ -796,6 +938,10 @@ $('width').onchange = (e) => { setWidth(e.target.value); refreshEquity(); };
 $('volwin').onchange = (e) => { setWin(e.target.value); refreshEquity(); };
 $('fo-width').onchange = (e) => { setWidth(e.target.value); loadFoContract(state.foContract); };
 $('fo-volwin').onchange = (e) => { setWin(e.target.value); loadFoContract(state.foContract); };
+$('cd-symbol').onchange = (e) => { state.cSymbol = e.target.value; refreshCandles(); };
+$('cd-minutes').onchange = (e) => { state.cMinutes = +e.target.value; refreshCandles(); };
+$('cd-bins').onchange = (e) => { state.cBins = +e.target.value; refreshCandles(); };
+$('cd-source').onchange = (e) => { state.cSource = e.target.value; refreshCandles(); };
 $('heat-n').onchange = (e) => { state.heatN = +e.target.value; renderHeat(); };
 $('heat-metric').onchange = (e) => { state.heatMetric = e.target.value; renderHeat(); };
 $('underlying').onchange = (e) => { state.underlying = e.target.value; state.expiry = null; state.foContract = null; refreshFo(); };
@@ -816,6 +962,7 @@ window.addEventListener('resize', () => {                // re-layout charts whe
   lastPhone = phone();
   if (state.tab === 'instrument' && state.data) renderSeries(state.data, EQ);
   if (state.tab === 'overview' && state.overview.length) renderOverview();
+  if (state.tab === 'candles' && state.cData) renderCandles(state.cData);
   if (state.tab === 'fo' && state.foData) { renderFo(state.foData); if (state.foContractData) renderSeries(state.foContractData, FC); }
 });
 init();
