@@ -209,12 +209,23 @@ def healthy(world, tmp_path, monkeypatch):
     import pandas as pd
     fx.refresh(world.lakedir, currencies=list(fx.REQUIRED), now=datetime(2026, 10, 27, 0, 30),
                download=lambda t, **kw: {x: pd.DataFrame({"Close": [1.0] * 3}, index=pd.bdate_range("2026-10-23", periods=3)) for x in t})
+    write_completeness(world.lakedir)
     bk = tmp_path / "bk"
     (bk / "2026-10-27").mkdir(parents=True); (bk / "2026-10-27/MANIFEST.json").write_text("{}")
     monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "tok"); monkeypatch.delenv("UPSTOX_FEED_TOKEN", raising=False)
     monkeypatch.setattr(health.shutil, "which", lambda x: None)
     monkeypatch.setattr(health, "utcnow", lambda: NOW)
     return world, bk
+
+
+def write_completeness(lake_dir, statuses=None, checked="2026-10-27", last_attempt="2026-10-20 01:00:00"):
+    import pandas as pd
+    statuses = statuses or {"complete": 30}
+    rows = [{"symbol": f"{st}{i}", "market": "US", "status": st, "periods": 4, "missing": "", "latest_fy": "2025-12-31", "age_days": 300, "reason": "",
+             "last_attempt": last_attempt, "checked": checked} for st, n in statuses.items() for i in range(n)]
+    d = lake_dir / "yf_fundamentals"
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_parquet(d / "completeness.parquet", index=False)
 
 
 def run_health(world, bk, **kw):
@@ -278,6 +289,31 @@ def test_fx_rates_are_reported_and_a_stale_or_missing_file_warns(healthy, capsys
     fx.rates_path(world.lakedir).unlink()
     run_health(world, bk, after_close=True)
     assert "[WARN] no FX rates yet (run: python -m data_layer.fx refresh)" in capsys.readouterr().out
+
+
+def test_yahoo_fundamentals_line_reports_the_totals_and_warns_on_each_kind_of_trouble(healthy, capsys):
+    world, bk = healthy
+    run_health(world, bk, after_close=True)
+    assert "[PASS] Yahoo fundamentals: 30 of 30 fetched symbols complete (4 years), 0 with a missing year or item, 0 failed, 0 not fetched yet" in capsys.readouterr().out
+    write_completeness(world.lakedir, {"complete": 40, "incomplete": 4, "fetch_failed": 1, "pending": 55})
+    run_health(world, bk, after_close=True)
+    out = capsys.readouterr().out
+    assert "[PASS] Yahoo fundamentals: 40 of 45 fetched symbols complete (4 years), 4 with a missing year or item, 1 failed, 55 not fetched yet" in out
+    write_completeness(world.lakedir, {"complete": 20, "fetch_failed": 8})
+    run_health(world, bk, after_close=True)
+    assert "[WARN] Yahoo fundamentals" in capsys.readouterr().out and "8 symbols failed" in health_out(capsys, world, bk)
+    write_completeness(world.lakedir, {"complete": 30}, checked="2026-10-20")
+    assert "the completeness check last ran 2026-10-20" in health_out(capsys, world, bk)
+    write_completeness(world.lakedir, {"complete": 30}, last_attempt="2026-09-01 01:00:00")
+    assert "30 symbols not refreshed for over 37 days" in health_out(capsys, world, bk)
+    (world.lakedir / "yf_fundamentals" / "completeness.parquet").unlink()
+    assert "[WARN] Yahoo fundamentals: no completeness report yet" in health_out(capsys, world, bk)
+
+
+def health_out(capsys, world, bk):
+    capsys.readouterr()
+    run_health(world, bk, after_close=True)
+    return capsys.readouterr().out
 
 
 def test_no_calendar_file_is_a_warning_not_a_silent_assumption(healthy, capsys):

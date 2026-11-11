@@ -8,7 +8,9 @@ ohlc-daily      Fetch last N days of daily OHLC via yfinance for India, US, UK, 
                 Writes data/ohlc/ohlc_daily_*.csv then calls:
                   data_layer.lake.load_ohlc(daily=True)  -> lake/ohlc/year=YYYY/
 
-fundamentals    Read data/universe.csv + data/fund_meta.csv, pick the
+fundamentals    RETIRED (SCRUM-138): fundamentals now come from Yahoo through
+                python -m data_layer.yf_fundamentals (cron entries in deploy/crontab).  The old FMP
+                rotation below is no longer scheduled; it reads data/universe.csv + data/fund_meta.csv, picks the
                 stalest tickers that fit within today's FMP free-tier budget
                 (default 248 calls = 62 tickers × 4 endpoints), fetch from FMP,
                 update fund_meta.csv, then upsert into the Parquet lake:

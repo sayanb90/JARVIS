@@ -1,4 +1,8 @@
 """
+RETIRED for fundamentals (decision record SCRUM-138, 2026-11-11): the job is no longer scheduled; fundamentals come from Yahoo through
+data_layer/yf_fundamentals.py.  FMP's free plan covers US exchanges only (HTTP 402 for NSE and London) and its global tier is expensive for
+the whole universe.  This module is kept for `read_universe` (the universe files, used everywhere) and for the old tests.
+
 FMP (Financial Modeling Prep) data extraction layer for JARVIS — fundamentals only.
 
 Pulls 5 years of annual fundamental data (income statement, balance sheet,

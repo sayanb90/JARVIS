@@ -121,6 +121,35 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
         r.line("WARN" if age > 4 or lacking else "PASS", f"FX rates: newest {newest} ({age} days old), {len(rates.currencies())} currencies"
                + (f"; missing {', '.join(lacking)}" if lacking else ""))
 
+    # Yahoo fundamentals (SCRUM-161, SCRUM-163): the four-year completeness of every symbol, from the daily check
+    comp = lake_dir / "yf_fundamentals" / "completeness.parquet"
+    if not comp.exists():
+        r.line("WARN", "Yahoo fundamentals: no completeness report yet (run: python -m data_layer.yf_fundamentals check)")
+    else:
+        try:
+            import duckdb
+            counts = dict(duckdb.connect().execute(f"SELECT status, count(*) FROM read_parquet('{comp}') GROUP BY 1").fetchall())
+            checked, overdue = duckdb.connect().execute(
+                f"SELECT max(checked), count(*) FILTER (WHERE last_attempt IS NOT NULL AND CAST(last_attempt AS TIMESTAMP) < "
+                f"CAST('{today}' AS TIMESTAMP) - INTERVAL 37 DAY) FROM read_parquet('{comp}')").fetchall()[0]
+            pending, complete, failed = counts.get("pending", 0), counts.get("complete", 0), counts.get("fetch_failed", 0)
+            fetched = sum(counts.values()) - pending
+            thin = fetched - complete - failed
+            age = (today - date.fromisoformat(str(checked))).days if checked else None
+            problems = []
+            if age is None or age > 3:
+                problems.append(f"the completeness check last ran {checked}")
+            if overdue:
+                problems.append(f"{overdue} symbols not refreshed for over 37 days (the daily job is not keeping up)")
+            if fetched >= 20 and failed > 0.1 * fetched:
+                problems.append(f"{failed} symbols failed")
+            if fetched >= 20 and complete < 0.85 * fetched:
+                problems.append(f"only {complete} of {fetched} complete")
+            r.line("WARN" if problems else "PASS", f"Yahoo fundamentals: {complete} of {fetched} fetched symbols complete (4 years), {thin} with a missing "
+                   f"year or item, {failed} failed, {pending} not fetched yet" + ("; " + "; ".join(problems) if problems else ""))
+        except Exception as exc:                                  # noqa: BLE001
+            r.line("WARN", f"Yahoo fundamentals: the completeness report cannot be read ({str(exc).splitlines()[0][:80]})")
+
     lake, tables, lake_error = None, [], None
     try:
         lake = Lake(lake_dir)

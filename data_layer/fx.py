@@ -50,7 +50,7 @@ def rates_path(lake_dir: Path | None = None) -> Path:
 
 def split_currency(code: str) -> tuple[str, float]:
     """("GBp") -> ("GBP", 0.01): the major currency and how many of it one unit of `code` is."""
-    c = (code or "").strip()
+    c = code.strip() if isinstance(code, str) else ""
     for major, minors in MINOR_UNITS.items():
         if c in minors:
             return major, 0.01
@@ -65,6 +65,8 @@ class Rates:
 
     @classmethod
     def from_frame(cls, df: pd.DataFrame) -> "Rates":
+        if df is None or df.empty:
+            return cls()
         out: dict[str, tuple[list[date], list[float]]] = {}
         for ccy, g in df.sort_values("date").groupby("currency"):
             out[str(ccy)] = ([pd.Timestamp(d).date() for d in g["date"]], [float(v) for v in g["usd_per_unit"]])
