@@ -20,7 +20,7 @@ import sys
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
-from . import backup, market_calendar, tick_store
+from . import backup, fx, market_calendar, tick_store
 from .fmp_client import read_universe
 from .lake import BARS_MARKETS, LAKE_DIR, MARKETS, ROOT
 from .query import Lake
@@ -109,6 +109,17 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
         r.line("PASS", f"market calendar: special session today ({today_cal.reason})")
     else:
         r.line("PASS", "market calendar: NSE is open today")
+
+    # FX rates (SCRUM-160): needed to compare earnings in one currency with prices in another
+    rates = fx.load_rates(lake_dir)
+    if rates is None:
+        r.line("WARN", "no FX rates yet (run: python -m data_layer.fx refresh)")
+    else:
+        newest = rates.newest()
+        age = (today - newest).days
+        lacking = [c for c in fx.REQUIRED if c not in rates.currencies()]
+        r.line("WARN" if age > 4 or lacking else "PASS", f"FX rates: newest {newest} ({age} days old), {len(rates.currencies())} currencies"
+               + (f"; missing {', '.join(lacking)}" if lacking else ""))
 
     lake, tables, lake_error = None, [], None
     try:

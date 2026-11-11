@@ -17,6 +17,8 @@ JARVIS=/home/jarvis/JARVIS
 # history forward; each run re-fetches the last 5 days (idempotent), so a missed day or two is filled in.  India is recorded tick by
 # tick by the Upstox feed instead.
 0 22 * * 1-5   cd $JARVIS && python scheduler.py --job bars --market ALL --interval 1m >> logs/scheduler.log 2>&1
+# Daily FX rates from Yahoo (for comparing earnings in one currency with prices in another); after the Asian and European closes
+30 0 * * *     cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1
 # Fundamentals rotation (India; spends the FMP free-tier budget on the stalest stocks)
 0 12 * * 1-5   cd $JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
 # Nightly backup snapshot: parked until a separate disk or bucket exists (SCRUM-121); health only warns, cron_check does not require it.

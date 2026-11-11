@@ -125,3 +125,40 @@ def test_read_universe_uses_the_global_file_for_covered_markets_and_the_active_f
     assert [r["symbol"] for r in world.fmp.read_universe("UK")] == ["SHEL.L"]                  # not covered by the build: unchanged
     assert [r["symbol"] for r in world.fmp.read_universe("IN")] == ["A.NS"]
     assert {r["symbol"] for r in world.fmp.read_universe()} == {"A.NS", "SHEL.L", "SAP.DE", "MSFT", "NVDA", "7203.T"}
+
+
+def test_a_downloaded_ishares_file_and_a_plain_csv_both_import(tmp_path, capsys):
+    holdings = ("iShares STOXX Europe 600 UCITS ETF\nFund Holdings as of,Nov 10\n\n"
+                "Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Location,Exchange\n"
+                + "".join(f"E{i},Eu {i},Health Care,Equity,1,0.1,Germany,Xetra\n" for i in range(520))
+                + "-,Cash,Cash,Cash,1,0.1,-,-\nEURUSD,FX,FX,FX Contract,1,0.1,-,-\n")
+    f = tmp_path / "exsa.csv"
+    f.write_text(holdings)
+    assert iu.main(["import", "stoxx600", str(f)], root=tmp_path) == 0
+    rows = iu.read_source(iu.BY_KEY["stoxx600"], tmp_path)
+    assert len(rows) == 520 and rows[0]["code"] == "E0" and rows[0]["exchange"] == "Xetra" and rows[0]["country"] == "Germany"
+    plain = tmp_path / "tw.csv"
+    plain.write_text("Code,Company Name\n" + "".join(f"{2300 + i},Co {i}\n" for i in range(50)))
+    assert iu.main(["import", "taiwan50", str(plain)], root=tmp_path) == 0
+    assert iu.main(["build", "--only", "stoxx600,taiwan50"], root=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "stoxx600" in out and "520 members -> 520 symbols" in out
+
+
+def test_an_imported_file_with_the_wrong_count_or_an_unknown_key_is_refused(tmp_path, capsys):
+    short = tmp_path / "short.csv"
+    short.write_text("Ticker,Name\nA,a\nB,b\n")
+    assert iu.main(["import", "taiwan50", str(short)], root=tmp_path) == 1
+    assert "2 members found in the file, expected 48 to 52: not imported" in capsys.readouterr().out
+    assert iu.main(["import", "nope", str(short)], root=tmp_path) == 2
+    assert iu.main(["import", "taiwan50", str(tmp_path / "missing.csv")], root=tmp_path) == 1
+
+
+def test_the_nikkei_and_kospi_pages_found_on_the_vps_are_read():
+    nik = "".join(page(["Code", "Company Name"], [[f"{1000 + i + 10 * s}", f"Co {i}"] for i in range(7)]) for s in range(32))      # 224 members in 32 tables
+    nik += page(["Code", "Company Name"], [["9999", "Last Co"]])
+    members, note = iu.fetch_index(iu.BY_KEY["nikkei225"], lambda url: nik)
+    assert "indexes.nikkei.co.jp" in iu.BY_KEY["nikkei225"].url and len(members) >= 215, note
+    kospi = page(["Company", "Symbol", "GICS Sector"], [[f"Co {i}", f"{5930 + i:06d}", "Information Technology"] for i in range(200)])
+    members, note = iu.fetch_index(iu.BY_KEY["kospi200"], lambda url: kospi)
+    assert iu.BY_KEY["kospi200"].url.endswith("/KOSPI_200") and len(members) == 200 and members[0]["sector"] == "Information Technology"
