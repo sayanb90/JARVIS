@@ -452,15 +452,17 @@ def assemble(root: Path | None = None, only: list[str] | None = None) -> Built:
     return out
 
 
-def validate(built: Built, batch: Callable | None = None) -> tuple[int, int]:
+def validate(built: Built, batch: Callable | None = None, retry: Callable | None = None) -> tuple[int, int]:
     """Ask Yahoo for five daily bars per symbol; a symbol with none is moved to the rejects.  A chunk with no answer at all (Yahoo down
     or blocking us) proves nothing, so its symbols stay.  Returns (rejected, unchecked)."""
     if batch is None:
         from .yf_client import CHUNK_SIZE, _batch_download
         size = CHUNK_SIZE
         batch = lambda chunk: _batch_download(chunk, period="5d")          # noqa: E731
+        retry = retry or (lambda chunk: _batch_download(chunk, period="1mo"))        # a halted stock has no bars in 5 days but some in a month
     else:
         size = 100
+        retry = retry or batch
     keep, rejected, unchecked = [], 0, 0
     syms = [r["symbol"] for r in built.rows]
     bad: set[str] = set()
@@ -474,6 +476,13 @@ def validate(built: Built, batch: Callable | None = None) -> tuple[int, int]:
             unchecked += len(chunk)
             continue
         bad |= set(chunk) - set(got)
+    todo = sorted(bad)
+    for i in range(0, len(todo), 10):                      # Yahoo drops symbols from a big batch now and then: ask again in small ones before rejecting
+        chunk = todo[i:i + 10]
+        try:
+            bad -= set(retry(chunk) or {})
+        except Exception:                                  # noqa: BLE001
+            pass
     for r in built.rows:
         if r["symbol"] in bad:
             built.rejects.append((r["symbol"], r["market"], "Yahoo has no daily bars for this symbol"))

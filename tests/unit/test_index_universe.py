@@ -105,6 +105,16 @@ def test_validate_rejects_symbols_yahoo_does_not_know_but_trusts_nothing_from_a_
     assert (rejected, unchecked) == (0, 49) and len(built.rows) == 49
 
 
+def test_validate_asks_again_in_small_batches_before_rejecting(tmp_path):
+    write_source(tmp_path, "taiwan50", [f"{2300 + i},Co {i},,," for i in range(50)])
+    built = iu.assemble(tmp_path, only=["taiwan50"])
+    flaky, gone = "2305.TW", "2310.TW"                                                      # Yahoo drops both from the big batch; only one is really gone
+    rejected, _ = iu.validate(built, batch=lambda chunk: {s: object() for s in chunk if s not in (flaky, gone)},
+                              retry=lambda chunk: {s: object() for s in chunk if s != gone})
+    assert rejected == 1 and len(built.rows) == 49 and flaky in {r["symbol"] for r in built.rows}
+    assert [r[0] for r in built.rejects] == [gone]
+
+
 def test_command_line_fetch_build_and_status(tmp_path, capsys):
     html = page(["Ticker", "Company"], [[f"{2300 + i}", f"Co {i}"] for i in range(50)])
     assert iu.main(["fetch", "--only", "taiwan50"], root=tmp_path, getter=lambda url: html) == 0
