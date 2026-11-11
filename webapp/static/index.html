@@ -17,6 +17,7 @@
       <button role="tab" id="tab-instrument" data-tab="instrument" aria-selected="true">Equities</button>
       <button role="tab" id="tab-overview" data-tab="overview" aria-selected="false">Market</button>
       <button role="tab" id="tab-fo" data-tab="fo" aria-selected="false">Derivatives</button>
+      <button role="tab" id="tab-candles" data-tab="candles" aria-selected="false">Candles</button>
       <button role="tab" id="tab-data" data-tab="data" aria-selected="false">Data</button>
     </nav>
     <div class="spacer"></div>
@@ -218,6 +219,42 @@
         <p class="note" id="fo-greeks-note"></p>
       </div>
     </div>
+  </section>
+
+  <!-- ===================== Candles ===================== -->
+  <section id="view-candles" class="view" hidden>
+    <div class="page-head">
+      <div><h1 id="cd-title">Candles</h1><p class="sub" id="cd-sub"></p></div>
+      <div class="toolbar">
+        <label class="field wide"><span>Instrument</span><select id="cd-symbol"></select></label>
+        <label class="field"><span>Candle</span><select id="cd-minutes"></select></label>
+        <label class="field"><span>Profile levels</span><select id="cd-bins"></select></label>
+        <label class="field"><span>Source</span><select id="cd-source">
+          <option value="auto">Automatic</option><option value="live">Live feed</option><option value="rest">REST candles</option></select></label>
+      </div>
+    </div>
+    <div id="cd-cards" class="kpis"></div>
+    <nav class="subtabs" role="tablist" aria-label="Candle views" data-tab="candles">
+      <button role="tab" data-sub="chart">Candles &amp; profile</button>
+      <button role="tab" data-sub="profile">Volume profile</button>
+    </nav>
+    <div class="subview stack" data-sub="chart">
+      <div class="panel"><header><h3>Candles with volume profile<span class="hint">IST · profile on the right shares the price axis</span></h3><div class="legend" data-for="cd-price"></div></header>
+        <div class="body"><div id="cd-price" class="plot h-xl" aria-label="Candlestick chart with volume profile"></div></div></div>
+      <div class="panel"><header><h3>Volume per candle<span class="hint">green = closed up, red = closed down</span></h3><div class="legend" data-for="cd-volume"></div></header>
+        <div class="body"><div id="cd-volume" class="plot h-sm" aria-label="Volume per candle"></div></div></div>
+    </div>
+    <div class="subview" data-sub="profile" hidden>
+      <div class="split">
+        <div class="panel"><header><h3>Volume at price<span class="hint">up candles vs down candles</span></h3><div class="legend" data-for="cd-profile"></div></header>
+          <div class="body"><div id="cd-profile" class="plot h-xl" aria-label="Volume at price"></div></div></div>
+        <aside class="panel" aria-label="Key levels">
+          <header><h3>Key levels</h3></header>
+          <div class="table-wrap"><table id="cd-levels"></table></div>
+        </aside>
+      </div>
+    </div>
+    <p class="note" id="cd-note"></p>
   </section>
 
   <!-- ===================== Data ===================== -->

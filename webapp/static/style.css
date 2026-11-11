@@ -187,6 +187,7 @@ table.clickable tbody tr:hover td{background:var(--panel2)}
   .subtabs{gap:0}.subtabs button{padding:10px 9px 11px;font-size:13.5px}
   th,td{padding:8px 9px}
 }
+#cd-levels th.num,#cd-levels td.num{text-align:right}
 
 /* ---------- Data tab ---------- */
 .legend .sw{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;margin-right:6px;font-size:10px;line-height:1;color:#fff;font-weight:700}
