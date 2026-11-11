@@ -127,6 +127,7 @@ Edit `data/universe.csv` to add your stocks. The 10 NSE rows shipped with the re
 ```bash
 # Fetch 5 years of OHLC via Yahoo Finance — no API key needed
 python -m data_layer.yf_client --mode full --market ALL    # India, US, UK, EU (daily, 5 years)
+python -m data_layer.yf_client --mode full --market US --years 20     # deeper history, one market at a time (or --years max)
 ```
 
 ### 4. Initial fundamentals and FX load (Yahoo, free)

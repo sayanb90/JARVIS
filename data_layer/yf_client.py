@@ -184,10 +184,31 @@ def _iv(v) -> Optional[int]:
 # Public fetch functions
 # ---------------------------------------------------------------------------
 
-def fetch_ohlc_full(tickers: list[str], market: str) -> list[OHLCRow]:
+def history_period(years: int | None = YEARS_BACK) -> str:
+    """The Yahoo `period` for a full download: "<N>y", or "max" (everything Yahoo has) when `years` is None or 0."""
+    if years is not None and years < 0:
+        raise ValueError("years must be positive, or 0 / None for everything Yahoo has")
+    return f"{years}y" if years else "max"
+
+
+def parse_years(text: str) -> int | None:
+    """Command-line value of --years: a whole number of years, or "max" (returned as None)."""
+    if text.strip().lower() == "max":
+        return None
+    n = int(text)
+    if n <= 0:
+        raise ValueError("--years must be a positive number or 'max'")
+    return n
+
+
+def fetch_ohlc_full(tickers: list[str], market: str, years: int | None = YEARS_BACK) -> list[OHLCRow]:
     """
-    Fetch YEARS_BACK years of daily OHLC for all tickers in one market.
+    Fetch `years` years of daily OHLC (default YEARS_BACK; None or 0 = everything Yahoo has) for all tickers in one market.
     Downloads in chunks of CHUNK_SIZE to stay within yfinance's sweet spot.
+
+    A full download replaces every stored day of a symbol with prices adjusted on one basis (today's), which is also the way to
+    repair a series whose older rows were adjusted before a later split or dividend.  Rows are held in memory for the whole
+    market before they are written: twenty years of a 600-stock market is about three million rows, so run one market at a time.
     """
     all_rows: list[OHLCRow] = []
     total_chunks = (len(tickers) + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -198,7 +219,7 @@ def fetch_ohlc_full(tickers: list[str], market: str) -> list[OHLCRow]:
         log.info("[%s] OHLC full chunk %d/%d (%d tickers) …",
                  market, chunk_num, total_chunks, len(chunk))
         try:
-            batch = _batch_download(chunk, period=f"{YEARS_BACK}y")
+            batch = _batch_download(chunk, period=history_period(years))
         except Exception as exc:
             log.error("Chunk %d failed: %s — skipping", chunk_num, exc)
             continue
@@ -491,23 +512,24 @@ def run_ohlc(
     market: str = "ALL",
     tickers: list[str] | None = None,
     dry_run: bool = False,
+    years: int | None = YEARS_BACK,
 ) -> None:
     """
-    Full historical OHLC refresh (5 years).  No API key needed.
+    Full historical OHLC refresh (`years` years, default 5; None or 0 = everything Yahoo has).  No API key needed.
     Run once for initial setup, then monthly to catch any backfill gaps.
     """
     if market == "ALL":
-        return _all_markets(run_ohlc, "full OHLC", tickers=tickers, dry_run=dry_run)
+        return _all_markets(run_ohlc, "full OHLC", tickers=tickers, dry_run=dry_run, years=years)
 
     universe = _resolve_universe(market, tickers)
 
     if dry_run:
         chunks = (len(universe) + CHUNK_SIZE - 1) // CHUNK_SIZE
-        log.info("DRY RUN full [%s] — %d tickers in %d batch(es), 0 API keys needed",
-                 market, len(universe), chunks)
+        log.info("DRY RUN full [%s] — %d tickers in %d batch(es), period %s, 0 API keys needed",
+                 market, len(universe), chunks, history_period(years))
         return
 
-    rows = fetch_ohlc_full(universe, market)
+    rows = fetch_ohlc_full(universe, market, years)
     _require_rows(rows, universe, market, "full OHLC")
     write_ohlc(rows, market)
 
@@ -557,7 +579,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="JARVIS yfinance OHLC fetcher")
     parser.add_argument("--mode", default="daily", choices=["full", "daily", "intraday"],
                         help=(
-                            "full     = 5-year OHLC for initial/monthly backfill; "
+                            "full     = --years of daily OHLC (default 5) for initial/monthly backfill; "
                             "daily    = last --days-back calendar days (run every trading day); "
                             "intraday = aggregated intraday bars (run after each market close)"
                         ))
@@ -568,6 +590,8 @@ if __name__ == "__main__":
                         help="Daily OHLC: IN, US, UK, EU or ALL. Intraday: IN only")
     parser.add_argument("--days-back", type=int, default=DAILY_OHLC_DAYS,
                         help=f"Calendar days to look back in daily mode (default: {DAILY_OHLC_DAYS})")
+    parser.add_argument("--years", default=str(YEARS_BACK), metavar="N|max",
+                        help=f"full mode: years of daily history to download (default {YEARS_BACK}); 'max' = everything Yahoo has")
     parser.add_argument("--backfill", action="store_true",
                         help="intraday: fetch the deepest window Yahoo allows for --interval")
     parser.add_argument("--tickers", nargs="*", default=None,
@@ -579,7 +603,7 @@ if __name__ == "__main__":
     (ROOT / "logs").mkdir(parents=True, exist_ok=True)
 
     if args.mode == "full":
-        run_ohlc(market=args.market, tickers=args.tickers, dry_run=args.dry_run)
+        run_ohlc(market=args.market, tickers=args.tickers, dry_run=args.dry_run, years=parse_years(args.years))
     elif args.mode == "intraday":
         run_bars(market=args.market, tickers=args.tickers, interval=args.interval,
                  days_back=args.days_back if args.days_back != DAILY_OHLC_DAYS else INTRADAY_DAYS_BACK,

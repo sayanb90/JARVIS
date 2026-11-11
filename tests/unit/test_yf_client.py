@@ -193,3 +193,25 @@ def test_all_markets_keep_going_after_one_market_fails_then_raise(world, monkeyp
         world.yf.run_ohlc("ALL")
     names = {p.name.split("_")[-1] for p in (world.data / "ohlc").glob("ohlc_*.csv")}
     assert names == {"in.csv", "uk.csv", "eu.csv"}          # the healthy markets were still written
+
+
+# -- deeper history (--years) --------------------------------------------------------------
+def test_history_period_and_years_option(world):
+    yf = world.yf
+    assert yf.history_period() == "5y" and yf.history_period(20) == "20y" and yf.history_period(None) == "max" and yf.history_period(0) == "max"
+    assert yf.parse_years("20") == 20 and yf.parse_years(" MAX ") is None
+    for bad in ("0", "-3"):
+        with pytest.raises(ValueError):
+            yf.parse_years(bad)
+    with pytest.raises(ValueError):
+        yf.history_period(-1)
+
+
+def test_full_run_passes_the_years_down_to_yahoo(world, monkeypatch):
+    seen = []
+    monkeypatch.setattr(world.yf, "_resolve_universe", lambda market, tickers: ["A.NS"])
+    monkeypatch.setattr(world.yf, "_batch_download", lambda chunk, **kw: seen.append(kw) or {t: frame(["2026-10-21"], [10]) for t in chunk})
+    world.yf.run_ohlc("IN", years=20)
+    world.yf.run_ohlc("IN", years=None)
+    world.yf.run_ohlc("IN")
+    assert seen == [{"period": "20y"}, {"period": "max"}, {"period": "5y"}]
