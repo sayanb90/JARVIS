@@ -294,4 +294,89 @@ def test_cli_status_spot_expired_and_stop(lake_dir, monkeypatch, capsys):
 def test_cli_without_a_token_says_so(lake_dir, monkeypatch, capsys):
     for v in ("UPSTOX_FEED_TOKEN", "UPSTOX_ACCESS_TOKEN"):
         monkeypatch.delenv(v, raising=False)
-    assert bf.main(["spot", "--dry-run"]) == 2 and "no token" in capsys.readouterr().err
+    assert bf.main(["expired", "--dry-run"]) == 2 and "no token" in capsys.readouterr().err
+
+
+# -- one lock for every writer of a bars day (the backfill, the nightly Yahoo load, the candle tool) -------------------------------
+def test_compact_day_and_load_bars_take_the_same_per_day_lock(lake_dir, monkeypatch):
+    from data_layer import tick_store
+    taken = []
+    real = tick_store._folder_lock
+    import contextlib
+
+    @contextlib.contextmanager
+    def spy(folder):
+        taken.append(folder.name)
+        with real(folder):
+            yield
+    monkeypatch.setattr(tick_store, "_folder_lock", spy)
+    fake = FakeUpstox(candle_days={"NSE_EQ%7CINE002A01018": ["2024-01-10"]})
+    bf.run_spot(fetcher(fake), {"NSE_EQ|INE002A01018": "RELIANCE.NS"}, date(2024, 1, 1), date(2024, 1, 31), state(lake_dir), lake_dir)
+    assert taken == ["date=2024-01-10"]
+    assert tick_store.compact_day("1m", date(2024, 1, 11), lake_dir) == 0 and taken == ["date=2024-01-10"]       # no folder: nothing to lock
+    monkeypatch.setattr(lake_mod, "DATA_DIR", lake_dir.parent / "data")
+    csv = lake_dir.parent / "data" / "bars" / "1m" / "us" / "2024-01-10.csv"
+    csv.parent.mkdir(parents=True)
+    csv.write_text("ts,symbol,market,open,high,low,close,volume\n2024.01.10D14:30:00.000000000,AAPL,US,1,2,0,1,5\n")
+    assert lake_mod.load_bars("1m", date(2024, 1, 1), ("US",)) == 1 and taken == ["date=2024-01-10", "date=2024-01-10"]
+    df = Lake(lake_dir).sql("SELECT DISTINCT symbol FROM bars_1m ORDER BY symbol")
+    assert list(df.symbol) == ["AAPL", "RELIANCE.NS"]                        # the load added a market to the day, it did not replace the backfill's rows
+
+
+# -- call budget, time limit, anonymous candles ------------------------------------------------------------------------------------
+def test_anonymous_requests_carry_no_token_and_expired_refuses_to_run_anonymously(lake_dir):
+    sent = []
+
+    class Spy(FakeUpstox):
+        def get(self, url, params=None, headers=None, timeout=None):
+            sent.append((headers or {}).get("Authorization"))
+            return super().get(url, params=params, headers=headers, timeout=timeout)
+    fake = Spy(candle_days={"NSE_EQ%7CINE002A01018": ["2024-01-10"]})
+    bf.run_spot(bf.Fetcher(UpstoxRest(lambda: "secret", session=fake, limiter=RateLimiter(windows=((1.0, 10**9),)), sleep=lambda s: None),
+                           anonymous=True), {"NSE_EQ|INE002A01018": "RELIANCE.NS"}, date(2024, 1, 1), date(2024, 1, 31), state(lake_dir), lake_dir)
+    assert sent == [None]
+    with pytest.raises(bf.Stop, match="needs a token"):
+        bf.Fetcher(rest_for(fake), anonymous=True).expired_candles("k", date(2024, 1, 1), date(2024, 1, 2))
+    refused = FakeUpstox(fail={"historical-candle": err(401, "UDAPI100050")})
+    with pytest.raises(bf.Stop, match="without a token"):
+        bf.run_spot(bf.Fetcher(rest_for(refused), anonymous=True), KM, date(2024, 2, 1), date(2024, 2, 29), state(lake_dir), lake_dir)
+
+
+def test_the_time_limit_stops_cleanly_after_storing_and_the_next_run_continues(lake_dir, capsys, monkeypatch):
+    ticks = iter(range(0, 10**6, 100))                                  # the clock advances 100 s per look
+    fake = FakeUpstox(candle_days={"NSE_EQ%7CINE002A01018": ["2024-01-10", "2024-02-12", "2024-03-11"]})
+    f = bf.Fetcher(rest_for(fake), max_minutes=5, clock=lambda: next(ticks))             # 300 s: about two calls
+    km = {"NSE_EQ|INE002A01018": "RELIANCE.NS"}
+    with pytest.raises(bf.TimeUp, match="run the same command again"):
+        bf.run_spot(f, km, date(2024, 1, 1), date(2024, 3, 31), state(lake_dir), lake_dir)
+    done = [t for t in state(lake_dir).tasks if state(lake_dir).done(t)]
+    assert 1 <= len(done) < 3 and Lake(lake_dir).sql("SELECT count(*) n FROM bars_1m").n[0] == 3 * len(done)
+    monkeypatch.setattr(bf, "build_key_map", lambda: (km, []))
+    monkeypatch.setattr(bf, "Fetcher", lambda rest, dump_raw=0, **kw: bf.Fetcher.__new__(bf.Fetcher) if False else _TimeUpFetcher())
+    assert bf.main(["spot", "--from", "2024-01-01", "--to", "2024-03-31", "--no-index", "--max-minutes", "1"], rest=rest_for(fake)) == bf.EX_TEMPFAIL
+    assert "TIME LIMIT" in capsys.readouterr().err
+
+
+class _TimeUpFetcher:
+    def minute_candles(self, *a):
+        raise bf.TimeUp("the time limit (--max-minutes) is reached")
+
+
+def test_the_call_budget_reaches_the_limiter_and_the_estimate_follows_it(lake_dir, monkeypatch, capsys):
+    monkeypatch.setenv("UPSTOX_FEED_TOKEN", "tok")
+    seen = {}
+    real = bf.RateLimiter
+    monkeypatch.setattr(bf, "RateLimiter", lambda windows, **kw: seen.setdefault("w", windows) and real(windows=windows, **kw))
+    monkeypatch.setattr(bf, "build_key_map", lambda: ({"NSE_EQ|X": "X.NS"}, []))
+    assert bf.main(["spot", "--from", "2024-01-01", "--to", "2024-03-31", "--no-index", "--budget-30min", "900", "--dry-run"]) == 0
+    assert seen["w"][-1] == (1800.0, 900) and "900 calls per 30 minutes" in capsys.readouterr().out
+    assert "1,500 calls per 30 minutes" in bf.estimate(3000) and bf.estimate(2700, 1500).startswith("2,700 calls, about 1.0 hours")
+
+
+def test_spot_runs_without_a_token_but_expired_does_not(lake_dir, monkeypatch, capsys):
+    for v in ("UPSTOX_FEED_TOKEN", "UPSTOX_ACCESS_TOKEN"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setattr(bf, "build_key_map", lambda: ({"NSE_EQ|X": "X.NS"}, []))
+    assert bf.main(["spot", "--from", "2024-01-01", "--to", "2024-01-31", "--no-index", "--dry-run"]) == 0
+    assert "without one" in capsys.readouterr().err
+    assert bf.main(["expired", "--dry-run"]) == 2 and "no token" in capsys.readouterr().err

@@ -43,6 +43,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -57,6 +58,7 @@ from ..ticks import Bar
 from .candles import candles_to_bars, ist_today
 from .fo_instruments import contract_symbol, expiry_date
 from .instruments import INDEX_KEYS, build_key_map
+from .ratelimit import RateLimiter
 from .rest import Resp, UpstoxRest
 
 log = logging.getLogger(__name__)
@@ -67,10 +69,16 @@ OK, EMPTY, ERROR = "ok", "empty", "error"
 FLUSH_BARS = 250_000                            # bars held in memory before they are written and the touched days compacted
 MIN_FREE_GB = 15.0                              # stop before the disk the live feed writes to runs low
 PLUS_ERROR = "UDAPI1149"                        # "requires an Upstox Plus subscription"
+DEFAULT_BUDGET_30MIN = 1500                     # of the 2,000 calls per 30 minutes Upstox allows; the limiter keeps a further 10 % margin
+EX_TEMPFAIL = 75                                # exit code: stopped by --max-minutes, run again to continue
 
 
 class Stop(Exception):
     """The run cannot usefully continue (token rejected, plan missing, disk low).  What was stored stays stored."""
+
+
+class TimeUp(Stop):
+    """--max-minutes ran out.  Not a failure: everything fetched is stored and the next run continues where this one stopped."""
 
 
 # ---------------------------------------------------------------------------------------------- small helpers
@@ -164,11 +172,22 @@ class Sink:
 class Fetcher:
     """Candle and contract-list calls on top of UpstoxRest (rate limited, retried, never raises on HTTP errors)."""
 
-    def __init__(self, rest: UpstoxRest, dump_raw: int = 0, dump_dir: Path | None = None) -> None:
+    def __init__(self, rest: UpstoxRest, dump_raw: int = 0, dump_dir: Path | None = None, anonymous: bool = False,
+                 max_minutes: Optional[float] = None, clock=time.monotonic) -> None:
         self.rest, self.dump_raw, self.dump_dir, self.dumped = rest, dump_raw, dump_dir or Path("logs/backfill"), 0
+        self.anonymous = anonymous                      # the candle endpoints answered without a token when tested (2026-11-11)
+        self.clock = clock
+        self.deadline = clock() + max_minutes * 60 if max_minutes else None
+
+    def _time(self) -> None:
+        if self.deadline is not None and self.clock() >= self.deadline:
+            raise TimeUp("the time limit (--max-minutes) is reached: everything fetched so far is stored; run the same command again to continue")
 
     def _check(self, r: Resp) -> None:
         if r.status in (401, 403) and r.error_code != PLUS_ERROR:
+            if self.anonymous:
+                raise Stop(f"Upstox refused a request without a token (HTTP {r.status} {r.error_code}): it answered one on 2026-11-11 but may not "
+                           "any more.  Put the token in .env (UPSTOX_FEED_TOKEN) and run again without --anonymous; the backfill resumes")
             raise Stop(f"Upstox rejected the token (HTTP {r.status} {r.error_code}): refresh it and run again; the backfill resumes")
         if r.error_code == PLUS_ERROR:
             raise Stop("the Expired Instruments API answered UDAPI1149: it needs the Upstox Plus plan on the account of this token")
@@ -180,7 +199,8 @@ class Fetcher:
             self.dumped += 1
 
     def _candles(self, path: str, tag: str, name: str) -> tuple[Optional[list], str]:
-        r = self.rest.get(path, tag=tag)
+        self._time()
+        r = self.rest.get(path, tag=tag, auth=not self.anonymous)
         self._check(r)
         self._dump(name, r)
         if not r.ok:
@@ -195,10 +215,13 @@ class Fetcher:
         return self._candles(f"/v3/historical-candle/{enc(key)}/days/1/{d1:%Y-%m-%d}/{d0:%Y-%m-%d}", "candles_v3_day", f"v3-days-{d0}")
 
     def expired_candles(self, expired_key: str, d0: date, d1: date) -> tuple[Optional[list], str]:
+        if self.anonymous:
+            raise Stop("the Expired Instruments API needs a token (and Upstox Plus): --anonymous works for `spot` only")
         return self._candles(f"/v2/expired-instruments/historical-candle/{enc(expired_key)}/1minute/{d1:%Y-%m-%d}/{d0:%Y-%m-%d}",
                              "expired_candles_1m", f"expired-{d0}")
 
     def _list(self, path: str, params: dict, tag: str, name: str) -> tuple[Optional[list], str]:
+        self._time()
         r = self.rest.get(path, params, tag=tag)
         self._check(r)
         self._dump(name, r)
@@ -426,8 +449,9 @@ def _expiry_contracts(fetch: Fetcher, und: str, ukey: str, exp: date, daily: pd.
 
 
 # ---------------------------------------------------------------------------------------------- command line
-def estimate(calls: int) -> str:
-    return f"{calls:,} calls, about {calls / 1800 * 0.5:.1f} hours at the Upstox limit of 2,000 calls per 30 minutes"
+def estimate(calls: int, budget: int = DEFAULT_BUDGET_30MIN) -> str:
+    per_hour = budget * 0.9 * 2
+    return f"{calls:,} calls, about {calls / per_hour:.1f} hours at {budget:,} calls per 30 minutes (the Upstox limit is 2,000)"
 
 
 def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
@@ -439,11 +463,17 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
     common.add_argument("--limit", type=int, default=None, help="spot: first N stocks only; expired: newest N expiries per underlying")
     common.add_argument("--dry-run", action="store_true", help="count the calls and stop; nothing is fetched or stored (spot), "
                                                                  "or only the contract lists are read (expired)")
+    common.add_argument("--budget-30min", type=int, default=DEFAULT_BUDGET_30MIN, metavar="N",
+                        help=f"calls per 30 minutes (Upstox allows 2,000; default {DEFAULT_BUDGET_30MIN}, leaving room for the cron jobs that share the quota)")
+    common.add_argument("--max-minutes", type=float, default=None, metavar="M",
+                        help="stop cleanly after M minutes (exit code 75); run again to continue")
     common.add_argument("--token-env", default=None, metavar="NAME",
                         help="read the token from this .env variable (default: UPSTOX_FEED_TOKEN, then UPSTOX_ACCESS_TOKEN)")
     common.add_argument("--dump-raw", type=int, default=0, metavar="N", help="save the first N raw responses to logs/backfill/")
     sp = sub.add_parser("spot", parents=[common], help="1-minute candles of the stocks and indices")
     sp.add_argument("--no-index", action="store_true", help="stocks only")
+    sp.add_argument("--anonymous", action="store_true", help="send no token (the candle endpoints answered without one on 2026-11-11); "
+                                                             "also used when no token is configured")
     ex = sub.add_parser("expired", parents=[common], help="1-minute candles of expired index options and futures (Upstox Plus)")
     ex.add_argument("--underlying", nargs="+", default=list(UNDERLYING_KEYS), choices=list(UNDERLYING_KEYS))
     ex.add_argument("--strikes", type=int, default=5, help="strikes kept on each side of the money (default 5)")
@@ -461,15 +491,19 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
         for kind, v in sorted(s.items()):
             print(f"{kind:<18} ok {v[OK]:>7,}  empty {v[EMPTY]:>7,}  error {v[ERROR]:>6,}  bars {v['rows']:>13,}")
         return 0
+    injected, token = rest is not None, ""
     if rest is None:
         from dotenv import load_dotenv
         load_dotenv(lake_mod.ENV_FILE)
         token = os.getenv(a.token_env, "") if a.token_env else (os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN", ""))
-        if not token:
+        if not token and a.cmd != "spot":
             print("no token: run python -m data_layer.upstox.auth first (or name the variable with --token-env)", file=sys.stderr)
             return 2
-        rest = UpstoxRest(lambda: token)
-    fetch = Fetcher(rest, a.dump_raw)
+        if not token:
+            print("no token configured: asking for the candles without one (the endpoint allowed it on 2026-11-11)", file=sys.stderr)
+        rest = UpstoxRest(lambda: token, limiter=RateLimiter(windows=((1.0, 50), (60.0, 500), (1800.0, a.budget_30min))))
+    anonymous = a.cmd == "spot" and (a.anonymous or (not injected and not token))
+    fetch = Fetcher(rest, a.dump_raw, anonymous=anonymous, max_minutes=a.max_minutes)
     d1 = a.d_to or ist_today() - timedelta(days=1)
     try:
         if a.cmd == "spot":
@@ -479,7 +513,7 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
                 return 2
             st = run_spot(fetch, km, a.d_from, d1, state, lake_dir, a.dry_run)
             if a.dry_run:
-                print(f"spot, {len(km)} instruments, {max(a.d_from, MINUTE_HISTORY_START)}..{d1}: {estimate(st['calls_planned'])}")
+                print(f"spot, {len(km)} instruments, {max(a.d_from, MINUTE_HISTORY_START)}..{d1}: {estimate(st['calls_planned'], a.budget_30min)}")
             else:
                 print(f"spot done: {st['calls']:,} calls, {st['bars']:,} bars stored, {st['empty']:,} empty months, {st['errors']:,} errors "
                       f"(errors are retried by the next run)")
@@ -487,10 +521,14 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
             st = run_expired(fetch, a.underlying, a.d_from, d1, state, lake_dir, a.strikes, a.window_days, a.future_window_days,
                              a.dry_run, a.limit)
             if a.dry_run:
-                print(f"expired, {st['expiries']} expiries, {st['contracts']:,} contracts: {estimate(st['calls'])}")
+                print(f"expired, {st['expiries']} expiries, {st['contracts']:,} contracts: {estimate(st['calls'], a.budget_30min)}")
             else:
                 print(f"expired done: {st['expiries']} expiries, {st['contracts']:,} contracts, {st['calls']:,} calls, {st['bars']:,} bars "
                       f"stored, {st['empty']:,} empty, {st['errors']:,} errors, {st['no_range']} expiries without an index range")
+    except TimeUp as exc:
+        state.save()
+        print(f"TIME LIMIT: {exc}", file=sys.stderr)
+        return EX_TEMPFAIL
     except Stop as exc:
         state.save()
         print(f"STOPPED: {exc}", file=sys.stderr)

@@ -55,7 +55,7 @@ def test_bars_since_filter_and_ignored_filenames(world):
     for name in ("2026-10-01", "2026-10-20", "notes", "2026-10-21.bak"):
         write_csv(world.data / f"bars/5m/in/{name}.csv", BAR_H, row("2026-10-20"))
     assert world.lake.load_bars("5m", date(2026, 10, 15), ("IN",)) == 1
-    days = sorted(p.name for p in (world.lakedir / "bars/interval=5m").iterdir())
+    days = sorted(p.name for p in (world.lakedir / "bars/interval=5m").iterdir() if not p.name.startswith("."))        # the per-day lock files are hidden
     assert days == ["date=2026-10-20"]
 
 

@@ -1,4 +1,6 @@
 """Yahoo client: frame parsing, chunking, CSV staging writers, intraday bar guards, market rules."""
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -103,7 +105,7 @@ def test_fetch_bars_validates_interval_and_clips_days(world, monkeypatch):
     seen = {}
     monkeypatch.setattr(world.yf, "_batch_download", lambda c, **kw: seen.update(kw) or {})
     world.yf.fetch_bars(["A.NS"], "IN", interval="1m", days_back=30)
-    assert seen["period"] == "7d" and seen["interval"] == "1m" and seen["prepost"] is False
+    assert seen["period"] == "29d" and seen["interval"] == "1m" and seen["prepost"] is False      # Yahoo refuses 1-minute requests 30 days back
 
 
 def test_write_bars_is_idempotent_and_corrections_win(world):
@@ -123,13 +125,12 @@ def test_run_bars_refuses_a_market_outside_the_list(world, market):
 
 def test_run_bars_all_means_every_market_but_india_and_backfill_uses_deepest_window(world, monkeypatch):
     got = []
-    monkeypatch.setattr(world.yf, "fetch_bars", lambda u, m, iv, d: got.append((m, d, iv, tuple(u))) or [object()])
+    monkeypatch.setattr(world.yf, "fetch_bars", lambda u, m, iv, d, window=None: got.append((m, d, iv, tuple(u), window)) or [object()])
     monkeypatch.setattr(world.yf, "write_bars", lambda *a: None)
     world.set_universe({"IN": ["A.NS"], "US": ["AAPL"], "UK": ["SHEL.L"], "EU": ["SAP.DE"], "JP": ["7203.T"], "HK": ["0700.HK"]})
     world.yf.run_bars(market="ALL", interval="1m", backfill=True)
-    assert [(g[0], g[3]) for g in got if g[3]] == [("US", ("AAPL",)), ("UK", ("SHEL.L",)), ("EU", ("SAP.DE",)), ("JP", ("7203.T",)),
-                                                    ("HK", ("0700.HK",))]                                            # India is not fetched
-    assert {g[1] for g in got} == {6} and {g[2] for g in got} == {"1m"}
+    assert [g[0] for g in got if g[3]][::5] == ["US", "UK", "EU", "JP", "HK"]                                     # India is not fetched
+    assert {g[1] for g in got} == {29} and {g[2] for g in got} == {"1m"} and all(g[4] for g in got)              # 29 days, in windows
     got.clear()
     world.yf.run_bars(market="IN", interval="60m", backfill=True)                      # but it can be asked for by name
     assert got[0][:2] == ("IN", 729)
@@ -215,3 +216,41 @@ def test_full_run_passes_the_years_down_to_yahoo(world, monkeypatch):
     world.yf.run_ohlc("IN", years=None)
     world.yf.run_ohlc("IN")
     assert seen == [{"period": "20y"}, {"period": "max"}, {"period": "5y"}]
+
+
+# -- 1-minute backfill in windows (Yahoo serves 1-minute bars only 29 days back, about a week per request) ------------------------
+def test_bar_windows_cover_29_days_in_weeks_oldest_first(world):
+    from datetime import date
+    w = world.yf.bar_windows("1m", 29, today=date(2026, 11, 11))
+    assert w[0][0] == date(2026, 10, 13) and w[-1][1] == date(2026, 11, 11) and len(w) == 5
+    assert all((b - a).days <= 6 for a, b in w) and all(w[i][1] < w[i + 1][0] for i in range(len(w) - 1))
+    assert (w[1][0] - w[0][1]).days == 1                                                       # no gap and no overlap between windows
+    assert world.yf.bar_windows("1m", 5) == [] and world.yf.bar_windows("5m", 59) == []         # one `period=` request is enough
+    assert world.yf.bar_windows("1m", 100, today=date(2026, 11, 11))[0][0] == date(2026, 10, 13)   # never asks for more than 29 days
+
+
+def test_fetch_bars_uses_start_and_end_for_a_window_and_period_otherwise(world, monkeypatch):
+    from datetime import date
+    seen = []
+    monkeypatch.setattr(world.yf, "_batch_download", lambda chunk, **kw: seen.append(kw) or {})
+    world.yf.fetch_bars(["A"], "US", "1m", 5)
+    world.yf.fetch_bars(["A"], "US", "1m", 29, window=(date(2026, 10, 13), date(2026, 10, 19)))
+    assert seen[0] == {"interval": "1m", "prepost": False, "period": "5d"}
+    assert seen[1] == {"interval": "1m", "prepost": False, "start": "2026-10-13", "end": "2026-10-20"}      # end is exclusive
+
+
+def test_a_windowed_backfill_writes_each_window_and_fails_loudly_when_yahoo_returns_nothing(world, monkeypatch):
+    written, fetched = [], []
+    def fetch(u, m, iv, d, window=None):
+        fetched.append(window)
+        return [object()] if window and window[0].day == 13 else []
+    monkeypatch.setattr(world.yf, "fetch_bars", fetch)
+    monkeypatch.setattr(world.yf, "write_bars", lambda rows, m, iv: written.append((len(rows), m, iv)))
+    monkeypatch.setattr(world.yf, "bar_windows", lambda iv, d, today=None: [(date(2026, 10, 13), date(2026, 10, 19)), (date(2026, 10, 20), date(2026, 10, 26))])
+    world.set_universe({"US": ["AAPL"]})
+    world.yf.run_bars(market="US", interval="1m", backfill=True)
+    assert written == [(1, "US", "1m")] and len(fetched) == 2                                   # the empty window is not written
+    monkeypatch.setattr(world.yf, "fetch_bars", lambda *a, **k: [])
+    with pytest.raises(RuntimeError, match="no data"):
+        world.yf.run_bars(market="US", interval="1m", backfill=True)
+    world.yf.run_bars(market="US", interval="1m", backfill=True, dry_run=True)                  # a dry run fetches nothing

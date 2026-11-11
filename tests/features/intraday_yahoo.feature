@@ -31,4 +31,4 @@ Feature: Yahoo intraday bars (every market but India by default, India on reques
 
   Scenario: Asking for the deepest window uses what Yahoo allows
     When I plan a deepest-window collection for each bar size
-    Then the windows are 5m 59 days, 1m 6 days and 60m 729 days
+    Then the windows are 5m 59 days, 1m 29 days and 60m 729 days

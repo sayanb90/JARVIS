@@ -36,7 +36,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -326,10 +326,13 @@ def _write_csv(path: Path, headers: list[str], rows: Iterator) -> None:
 BARS_DIR = DATA_DIR / "bars"
 
 # Max look-back Yahoo allows per interval (calendar days)
-INTRADAY_MAX_DAYS = {"1m": 7, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
+# Tested 2026-11-11: Yahoo refuses a 1-minute request that reaches back 30 days or more ("must be within the last 30 days"), serves at most
+# about 8 days per request, and 5-minute bars only within 60 days.  So 1-minute history can be fetched 29 days back, in windows of 7 days.
+INTRADAY_MAX_DAYS = {"1m": 30, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
+WINDOW_DAYS = {"1m": 7}                 # days per request for the intervals that Yahoo serves only a few days at a time
 INTRADAY_INTERVAL = "5m"
-INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent).  Yahoo serves 7 days of 1m: a daily run with a
-                           # 5-day overlap survives a missed day or two.
+INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent).  A daily run with a 5-day overlap survives a missed
+                           # day or two.
 
 _INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
 _BAR_HEADERS = ["ts", "symbol", "market", "open", "high", "low", "close", "volume"]
@@ -372,14 +375,32 @@ def _bars_to_rows(df: pd.DataFrame, ticker: str, market: str,
     return rows
 
 
+def bar_windows(interval: str, days_back: int, today: Optional[date] = None) -> list[tuple[date, date]]:
+    """[(first day, last day)] to request when `days_back` is more than Yahoo serves in one request for `interval` (1-minute: 7 days),
+    oldest first; empty when one `period=` request is enough."""
+    size = WINDOW_DAYS.get(interval)
+    days_back = min(days_back, INTRADAY_MAX_DAYS[interval] - 1)
+    if not size or days_back <= size:
+        return []
+    today = today or datetime.now(timezone.utc).date()
+    out, first = [], today - timedelta(days=days_back)
+    while first <= today:
+        out.append((first, min(first + timedelta(days=size - 1), today)))
+        first += timedelta(days=size)
+    return out
+
+
 def fetch_bars(tickers: list[str], market: str,
                interval: str = INTRADAY_INTERVAL,
-               days_back: int = INTRADAY_DAYS_BACK) -> list[BarRow]:
-    """Fetch regular-session intraday bars for the last `days_back` days."""
+               days_back: int = INTRADAY_DAYS_BACK,
+               window: Optional[tuple[date, date]] = None) -> list[BarRow]:
+    """Fetch regular-session intraday bars for the last `days_back` days, or for the days of `window` (first, last) when it is given."""
     if interval not in INTRADAY_MAX_DAYS:
         raise ValueError(f"Unsupported interval {interval!r}; use one of {sorted(INTRADAY_MAX_DAYS)}")
-    days_back = min(days_back, INTRADAY_MAX_DAYS[interval])
+    days_back = min(days_back, INTRADAY_MAX_DAYS[interval] - 1 if interval == "1m" else INTRADAY_MAX_DAYS[interval])
     now_utc = pd.Timestamp.now(tz="UTC")
+    span = ({"start": window[0].isoformat(), "end": (window[1] + timedelta(days=1)).isoformat()} if window
+            else {"period": f"{days_back}d"})
 
     all_rows: list[BarRow] = []
     total_chunks = (len(tickers) + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -389,8 +410,7 @@ def fetch_bars(tickers: list[str], market: str,
         log.info("[%s] bars %s chunk %d/%d (%d tickers) …",
                  market, interval, chunk_num, total_chunks, len(chunk))
         try:
-            batch = _batch_download(chunk, period=f"{days_back}d",
-                                    interval=interval, prepost=False)
+            batch = _batch_download(chunk, interval=interval, prepost=False, **span)
         except Exception as exc:
             log.error("Chunk %d failed: %s — skipping", chunk_num, exc)
             continue
@@ -462,9 +482,10 @@ def run_bars(
 ) -> None:
     """
     Intraday bar collection from Yahoo: US, UK and EU by default (`ALL`), India on request (the Upstox feed records India tick by
-    tick, so a Yahoo copy of it adds nothing).  backfill=True pulls the deepest window Yahoo allows (about 59 days of 5m, 6 of 1m,
-    729 of 60m); there is no more, so 1-minute history can only be built forward.  Run AFTER each market closes (the cron job runs
-    once at 22:00 UTC, after the US close in winter and summer), then:
+    tick, so a Yahoo copy of it adds nothing).  backfill=True pulls the deepest window Yahoo allows (59 days of 5m, 29 of 1m in windows
+    of 7 days, 729 of 60m); there is no more, so longer 1-minute history can only be built forward.  Each window is written as soon as
+    it is fetched, so a 29-day backfill of a market holds one week of bars in memory, not a month.  Run AFTER each market closes (the cron
+    job runs once at 22:00 UTC, after the US close in winter and summer), then:
       python -m data_layer.lake --load bars --interval 1m
     """
     if market == "ALL":
@@ -483,14 +504,26 @@ def run_bars(
     if backfill:
         days_back = INTRADAY_MAX_DAYS[interval] - 1   # deepest window Yahoo allows
     universe = _resolve_universe(market, tickers)
+    windows = bar_windows(interval, days_back)
     if dry_run:
-        log.info("DRY RUN bars [%s] — %d tickers, interval=%s, last %d days",
-                 market, len(universe), interval, days_back)
+        log.info("DRY RUN bars [%s] — %d tickers, interval=%s, last %d days%s",
+                 market, len(universe), interval, days_back, f" in {len(windows)} windows of {WINDOW_DAYS[interval]} days" if windows else "")
         return
 
-    rows = fetch_bars(universe, market, interval, days_back)
-    _require_rows(rows, universe, market, f"{interval} bars")
-    write_bars(rows, market, interval)
+    if not windows:
+        rows = fetch_bars(universe, market, interval, days_back)
+        _require_rows(rows, universe, market, f"{interval} bars")
+        write_bars(rows, market, interval)
+        return
+    total = 0
+    for first, last in windows:                       # oldest window first; each is written before the next is fetched
+        log.info("[%s] bars %s window %s .. %s", market, interval, first, last)
+        rows = fetch_bars(universe, market, interval, days_back, window=(first, last))
+        total += len(rows)
+        if rows:
+            write_bars(rows, market, interval)
+    if universe and not total:                        # Yahoo is down or blocking us: fail loudly so cron alerts
+        raise RuntimeError(f"{interval} bars [{market}]: Yahoo returned no data for any of {len(universe)} tickers")
 
 
 # ---------------------------------------------------------------------------

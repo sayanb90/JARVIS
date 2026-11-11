@@ -73,6 +73,6 @@ def _refused(ctx):
     assert ctx.refused is True
 
 
-@then("the windows are 5m 59 days, 1m 6 days and 60m 729 days")
+@then("the windows are 5m 59 days, 1m 29 days and 60m 729 days")
 def _windows(ctx):
-    assert ctx.windows == {"5m": 59, "1m": 6, "60m": 729}
+    assert ctx.windows == {"5m": 59, "1m": 29, "60m": 729}

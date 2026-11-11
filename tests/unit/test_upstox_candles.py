@@ -175,7 +175,7 @@ def test_pull_multi_day_range_groups_by_day(world):
     cs = session_candles(date(2026, 10, 23), 3) + session_candles(date(2026, 10, 26), 3)
     pull(client(api_for({KEY: cs})), {KEY: "RELIANCE.NS"}, date(2026, 10, 23), date(2026, 10, 26), source="historical",
          lake_dir=world.lakedir)
-    days = sorted(p.name for p in (world.lakedir / "bars/interval=1m").iterdir())
+    days = sorted(p.name for p in (world.lakedir / "bars/interval=1m").iterdir() if not p.name.startswith("."))
     assert days == ["date=2026-10-23", "date=2026-10-26"]
 
 

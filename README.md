@@ -140,6 +140,10 @@ python -m data_layer.yf_pillars build                # pillar inputs for the sco
 python -m data_layer.yf_fundamentals check           # four-year completeness of every symbol
 ```
 
+### 4b. One command for all of the history above
+
+`bash deploy/historical-run.sh` (a dry run that prints every stage) and `bash deploy/historical-run.sh --apply` run the whole historical load in order and can be repeated: global universe, daily candles (20 years), Yahoo 1-minute bars for every market but India (the last 29 days: all Yahoo serves, in windows of 7 days), FX, fundamentals, then from Upstox the 1-minute candles of the 500 stocks and the indices since January 2022 and the expired NIFTY and BANKNIFTY options and futures (`python -m data_layer.upstox.backfill`, needs Upstox Plus for the expired contracts). Start it after 10:30 UTC; it stops long stages at 21:30 UTC, marks them partial and continues the next day. `bash deploy/historical-run.sh status` shows where it is.
+
 ### 5. Load into the lake
 
 ```bash
