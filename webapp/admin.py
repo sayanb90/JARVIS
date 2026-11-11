@@ -7,13 +7,16 @@ are set; then every /admin path needs those credentials (HTTP Basic, over HTTPS 
 Tables are grouped into services, the way a kdb+ setup splits them across ports.  Here they are only a catalog:
 the data stays one Parquet lake read by DuckDB, so a "service" is a schema name, not a process.
 
-  reference     universe, equity instrument table, F&O contract table, F&O watchlist, selected contracts
-  market        raw ticks (live feed), REST minute bars, legacy 1-second bars
+The catalog is vendor-neutral: a table is named for what it holds, never for who supplied it, and each table says which vendor(s)
+provide it (a `vendor` attribute, and a `vendor` column where one table holds several vendors' rows).  A new data source is a new
+vendor on an existing table, not a new table.
+
+  reference     universe, instrument tables, F&O watchlist and contracts, company profiles, corporate actions, FX rates
+  market        raw ticks (live feed), stored 1- and 5-minute candles, legacy 1-second bars
   aggregates    daily OHLC, 1-second and 1-minute bars derived from ticks (per day)
-  yahoo         everything the Yahoo Finance collectors store: fundamentals versions, profiles, dividends and splits, fetch
-                and completeness logs, Yahoo intraday bars, FX rates
+  fundamentals  statement and ratio items from every vendor, income statement, balance sheet, cash flow, pillar metrics
   indices       global index constituents (US, UK, EU, Japan, Korea, Taiwan, Singapore, China, Hong Kong) and the rejects
-  fundamentals  income statement, balance sheet, cash flow, ratios, pillar metrics, fund meta
+  operations    fetch logs of every vendor, fundamentals completeness
   analytics     signals and features (none yet)
 
 Everything is read-only except the subscription list upload, which writes data/universe.local.csv (versioned).
@@ -53,8 +56,8 @@ QUERY_TIMEOUT_S = 20.0
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 NAME_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9&._|-]{1,40}$")
-SERVICES = [("reference", "Reference"), ("market", "Market data"), ("aggregates", "Aggregates"), ("yahoo", "Yahoo Finance"),
-            ("indices", "Global indices"), ("fundamentals", "Fundamentals"), ("analytics", "Analytics")]
+SERVICES = [("reference", "Reference"), ("market", "Market data"), ("aggregates", "Aggregates"), ("fundamentals", "Fundamentals"),
+            ("indices", "Global indices"), ("operations", "Operations"), ("analytics", "Analytics")]
 
 
 @dataclass(frozen=True)
@@ -63,55 +66,72 @@ class Table:
     name: str
     title: str
     about: str
-    kind: str                  # days: lake/<dir>/date=YYYY-MM-DD/*.parquet | file: one parquet | years: ohlc | frame: CSV | derived
+    kind: str                  # days: lake/<dir>/date=YYYY-MM-DD/*.parquet | file: one parquet | years: ohlc | frame: CSV | derived | union: several vendors' files
     location: str = ""         # relative to the lake (days, file, years) or a loader key (frame)
     time_col: str | None = None
     width_s: int = 0           # derived bars width
+    vendor: str = ""           # who supplies it ("Upstox", "Yahoo", "Upstox · Yahoo", "Internal" ...): shown in the viewer, never part of a table name
+    vendor_sql: str | None = None   # a SQL expression adding a `vendor` column when one table holds several vendors' rows
+    parts: tuple = ()          # kind "union": ((vendor, file under the lake, "SELECT ... FROM {src}" mapping to the table's columns), ...)
 
+
+# One row per normalized item, whoever supplied it.  Each vendor's file is mapped onto the same columns; a column a vendor does not give is NULL.
+ITEM_PARTS = (
+    ("Yahoo", "yf_fundamentals/versions.parquet",
+     "SELECT 'Yahoo' AS vendor, symbol, CAST(NULL AS VARCHAR) AS isin, statement AS section, item, CAST(period_end AS VARCHAR) AS period, "
+     "CAST(value AS DOUBLE) AS value, CAST(NULL AS VARCHAR) AS text, CAST(NULL AS DOUBLE) AS \"change\", currency, first_seen, last_seen FROM {src}"),
+    ("Upstox", "upstox_fundamentals/versions.parquet",
+     "SELECT 'Upstox' AS vendor, CAST(NULL AS VARCHAR) AS symbol, isin, endpoint AS section, item, CAST(period AS VARCHAR) AS period, "
+     "CAST(value AS DOUBLE) AS value, CAST(text AS VARCHAR) AS text, CAST(\"change\" AS DOUBLE) AS \"change\", CAST(NULL AS VARCHAR) AS currency, first_seen, last_seen FROM {src}"),
+)
+LOG_PARTS = (
+    ("Yahoo", "yf_fundamentals/fetch_log.parquet",
+     "SELECT 'Yahoo' AS vendor, 'fundamentals' AS dataset, symbol, CAST(NULL AS VARCHAR) AS isin, part AS endpoint, fetched_at, ok, "
+     "CAST(error_class AS VARCHAR) AS error_class, CAST(NULL AS BIGINT) AS status, CAST(rows AS BIGINT) AS rows, attempts, latency_s, message FROM {src}"),
+    ("Upstox", "upstox_fundamentals/fetch_log.parquet",
+     "SELECT 'Upstox' AS vendor, 'fundamentals' AS dataset, symbol, isin, endpoint, fetched_at, ok, CAST(error_code AS VARCHAR) AS error_class, "
+     "CAST(status AS BIGINT) AS status, CAST(rows AS BIGINT) AS rows, attempts, latency_s, error_message AS message FROM {src}"),
+)
 
 CATALOG = [
-    Table("reference", "universe", "Equity universe", "Instruments the collectors follow (all markets; India is the live feed's list).", "frame", "universe"),
-    Table("reference", "eq_instruments", "NSE equity instruments", "Every NSE cash-equity listing from the Upstox file: ticker, ISIN, Upstox key.", "file", "instruments/eq.parquet"),
-    Table("reference", "fo_contracts", "F&O contracts", "Every futures and options contract seen in the Upstox file, expired ones kept.", "file", "instruments/fo.parquet"),
-    Table("reference", "fo_watchlist", "F&O watchlist", "Underlyings and the expiry/strike window to collect.", "frame", "fo_watchlist"),
-    Table("reference", "fo_selected", "F&O selected contracts", "Today's contracts chosen from the watchlist (what the derivatives feed subscribes).", "frame", "fo_selected"),
-    Table("market", "ticks", "Ticks", "Every update from the live feed: last price, cumulative volume, best bid/ask and sizes, open interest.", "days", "ticks", "ts"),
-    Table("market", "bars_1m_rest", "Minute bars (REST)", "One-minute candles pulled from the Upstox candle API after the close.", "days", "bars/interval=1m", "ts"),
-    Table("market", "bars_1s_legacy", "1-second bars (legacy)", "Bars written by the feed before it stored raw ticks.", "days", "bars/interval=1s", "ts"),
-    Table("aggregates", "ohlc_daily", "Daily OHLC", "Five years of daily bars for India, US, UK and EU (Yahoo).", "years", "ohlc", "date"),
-    Table("aggregates", "bars_1s", "1-second bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 1),
-    Table("aggregates", "bars_1m", "1-minute bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 60),
-    Table("yahoo", "yf_versions", "Yahoo fundamentals", "Every statement item the pillars use, per symbol and period, with the day we first and last "
-          "saw each value (a restated value is a new row).", "file", "yf_fundamentals/versions.parquet"),
-    Table("yahoo", "yf_profile", "Yahoo profiles", "One row per symbol: price and reporting currency, market cap, shares, sector, type, name, exchange.",
-          "file", "yf_fundamentals/profile.parquet"),
-    Table("yahoo", "yf_actions", "Yahoo dividends and splits", "Corporate actions per symbol and date: kind (dividend or split) and value.",
-          "file", "yf_fundamentals/actions.parquet"),
-    Table("yahoo", "yf_fetch_log", "Yahoo fetch log", "One row per call: symbol, statement part, time, result class (ok, empty, throttled, exception, parse), attempts and latency.",
-          "file", "yf_fundamentals/fetch_log.parquet"),
-    Table("yahoo", "yf_completeness", "Yahoo four-year completeness", "Per symbol: status (complete, short, incomplete, gap, stale, fetch_failed, pending, no_data) "
-          "and the items or years missing.", "file", "yf_fundamentals/completeness.parquet"),
-    Table("yahoo", "yf_bars", "Yahoo intraday bars", "Regular-session bars from Yahoo (default 5-minute), one folder per UTC day; Yahoo keeps about 60 days.",
-          "days", "bars/interval=5m", "ts"),
-    Table("yahoo", "fx_rates", "FX rates (Yahoo)", "Daily closes of the currency pairs, as US dollars per unit of each currency, used to convert statements into the price's currency.",
-          "file", "fx/rates.parquet"),
-    Table("indices", "index_members", "Index constituents", "Member list of each global index: code, name, market, exchange, sector and the Yahoo symbol the collectors use.",
-          "frame", "index_members"),
-    Table("indices", "index_rejects", "Rejected index members", "Symbols or codes dropped while building the universe, with the index and the reason.",
-          "frame", "index_rejects"),
-    Table("fundamentals", "income_statement", "Income statement", "Revenue, net income and EBIT per fiscal year, from the Yahoo statements (reporting currency).",
-          "file", "fundamentals/income_statement.parquet", "date"),
-    Table("fundamentals", "balance_sheet", "Balance sheet", "Assets, liabilities, long-term debt and equity per fiscal year, from the Yahoo statements.",
-          "file", "fundamentals/balance_sheet.parquet", "date"),
-    Table("fundamentals", "cash_flow", "Cash flow", "Free cash flow per fiscal year, from the Yahoo statements.", "file", "fundamentals/cash_flow.parquet", "date"),
+    Table("reference", "universe", "Equity universe", "Instruments the collectors follow (all markets; India is the live feed's list).", "frame", "universe", vendor="Internal"),
+    Table("reference", "eq_instruments", "NSE equity instruments", "Every NSE cash-equity listing: ticker, ISIN, instrument key.", "file", "instruments/eq.parquet", vendor="Upstox"),
+    Table("reference", "fo_contracts", "F&O contracts", "Every futures and options contract seen, expired ones kept.", "file", "instruments/fo.parquet", vendor="Upstox"),
+    Table("reference", "fo_watchlist", "F&O watchlist", "Underlyings and the expiry/strike window to collect.", "frame", "fo_watchlist", vendor="Internal"),
+    Table("reference", "fo_selected", "F&O selected contracts", "Today's contracts chosen from the watchlist (what the derivatives feed subscribes).", "frame", "fo_selected", vendor="Internal"),
+    Table("reference", "company_profile", "Company profiles", "One row per symbol: price and reporting currency, market cap, shares, sector, type, name, exchange.",
+          "file", "yf_fundamentals/profile.parquet", vendor="Yahoo"),
+    Table("reference", "corporate_actions", "Dividends and splits", "Corporate actions per symbol and date: kind (dividend or split) and value.",
+          "file", "yf_fundamentals/actions.parquet", vendor="Yahoo"),
+    Table("reference", "fx_rates", "FX rates", "Daily closes of the currency pairs, as US dollars per unit of each currency, used to convert statements into the price's currency.",
+          "file", "fx/rates.parquet", vendor="Yahoo"),
+    Table("market", "ticks", "Ticks", "Every update from the live feed: last price, cumulative volume, best bid/ask and sizes, open interest.", "days", "ticks", "ts", vendor="Upstox"),
+    Table("market", "candles_1m", "1-minute candles", "Stored one-minute candles: India from the exchange candle service, other markets from the daily bars job.", "days", "bars/interval=1m", "ts",
+          vendor="Upstox · Yahoo", vendor_sql="CASE WHEN market = 'IN' THEN 'Upstox' ELSE 'Yahoo' END"),
+    Table("market", "candles_5m", "5-minute candles", "Regular-session candles, one folder per UTC day, kept for about 60 days.", "days", "bars/interval=5m", "ts", vendor="Yahoo"),
+    Table("market", "bars_1s_legacy", "1-second bars (legacy)", "Bars written by the feed before it stored raw ticks.", "days", "bars/interval=1s", "ts", vendor="Upstox"),
+    Table("aggregates", "ohlc_daily", "Daily OHLC", "Daily bars for every market, adjusted for splits and dividends by the vendor.", "years", "ohlc", "date", vendor="Yahoo"),
+    Table("aggregates", "bars_1s", "1-second bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 1, vendor="Upstox"),
+    Table("aggregates", "bars_1m", "1-minute bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 60, vendor="Upstox"),
+    Table("fundamentals", "items", "Fundamental items", "Every statement line, ratio, holding and corporate-action item from every vendor, with the day we first and last "
+          "saw each value (a restated value is a new row).", "union", vendor="Upstox · Yahoo", parts=ITEM_PARTS),
+    Table("fundamentals", "income_statement", "Income statement", "Revenue, net income and EBIT per fiscal year (reporting currency).",
+          "file", "fundamentals/income_statement.parquet", "date", vendor="Yahoo"),
+    Table("fundamentals", "balance_sheet", "Balance sheet", "Assets, liabilities, long-term debt and equity per fiscal year.",
+          "file", "fundamentals/balance_sheet.parquet", "date", vendor="Yahoo"),
+    Table("fundamentals", "cash_flow", "Cash flow", "Free cash flow per fiscal year.", "file", "fundamentals/cash_flow.parquet", "date", vendor="Yahoo"),
     Table("fundamentals", "ratios", "Ratios", "ROIC (computed from EBIT, tax rate and invested capital) and share count per fiscal year.", "file",
-          "fundamentals/ratios.parquet", "date"),
+          "fundamentals/ratios.parquet", "date", vendor="Yahoo"),
     Table("fundamentals", "pillar_metrics", "Pillar metrics", "One row per stock in its price's currency: averages, latest values, ROIC, periods used, currencies, FX rate and flags.",
-          "file", "fundamentals/pillar_metrics.parquet"),
-    Table("fundamentals", "upstox_fundamentals", "Upstox fundamentals", "Every statement line, ratio, holding and corporate action Upstox returned, "
-          "with the day we first and last saw each value (a restated value is a new row).", "file", "upstox_fundamentals/versions.parquet"),
-    Table("fundamentals", "upstox_fundamentals_log", "Upstox fundamentals fetch log", "One row per call: company, endpoint, time, result and error code.",
-          "file", "upstox_fundamentals/fetch_log.parquet"),
+          "file", "fundamentals/pillar_metrics.parquet", vendor="Yahoo"),
+    Table("indices", "constituents", "Index constituents", "Member list of each global index: code, name, market, exchange, sector and the symbol the collectors use.",
+          "frame", "index_members", vendor="Public index lists"),
+    Table("indices", "rejected_constituents", "Rejected constituents", "Symbols or codes dropped while building the universe, with the index and the reason.",
+          "frame", "index_rejects", vendor="Public index lists"),
+    Table("operations", "fetch_log", "Fetch log", "One row per call to a data vendor: vendor, dataset, symbol or ISIN, endpoint, time, result, attempts and latency.",
+          "union", vendor="Upstox · Yahoo", parts=LOG_PARTS),
+    Table("operations", "fundamentals_completeness", "Fundamentals completeness", "Per symbol: status (complete, short, incomplete, gap, stale, fetch_failed, pending, no_data) "
+          "and the items or years missing.", "file", "yf_fundamentals/completeness.parquet", vendor="Yahoo"),
 ]
 BY_KEY = {(t.service, t.name): t for t in CATALOG}
 
@@ -170,6 +190,8 @@ class Catalog:
             return [p] if p.exists() else []
         if t.kind == "years":
             return sorted((self.lake / t.location).glob("year=*/ohlc.parquet"))
+        if t.kind == "union":
+            return [self.lake / loc for _, loc, _ in t.parts if (self.lake / loc).exists()]
         return []
 
     def frame(self, t: Table) -> pd.DataFrame:
@@ -214,12 +236,22 @@ class Catalog:
     def _q(p: Path) -> str:
         return "'" + str(p).replace("'", "''") + "'"
 
+    def union_sql(self, t: Table) -> str | None:
+        """The vendors' files mapped onto the table's columns, one SELECT per vendor that has data."""
+        sel = [select.format(src=f"read_parquet({self._q(self.lake / loc)}, union_by_name=true, hive_partitioning=false)")
+               for _, loc, select in t.parts if (self.lake / loc).exists()]
+        return " UNION ALL BY NAME ".join(sel) or None
+
     def source_sql(self, t: Table, day: str | None) -> str | None:
         files = self.files(t, day)
+        if t.kind == "union":
+            u = self.union_sql(t)
+            return f"({u}) AS u" if u else None
         if t.kind in ("days", "file", "years"):
             if not files:
                 return None
-            return f"read_parquet([{', '.join(self._q(f) for f in files)}], union_by_name=true, hive_partitioning=false)"
+            src = f"read_parquet([{', '.join(self._q(f) for f in files)}], union_by_name=true, hive_partitioning=false)"
+            return f"(SELECT *, {t.vendor_sql} AS vendor FROM {src}) AS v" if t.vendor_sql else src
         if t.kind == "derived":
             if not day or not files:
                 return None
@@ -244,6 +276,10 @@ class Sandbox:
                 parts = [f"SELECT * FROM read_parquet({cat._q(g)}, hive_partitioning=true, union_by_name=true)"
                          for g in layouts if any(cat.lake.glob(str(g.relative_to(cat.lake))))]
                 sql = " UNION ALL BY NAME ".join(parts)
+                if sql and t.vendor_sql:
+                    sql = f"SELECT *, {t.vendor_sql} AS vendor FROM ({sql})"
+            elif t.kind == "union":
+                sql = cat.union_sql(t)
             elif t.kind in ("file", "years") and cat.files(t):
                 sql = f"SELECT * FROM {cat.source_sql(t, None)}"
             elif t.kind == "frame":
@@ -344,7 +380,8 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
             tables = []
             for t in [t for t in CATALOG if t.service == svc]:
                 days = cat.days(t)
-                tables.append({"name": t.name, "title": t.title, "about": t.about, "kind": t.kind,
+                tables.append({"name": t.name, "title": t.title, "about": t.about, "kind": t.kind, "vendor": t.vendor,
+                               "vendors": [v.strip() for v in t.vendor.split("·") if v.strip()],
                                "days": days[:400], "available": cat.available(t), "time_col": t.time_col,
                                "query_name": None if t.kind == "derived" else f"{t.service}.{t.name}"})
             out.append({"service": svc, "title": title, "tables": tables})
@@ -393,7 +430,7 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
         if order != "stored" and tc:
             sql += f' ORDER BY "{tc}" {"DESC" if order == "desc" else "ASC"}'
         # total: from the Parquet footers when nothing is filtered (reads no data), else a count of the filter
-        if not where and t.kind in ("days", "file", "years"):
+        if not where and t.kind in ("days", "file", "years", "union"):
             total = cat.file_rows(cat.files(t, day))
         else:
             total = int(sb.run(f"SELECT count(*) AS n FROM ({sql})", params)["n"].iloc[0])

@@ -145,9 +145,11 @@ def test_command_line_run_and_status(world, monkeypatch, capsys):
     assert fu.main(["run", "--isin", ISIN]) == 2
 
 
-def test_the_admin_catalogue_lists_the_new_tables(world):
+def test_the_admin_catalogue_reads_the_upstox_files_through_vendor_neutral_tables(world):
     from webapp.admin import BY_KEY
-    assert ("fundamentals", "upstox_fundamentals") in BY_KEY and ("fundamentals", "upstox_fundamentals_log") in BY_KEY
+    items, log = BY_KEY[("fundamentals", "items")], BY_KEY[("operations", "fetch_log")]
+    assert "upstox_fundamentals/versions.parquet" in [loc for _, loc, _ in items.parts]
+    assert "upstox_fundamentals/fetch_log.parquet" in [loc for _, loc, _ in log.parts]
 
 
 def test_the_log_records_the_time_of_each_call_and_what_went_wrong(world):
