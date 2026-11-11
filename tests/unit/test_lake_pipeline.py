@@ -74,7 +74,6 @@ def seed_fundamentals(root, strong=True):
        "latest_total_equity", "latest_roic", "latest_shares_outstanding"],
       [["GOOD.NS", "IN", 45, 45, 200, 80, 1000, 400, 50, 600, 0.15, 90],
        ["NOPX.NS", "IN", 45, 45, 200, 80, 1000, 400, 50, 600, 0.15, 90]])
-    w(root / "data/fund_meta.csv", ["symbol", "market", "last_updated"], [["GOOD.NS", "IN", "2026.10.20"]])
 
 
 def test_fundamentals_upsert_accumulates_and_scores_8(env):
@@ -83,10 +82,13 @@ def test_fundamentals_upsert_accumulates_and_scores_8(env):
     h = ["date", "symbol", "market", "open", "high", "low", "close", "volume"]
     w(root / "data/ohlc/ohlc_2026_in.csv", h, [["2026.10.20", "GOOD.NS", "IN", 10, 10, 10, 10, 1]])
     lake.load_all()
+    from tests.helpers import load_fundamentals
+    load_fundamentals(lake)
     # rotation: a later CSV with only another ticker must NOT drop GOOD
     w(root / "data/fundamentals/cash_flow_in.csv", ["date", "symbol", "market", "free_cash_flow"],
       [["2025.12.31", "OTHER.NS", "IN", 5]])
-    lake.load_fundamentals()
+    from tests.helpers import load_fundamentals
+    load_fundamentals(lake)
     from data_layer.query import Lake
     q = Lake(root / "lake")
     assert set(q.sql("SELECT DISTINCT symbol FROM cash_flow").symbol) == {"GOOD.NS", "OTHER.NS"}
@@ -96,7 +98,6 @@ def test_fundamentals_upsert_accumulates_and_scores_8(env):
     assert q.score_ticker("MISSING.NS", 9.0) == 0
     s = q.score_all("IN")
     assert s.loc[s.symbol == "NOPX.NS", "score"].iloc[0] == 0   # no price -> 0
-    assert q.sql("SELECT last_updated FROM fund_meta").last_updated.iloc[0].strftime("%Y-%m-%d") == "2026-10-20"
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +174,7 @@ def test_ohlc_all_markets_but_bars_india_only(env):
     q = Lake(root / "lake")
     assert set(q.sql("SELECT DISTINCT market FROM ohlc").market) == {"IN", "US", "UK", "EU"}
     assert set(q.sql("SELECT DISTINCT market FROM bars_5m").market) == {"IN"}
-    assert lake.BARS_MARKETS == lake.MARKETS and lake.BARS_YF_DEFAULT == tuple(m for m in lake.MARKETS if m != "IN") and lake.FUND_MARKETS == ("IN",)
+    assert lake.BARS_MARKETS == lake.MARKETS and lake.BARS_YF_DEFAULT == tuple(m for m in lake.MARKETS if m != "IN")
     assert lake.MARKETS[:4] == ("IN", "US", "UK", "EU") and set(lake.MARKETS[4:]) == {"JP", "KR", "TW", "SG", "CN", "HK"}
     lake.load_bars("5m", since=lake.date(2026, 10, 1))                                 # default markets now include the others
     assert set(q.sql("SELECT DISTINCT market FROM bars_5m").market) == {"IN", "US"}
@@ -190,11 +191,8 @@ def test_full_5y_pipeline_with_stubbed_yahoo_and_verify(env, monkeypatch, capsys
     importlib.reload(yf)
     monkeypatch.setattr(yf, "DATA_DIR", root / "data")
     monkeypatch.setattr(yf, "OHLC_DIR", root / "data" / "ohlc")
-    import data_layer.fmp_client as fmp
     uni = {"IN": ["INFY.NS", "TCS.NS"], "US": ["AAPL"], "UK": ["SHEL.L"], "EU": ["SAP.DE"]}
     monkeypatch.setattr(yf, "read_universe",
-                        lambda m=None: [{"symbol": s, "market": m} for s in uni.get(m, [])])
-    monkeypatch.setattr(fmp, "read_universe",
                         lambda m=None: [{"symbol": s, "market": m} for s in uni.get(m, [])])
     idx = pd.bdate_range(end=pd.Timestamp.today().normalize() - pd.Timedelta(days=1), periods=1300)
 

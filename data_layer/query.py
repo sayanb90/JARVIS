@@ -71,8 +71,7 @@ class Lake:
         self.con = duckdb.connect()
         self.con.execute(f"SET memory_limit='{_memory_limit()}'")
         self.con.execute(f"SET temp_directory='{Path(tempfile.gettempdir()) / 'jarvis-viewer-spill'}'")
-        for name in ("income_statement", "balance_sheet", "cash_flow", "ratios",
-                     "pillar_metrics", "fund_meta"):
+        for name in ("income_statement", "balance_sheet", "cash_flow", "ratios", "pillar_metrics"):
             f = self.dir / "fundamentals" / f"{name}.parquet"
             if f.exists():
                 self.con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{f}')")

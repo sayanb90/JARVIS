@@ -23,15 +23,14 @@ JARVIS/
 │   ├── yf_pillars.py     # pillar inputs: ROIC, debt, FCF, shares in the price's currency
 │   ├── yf_completeness.py  # four-year completeness of every symbol; drives the daily backfill
 │   ├── fx.py             # daily FX rates from Yahoo
-│   ├── fmp_client.py     # retired FMP client (unscheduled; still provides read_universe)
+│   ├── universe_files.py # reads data/universe.csv (and universe.local.csv, universe_global.csv)
+│   ├── lake_cleanup.py   # sets aside empty lake tables and retired-FMP leftovers (dry run by default)
 │   ├── yf_client.py      # Yahoo Finance client — daily OHLC (free, no key)
 │   ├── lake.py           # CSV staging files → Parquet lake (idempotent upserts)
 │   └── query.py          # DuckDB query helpers + 8-pillar scoring
 ├── tests/                # pytest: loader + query + scoring (no network)
 ├── data/
 │   ├── universe.csv      # Stock universe with all identifiers (see below)
-│   ├── fund_meta.csv     # Auto-generated: last fundamentals refresh per ticker
-│   ├── fundamentals/     # retired FMP staging CSVs (no longer written)
 │   └── ohlc/             # yfinance output CSVs (year-partitioned + daily)
 ├── lake/                 # Parquet lake (created by lake.py, git-ignored)
 │   ├── fundamentals/     # one file per table, both markets
@@ -60,7 +59,7 @@ The universe is defined in `data/universe.csv`. Each row carries all common iden
 | `bbg_code` | Bloomberg ticker | `RIL IN Equity` |
 | `sector` | Sector | `Energy` |
 
-`cusip` is blank for Indian securities. Symbols use Yahoo's `.NS` suffix, which FMP also accepts.
+`cusip` is blank for Indian securities. Symbols use Yahoo's `.NS` suffix.
 
 To expand the universe, add rows to `data/universe.csv`. The scheduler will automatically pick up new stocks and prioritise them (they have no `last_updated` date and sort to the top of the refresh queue).
 
@@ -75,7 +74,7 @@ To expand the universe, add rows to `data/universe.csv`. The scheduler will auto
 | **Yahoo Finance** (`yfinance`, an open-source library that reads Yahoo's own endpoints; not an official API) | Daily and 1-minute prices for every market but India, annual fundamentals, dividends, splits, FX rates | Free | None |
 | **Upstox** | India: live ticks, option Greeks, company fundamentals (statements, key ratios) | Plus plan | Required |
 
-FMP was used for fundamentals until 2026-11-11 (decision record SCRUM-138): its free plan covers US exchanges only and its global tier is expensive for the whole universe, so it is retired. Yahoo is unofficial and can change without notice, so every call is classified (ok, empty, throttled, exception, parse) and a completeness report names what to fix.
+Fundamentals come from Yahoo for every market (decision record SCRUM-138: the previous vendor's free plan covered US exchanges only). Yahoo is unofficial and can change without notice, so every call is classified (ok, empty, throttled, exception, parse) and a completeness report names what to fix.
 
 ### What gets fetched
 
@@ -147,8 +146,7 @@ python -m data_layer.yf_fundamentals check           # four-year completeness of
 ### 5. Load into the lake
 
 ```bash
-python -m data_layer.lake --load all            # fundamentals + full-history OHLC
-python -m data_layer.lake --load fundamentals   # upsert fundamentals, pillar metrics, fund_meta
+python -m data_layer.lake --load all            # full-history OHLC
 python -m data_layer.lake --load ohlc           # full-history year files
 python -m data_layer.lake --load daily          # incremental daily OHLC
 python -m data_layer.lake --load bars --since 2026-10-20
@@ -226,9 +224,7 @@ Go-live steps, daily ops, backups and the futures/options section are in [the JA
 
 ```bash
 python scheduler.py --job ohlc-daily                # daily OHLC, all markets
-python scheduler.py --job fundamentals              # the retired FMP rotation (unscheduled)
-python scheduler.py --job all                       # ohlc + fundamentals
-python scheduler.py --job all --dry-run             # print plan only
+python scheduler.py --job ohlc-daily --dry-run      # print plan only
 python scheduler.py --job fundamentals --budget 200 # custom call budget
 ```
 
@@ -254,7 +250,7 @@ lake/
 └── bars/interval=5m/date=YYYY-MM-DD/bars.parquet
 ```
 
-All tables carry a `market` column (`IN`, `US`, `UK`, `EU`, `JP`, `KR`, `TW`, `SG`, `CN`, `HK`). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in the JARVIS Runbook (Notion).
+All tables carry a `market` column (`IN`, `US`, `UK`, `EU`, `JP`, `KR`, `TW`, `SG`, `CN`, `HK`). Keys: fundamentals (symbol, date); pillar_metrics (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in the JARVIS Runbook (Notion).
 
 ---
 

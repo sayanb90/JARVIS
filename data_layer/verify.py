@@ -17,7 +17,7 @@ from datetime import date, time, timedelta
 
 import pandas as pd
 
-from .fmp_client import read_universe
+from .universe_files import read_universe
 from .lake import BARS_MARKETS, MARKETS
 from .query import Lake
 

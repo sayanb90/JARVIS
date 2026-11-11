@@ -54,30 +54,6 @@ def test_load_failure_is_reported_false(sched, monkeypatch):
     assert sched.job_ohlc_daily() is False
 
 
-def test_fundamentals_always_india_only_and_uses_stale_selection(sched, world, monkeypatch):
-    world.set_universe({"IN": ["A.NS", "B.NS"], "US": ["AAPL"]})
-    fetched = []
-    monkeypatch.setattr(sched, "fmp_run", lambda **kw: fetched.append(kw))
-    monkeypatch.setattr(sched.lake, "load_fundamentals", lambda m: fetched.append(("load", m)))
-    assert sched.job_fundamentals("US", budget=248) is True            # asking for US still means India
-    assert fetched[0]["market"] == "IN" and sorted(fetched[0]["tickers"]) == ["A.NS", "B.NS"]
-    assert fetched[1] == ("load", ("IN",))
-
-
-def test_fundamentals_fmp_failure_is_false_but_still_loads_what_exists(sched, world, monkeypatch):
-    world.set_universe({"IN": ["A.NS"]})
-    monkeypatch.setattr(sched, "fmp_run", lambda **kw: (_ for _ in ()).throw(RuntimeError("429")))
-    loaded = []
-    monkeypatch.setattr(sched.lake, "load_fundamentals", lambda m: loaded.append(m))
-    assert sched.job_fundamentals() is False and loaded
-
-
-def test_fundamentals_empty_universe_is_a_noop_success(sched, world, monkeypatch):
-    (world.data / "universe.csv").write_text("symbol,name,market\n")
-    monkeypatch.setattr(sched, "fmp_run", lambda **kw: pytest.fail("nothing to refresh"))
-    assert sched.job_fundamentals() is True
-
-
 def test_bars_job_passes_backfill_and_loads_the_whole_window(sched, monkeypatch):
     seen = {}
     monkeypatch.setattr(sched, "run_bars", lambda **kw: seen.update(kw))
@@ -100,12 +76,6 @@ def test_a_failed_market_is_reported_but_the_others_are_still_loaded(sched, monk
     monkeypatch.setattr(sched, "run_bars", lambda **kw: (_ for _ in ()).throw(RuntimeError("bars 1m failed for market(s): UK")))
     monkeypatch.setattr(sched.lake, "load_bars", lambda iv, since, markets: loaded.append(markets))
     assert sched.job_bars("ALL", "1m") is False and loaded == [("US", "UK", "EU", "JP", "KR", "TW", "SG", "CN", "HK")]
-
-
-def test_job_all_runs_both_and_ands_the_results(sched, monkeypatch):
-    monkeypatch.setattr(sched, "job_ohlc_daily", lambda **kw: True)
-    monkeypatch.setattr(sched, "job_fundamentals", lambda **kw: False)
-    assert sched.job_all() is False
 
 
 def test_main_exit_codes_and_dry_run(sched, monkeypatch):

@@ -24,7 +24,7 @@ def src(tmp_path):
     (r / "lake/bars/interval=1s/date=2026-10-23").mkdir(parents=True)
     duckdb.sql(f"COPY (SELECT 1 AS a) TO '{r}/lake/bars/interval=1s/date=2026-10-23/bars.parquet' (FORMAT PARQUET)")
     write_csv(r / "data/universe.csv", ["symbol"], [["A.NS"]])
-    write_csv(r / "data/fund_meta.csv", ["symbol"], [["A.NS"]])
+    write_csv(r / "data/universe_global.csv", ["symbol"], [["A.NS"]])
     (r / ".env").write_text("SECRET=1\n")
     (r / "logs").mkdir()
     (r / "logs/x.log").write_text("log")
@@ -49,7 +49,7 @@ def test_second_snapshot_hardlinks_unchanged_and_copies_only_what_changed(src, t
     new = src / "lake/bars/interval=1s/date=2026-10-27"
     new.mkdir(parents=True)
     duckdb.sql(f"COPY (SELECT 2 AS a) TO '{new}/bars.parquet' (FORMAT PARQUET)")
-    (src / "data/fund_meta.csv").write_text("symbol\nA.NS\nB.NS\n")
+    (src / "data/universe_global.csv").write_text("symbol\nA.NS\nB.NS\n")
     (src / "data/universe.csv").unlink()                                          # removed at the source
     s = backup.run_backup(dest, root=src, today=date(2026, 10, 27))
     assert s["copied"] == 2 and s["linked"] == 1 and s["files"] == 3
@@ -57,15 +57,15 @@ def test_second_snapshot_hardlinks_unchanged_and_copies_only_what_changed(src, t
     p = "lake/bars/interval=1s/date=2026-10-23/bars.parquet"
     assert os.stat(a / p).st_ino == os.stat(b / p).st_ino                         # shared on disk
     assert not (b / "data/universe.csv").exists() and (a / "data/universe.csv").exists()
-    assert (b / "data/fund_meta.csv").read_text().count("B.NS") == 1 and "B.NS" not in (a / "data/fund_meta.csv").read_text()
+    assert (b / "data/universe_global.csv").read_text().count("B.NS") == 1 and "B.NS" not in (a / "data/universe_global.csv").read_text()
 
 
 def test_running_twice_in_a_day_replaces_that_days_snapshot(src, tmp_path):
     dest = tmp_path / "bk"
     backup.run_backup(dest, root=src, today=date(2026, 10, 26))
-    (src / "data/fund_meta.csv").write_text("symbol\nZ.NS\n")
+    (src / "data/universe_global.csv").write_text("symbol\nZ.NS\n")
     backup.run_backup(dest, root=src, today=date(2026, 10, 26))
-    assert backup.list_snapshots(dest) == ["2026-10-26"] and "Z.NS" in (dest / "2026-10-26/data/fund_meta.csv").read_text()
+    assert backup.list_snapshots(dest) == ["2026-10-26"] and "Z.NS" in (dest / "2026-10-26/data/universe_global.csv").read_text()
     assert not [p for p in dest.iterdir() if p.name.startswith((".tmp", ".old"))]
 
 
@@ -90,11 +90,11 @@ def test_verify_detects_missing_resized_and_corrupt_parquet(src, tmp_path):
     pq = snap / "lake/bars/interval=1s/date=2026-10-23/bars.parquet"
     good = pq.read_bytes()
     pq.unlink(); pq.write_bytes(b"\0" * len(good))                                # same size, garbage content
-    csvf = snap / "data/fund_meta.csv"
+    csvf = snap / "data/universe_global.csv"
     csvf.unlink(); csvf.write_text("tampered, different size")
     (snap / "data/universe.csv").unlink()
     probs = " | ".join(backup.verify_snapshot(snap))
-    assert "unreadable parquet" in probs and "size changed: data/fund_meta.csv" in probs and "missing: data/universe.csv" in probs
+    assert "unreadable parquet" in probs and "size changed: data/universe_global.csv" in probs and "missing: data/universe.csv" in probs
     (snap / "MANIFEST.json").write_text("not json")
     assert backup.verify_snapshot(snap)[0].startswith("manifest unreadable")
 
@@ -107,9 +107,9 @@ def test_restore_into_empty_dir_roundtrips_and_refuses_to_overwrite(src, tmp_pat
     assert duckdb.sql(f"SELECT a FROM read_parquet('{out}/lake/bars/interval=1s/date=2026-10-23/bars.parquet')").fetchall() == [(1,)]
     with pytest.raises(SystemExit, match="already exist"):
         backup.restore(dest / "2026-10-26", out)
-    (out / "data/fund_meta.csv").write_text("changed")
+    (out / "data/universe_global.csv").write_text("changed")
     backup.restore(dest / "2026-10-26", out, force=True)
-    assert (out / "data/fund_meta.csv").read_text().startswith("symbol")
+    assert (out / "data/universe_global.csv").read_text().startswith("symbol")
 
 
 def test_backup_cli(src, tmp_path, monkeypatch, capsys):
@@ -456,7 +456,7 @@ def test_crontab_lines_are_valid_and_point_at_real_commands():
                 assert int(n) <= hi, ln
         cmd = f[5]
         for job in re.findall(r"scheduler\.py --job ([\w-]+)", cmd):
-            assert job in ("ohlc-daily", "fundamentals", "bars", "all"), cmd
+            assert job in ("ohlc-daily", "bars"), cmd
         for mod in re.findall(r"python -m ([\w.]+)", cmd):
             assert importlib.util.find_spec(mod) is not None, mod
         assert "logs/" in cmd and "2>&1" in cmd

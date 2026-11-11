@@ -2,7 +2,7 @@
 #
 # IDENTIFIER GUIDE
 # ────────────────
-# symbol       Primary key used throughout the codebase (Yahoo/FMP .NS format).
+# symbol       Primary key used throughout the codebase (Yahoo .NS format).
 #                Yahoo Finance .NS suffix (NSE)  e.g.  RELIANCE.NS, TCS.NS
 #              The .NS suffix is essentially the RIC convention Yahoo adopted from Reuters.
 #

@@ -26,7 +26,6 @@ def ohlc_rows(sym, mkt, days, start_px=100.0, step=0.0, d0=None, vol=10):
 def test_load_with_no_csvs_is_harmless(world, caplog):
     world.lake.load_ohlc()
     assert world.lake.load_bars("5m") == 0
-    world.lake.load_fundamentals()
     assert not world.lakedir.exists() or not list(world.lakedir.rglob("*.parquet"))
     assert "no OHLC CSVs" in caplog.text
 
@@ -72,8 +71,6 @@ def test_upsert_preserves_other_rows_and_leaves_no_temp_files(world):
 
 def test_cli_bars_for_us_loads_nothing_instead_of_crashing(world, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["lake", "--load", "bars", "--market", "US"])
-    world.lake.main()
-    monkeypatch.setattr(sys, "argv", ["lake", "--load", "fundamentals", "--market", "UK"])
     world.lake.main()
 
 

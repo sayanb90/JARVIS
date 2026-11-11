@@ -9,7 +9,7 @@ import pyarrow.parquet as pq
 import pytest
 from fastapi.testclient import TestClient
 
-from data_layer import fmp_client, tick_store
+from data_layer import tick_store, universe_files
 from data_layer import universe as uni
 from data_layer.ticks import Bar, Tick
 from data_layer.upstox import feed
@@ -41,12 +41,12 @@ def lake(world, monkeypatch):
                            for i in range(10)], "1m", world.lakedir)
     fo.save_eq_table(fo.parse_equities(EQ_RECORDS), world.lakedir)
     world.set_universe({"IN": ["RELIANCE.NS", "TCS.NS", "INFY.NS"], "US": ["AAPL"]})
-    rows = fmp_client.read_universe(None)
+    rows = universe_files.read_universe(None)
     for r in rows:                                   # give the India rows the real ISINs from the instrument file
         isin = {e["trading_symbol"] + ".NS": e["isin"] for e in EQ_RECORDS}.get(r["symbol"])
         if isin:
             r["isin"] = isin
-    uni.write_universe(fmp_client.UNIVERSE_CSV, [], rows)
+    uni.write_universe(universe_files.UNIVERSE_CSV, [], rows)
     return world
 
 
@@ -193,14 +193,14 @@ def test_upload_preview_maps_tickers_and_reports_unknowns_without_writing(client
 def test_apply_writes_the_local_list_keeps_other_markets_and_can_be_undone(client, lake):
     r = client.post("/admin/api/universe/apply", json={"tickers": ["SBIN", "BAJAJ-AUTO", "NOPE"], "mode": "add"}, auth=A, headers=H).json()
     assert r["india"] == 5 and r["added"] == ["BAJAJ-AUTO.NS", "SBIN.NS"] and r["skipped"] == ["NOPE"]
-    assert fmp_client.active_universe_csv().name == "universe.local.csv"
-    syms = {x["symbol"] for x in fmp_client.read_universe(None)}
+    assert universe_files.active_universe_csv().name == "universe.local.csv"
+    syms = {x["symbol"] for x in universe_files.read_universe(None)}
     assert {"SBIN.NS", "BAJAJ-AUTO.NS", "AAPL", "TCS.NS"} <= syms                # US row untouched
-    assert fmp_client.UNIVERSE_CSV.read_text().count(",IN,") == 3              # the tracked file is never edited
+    assert universe_files.UNIVERSE_CSV.read_text().count(",IN,") == 3              # the tracked file is never edited
     hist = client.get("/admin/api/universe", auth=A).json()["history"]
     assert len(hist) == 1 and hist[0]["india"] == 3
     client.post("/admin/api/universe/restore", json={"name": hist[0]["name"]}, auth=A, headers=H)
-    assert {x["symbol"] for x in fmp_client.read_universe("IN")} == {"RELIANCE.NS", "TCS.NS", "INFY.NS"}
+    assert {x["symbol"] for x in universe_files.read_universe("IN")} == {"RELIANCE.NS", "TCS.NS", "INFY.NS"}
     assert client.post("/admin/api/universe/restore", json={"name": "../../etc/passwd"}, auth=A, headers=H).status_code == 404
 
 
@@ -218,7 +218,7 @@ def test_ticker_text_parsing_and_normalising():
 
 
 def test_mapping_without_the_instrument_file_uses_the_current_list(lake):
-    m = uni.map_tickers(["TCS", "SBIN", "bad ticker!"], pd.DataFrame(), fmp_client.read_universe(None))
+    m = uni.map_tickers(["TCS", "SBIN", "bad ticker!"], pd.DataFrame(), universe_files.read_universe(None))
     assert [r["symbol"] for r in m["rows"]] == ["TCS.NS"] and m["unknown"][0]["ticker"] == "SBIN" and m["invalid"] == ["bad ticker!"]
     with pytest.raises(ValueError):
         uni.plan_india([], [], "merge")

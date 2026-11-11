@@ -28,7 +28,7 @@ import duckdb
 from . import lake as lake_mod
 from .lake import ROOT
 
-INCLUDE = ["lake", "data/universe.csv", "data/fund_meta.csv", "data/fundamentals", "data/ohlc", "data/bars"]
+INCLUDE = ["lake", "data/universe.csv", "data/universe_global.csv", "data/index_sources", "data/ohlc", "data/bars"]
 SKIP_SUFFIXES = (".tmp",)
 
 

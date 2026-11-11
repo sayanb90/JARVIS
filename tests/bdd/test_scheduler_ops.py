@@ -38,9 +38,9 @@ def _daily(ctx, sched, monkeypatch):
     run_cron(ctx, sched, monkeypatch, "--job", "ohlc-daily")
 
 
-@when("cron runs all jobs as a dry run")
+@when("cron runs the daily job as a dry run")
 def _dry(ctx, sched, monkeypatch):
-    run_cron(ctx, sched, monkeypatch, "--job", "all", "--dry-run")
+    run_cron(ctx, sched, monkeypatch, "--job", "ohlc-daily", "--dry-run")
 
 
 @when(parsers.parse("cron runs the bars job for market {market}"))

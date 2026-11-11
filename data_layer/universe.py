@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import fmp_client
+from . import universe_files
 
 ISIN_RE = re.compile(r"^IN[A-Z0-9]{9}[0-9]$")
 HEADER = ["symbol", "name", "market", "exchange", "isin", "cusip", "ric", "bbg_code", "sector", "currency"]
@@ -82,7 +82,7 @@ def write_universe(path: Path, comments: list[str], rows: list[dict]) -> None:
 
 
 def import_nse(csv_path: Path, universe_path: Path | None = None, replace_india: bool = False) -> dict:
-    universe_path = universe_path or fmp_client.active_universe_csv()
+    universe_path = universe_path or universe_files.active_universe_csv()
     new, problems = parse_nse_csv(csv_path)
     comments, existing, _ = _read_all(universe_path)
     keep = [r for r in existing if r.get("market") != "IN"]
@@ -99,7 +99,7 @@ def import_nse(csv_path: Path, universe_path: Path | None = None, replace_india:
 
 def check(universe_path: Path | None = None) -> list[str]:
     """Problems found in universe.csv (empty = fine)."""
-    _, rows, _ = _read_all(universe_path or fmp_client.active_universe_csv())
+    _, rows, _ = _read_all(universe_path or universe_files.active_universe_csv())
     problems, seen = [], set()
     for r in rows:
         s = r.get("symbol", "")
@@ -199,8 +199,8 @@ def write_active_universe(india: list[dict], history_dir: Path | None = None, no
     market's rows unchanged, after saving the file in force to data/universe_history/.  Returns where it went.
     """
     from datetime import datetime
-    src = fmp_client.active_universe_csv()
-    local = fmp_client.UNIVERSE_CSV.with_name("universe.local.csv")
+    src = universe_files.active_universe_csv()
+    local = universe_files.UNIVERSE_CSV.with_name("universe.local.csv")
     history_dir = history_dir or local.parent / "universe_history"
     comments, existing, _ = _read_all(src)
     backup = None
@@ -217,14 +217,14 @@ def write_active_universe(india: list[dict], history_dir: Path | None = None, no
 
 
 def history(history_dir: Path | None = None) -> list[dict]:
-    d = history_dir or fmp_client.UNIVERSE_CSV.parent / "universe_history"
+    d = history_dir or universe_files.UNIVERSE_CSV.parent / "universe_history"
     files = sorted(d.glob("universe-*.csv"), reverse=True) if d.exists() else []
     return [{"name": f.name, "india": sum(1 for r in _read_all(f)[1] if r.get("market") == "IN")} for f in files]
 
 
 def restore(name: str, history_dir: Path | None = None) -> dict:
     """Make a saved version the active universe again (the current one is saved first, so this is undoable)."""
-    d = history_dir or fmp_client.UNIVERSE_CSV.parent / "universe_history"
+    d = history_dir or universe_files.UNIVERSE_CSV.parent / "universe_history"
     if not re.fullmatch(r"universe-\d{8}-\d{6}\.csv", name) or not (d / name).is_file():
         raise ValueError("no such saved version")
     india = [r for r in _read_all(d / name)[1] if r.get("market") == "IN"]

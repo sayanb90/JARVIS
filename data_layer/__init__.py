@@ -1,19 +1,10 @@
 """JARVIS data extraction layer.
 
-Two sub-clients:
-  fmp_client  — FMP API, annual fundamentals (income, balance, cashflow, ratios)
-  yf_client   — Yahoo Finance, daily OHLC + intraday bars (free, no API key)
+  yf_client        — Yahoo Finance, daily OHLC + intraday bars (free, no API key)
+  yf_fundamentals  — Yahoo Finance statements, profile, dividends and splits; yf_pillars builds the pillar tables
 Storage/query: lake (CSV -> Parquet upsert) and query (DuckDB helpers + scoring).
 """
 
-from .fmp_client import (
-    NIFTY_50,
-    FMPExtractor,
-    compute_pillar_metrics,
-    write_fundamentals,
-    write_pillar_metrics,
-    run,
-)
 from .yf_client import (
     BarRow,
     OHLCRow,
@@ -29,13 +20,6 @@ from .yf_client import (
 )
 
 __all__ = [
-    # FMP — fundamentals
-    "NIFTY_50",
-    "FMPExtractor",
-    "compute_pillar_metrics",
-    "write_fundamentals",
-    "write_pillar_metrics",
-    "run",
     # yfinance — OHLC
     "OHLCRow",
     "BarRow",

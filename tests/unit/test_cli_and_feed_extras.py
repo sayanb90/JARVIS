@@ -37,16 +37,6 @@ def test_yf_cli_dry_runs(world, monkeypatch, caplog, argv):
     assert "DRY RUN" in caplog.text
 
 
-def test_fmp_cli_dry_run_and_bad_market(world, monkeypatch, caplog):
-    world.set_universe({"IN": ["A.NS", "B.NS"]})
-    monkeypatch.setenv("JARVIS_ROOT", str(world.root))
-    with caplog.at_level("INFO"):
-        run_module(monkeypatch, "data_layer.fmp_client", "--market", "IN", "--dry-run", "--slice", "0", "0")
-    assert "1 tickers × 4 endpoints" in caplog.text
-    with pytest.raises(SystemExit):
-        run_module(monkeypatch, "data_layer.fmp_client", "--market", "US")
-
-
 def test_market_info_frame_updates_status_and_is_not_a_tick():
     p = FeedProcessor(KMAP)
     r = pb.FeedResponse(type=pb.market_info)

@@ -79,7 +79,7 @@ def seed_scoring(world, symbol="GOOD.NS", price=9.0, **o):
               [[symbol, "IN", avg_ni, avg_fcf, rev[0], 1, 1000, 400, ltd, 600, roic, pm_shares]])
     write_csv(world.data / "ohlc" / "ohlc_2026_in.csv", OHLC_H,
               [["2026.10.20", symbol, "IN", price, price, price, price, 1]])
-    world.lake.load_fundamentals(("IN",))
+    load_fundamentals(world.lake, ("IN",))
     world.lake.load_ohlc(("IN",))
     from data_layer.query import Lake
     return Lake()
@@ -92,3 +92,29 @@ def tick_folder(lake, day, segment: str = "eq") -> Path:
 
 def tick_file(lake, day, segment: str = "eq") -> Path:
     return tick_folder(lake, day, segment) / "ticks.parquet"
+
+
+# -- legacy fundamentals CSVs -> lake tables (the loader itself was retired with FMP; scoring tests still seed through it) --------------
+_STATEMENTS = {
+    "income_statement": (["symbol", "date"], {"date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR",
+                                                "revenue": "DOUBLE", "net_income": "DOUBLE", "ebit": "DOUBLE"}),
+    "balance_sheet": (["symbol", "date"], {"date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR", "total_assets": "DOUBLE",
+                                             "total_liabilities": "DOUBLE", "long_term_debt": "DOUBLE", "total_equity": "DOUBLE"}),
+    "cash_flow": (["symbol", "date"], {"date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR", "free_cash_flow": "DOUBLE"}),
+    "ratios": (["symbol", "date"], {"date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR", "roic": "DOUBLE",
+                                      "shares_outstanding": "DOUBLE"}),
+    "pillar_metrics": (["symbol"], {"symbol": "VARCHAR", "market": "VARCHAR", "avg_net_income_5y": "DOUBLE", "avg_fcf_5y": "DOUBLE",
+                                      "latest_revenue": "DOUBLE", "latest_ebit": "DOUBLE", "latest_total_assets": "DOUBLE",
+                                      "latest_total_liabilities": "DOUBLE", "latest_long_term_debt": "DOUBLE",
+                                      "latest_total_equity": "DOUBLE", "latest_roic": "DOUBLE",
+                                      "latest_shares_outstanding": "DOUBLE"}),
+}
+
+
+def load_fundamentals(lake, markets=("IN",)) -> None:
+    """Load data/fundamentals/<table>_<market>.csv files into lake/fundamentals/<table>.parquet (test seeding only)."""
+    import duckdb
+    con = duckdb.connect()
+    for name, (keys, types) in _STATEMENTS.items():
+        for csv_path in lake._csv_paths(f"fundamentals/{name}_{{m}}.csv", markets):
+            lake._upsert(con, lake.LAKE_DIR / "fundamentals" / f"{name}.parquet", lake._read_csv_sql(csv_path, types), keys, keys)

@@ -48,7 +48,7 @@ import warnings
 warnings.filterwarnings("ignore", message=r".*inplace keyword.*")
 import yfinance as yf
 
-from .fmp_client import read_universe
+from .universe_files import read_universe
 from .lake import BARS_MARKETS, BARS_YF_DEFAULT, MARKETS
 
 # ---------------------------------------------------------------------------
@@ -527,7 +527,7 @@ def run_bars(
 
 
 # ---------------------------------------------------------------------------
-# Universe resolver (mirrors fmp_client logic, no API call needed for IN)
+# Universe resolver (the universe files; no API call needed)
 # ---------------------------------------------------------------------------
 
 def _resolve_universe(market: str, tickers: list[str] | None) -> list[str]:

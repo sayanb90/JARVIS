@@ -4,14 +4,14 @@ Fundamentals from Yahoo Finance for the whole universe (SCRUM-161): annual state
   python -m data_layer.yf_fundamentals run [--limit 100] [--market US,UK] [--symbols AAPL,HSBA.L] [--refresh-days 30]
   python -m data_layer.yf_fundamentals status
 
-Why Yahoo (decision record SCRUM-138): FMP's free plan covers US exchanges only and its global tier is expensive; Yahoo covers every
+Why Yahoo (decision record SCRUM-138): the previous vendor's free plan covered US exchanges only and its global tier was expensive; Yahoo covers every
 market in the universe through the open-source `yfinance` library.  That library is not an API: it runs on our side and reads Yahoo's
 own website endpoints, which Yahoo can change at any time.  So this module is built to notice breakage instead of hiding it:
 
   * every call of every symbol is classified: ok, empty (Yahoo answered nothing), throttled (HTTP 429), exception, or parse (the
     answer came back in a shape we do not recognise).  The classes are the first thing to look at when data thins out;
   * a symbol is complete only when all three statements came back; one that did not is retried before anything else, and is never
-    marked fresh (the lesson of the FMP rotation, which stamped failed fetches as done);
+    marked fresh (the lesson of the earlier rotation, which stamped failed fetches as done);
   * a failed or empty answer never overwrites stored values;
   * the complete payload of every symbol is kept (raw/date=.../<symbol>.json.gz), so a parser fix can be replayed without calling
     Yahoo again.
@@ -437,7 +437,7 @@ def status(lake_dir: Path | None = None) -> dict:
 
 # ---------------------------------------------------------------------------------------------- command line
 def universe_symbols(markets: Optional[Iterable[str]] = None) -> dict[str, str]:
-    from .fmp_client import read_universe
+    from .universe_files import read_universe
     out: dict[str, str] = {}
     for m in markets or lake_mod.MARKETS:
         for r in read_universe(m):
