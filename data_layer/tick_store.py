@@ -423,8 +423,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def compact_day(interval: str, day: date, lake_dir: Path | None = None) -> int:
-    """Merge segments + bars.parquet for one day into bars.parquet.  Returns row count."""
+    """Merge segments + bars.parquet for one day into bars.parquet.  Returns row count.
+
+    Takes the same per-folder lock as `lake.load_bars`: the history backfill (hours long) and the nightly Yahoo job can both write the
+    same day, and two writers replacing `bars.parquet` at once would drop one of their rows."""
     folder = (lake_dir or LAKE_DIR) / "bars" / f"interval={interval}" / f"date={day}"
+    if not folder.is_dir():
+        return 0
+    with _folder_lock(folder):
+        return _compact_bars_folder(folder)
+
+
+def _compact_bars_folder(folder: Path) -> int:
     files = sorted(folder.glob("*.parquet"))
     if not files:
         return 0

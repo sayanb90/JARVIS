@@ -342,13 +342,13 @@ def test_cli_select_with_no_underlying_and_no_watchlist_file_errors(world, tmp_p
 
 
 # -- production watchlist and the startup check (SCRUM-106) --------------------
-def test_tracked_watchlist_asks_for_one_future_and_two_option_expiries_per_index():
+def test_tracked_watchlist_asks_for_two_futures_and_two_option_expiries_per_index():
     import subprocess
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
     rows = {r["underlying"]: r for r in fo.read_watchlist(root / "data" / "fo_watchlist.csv")}
     assert set(rows) == {"NIFTY", "BANKNIFTY"}
-    assert all(r["futures"] == 1 and r["option_expiries"] == 2 and r["strikes"] >= 10**6 and not r["no_options"] for r in rows.values())
+    assert all(r["futures"] == 2 and r["option_expiries"] == 2 and r["strikes"] >= 10**6 and not r["no_options"] for r in rows.values())
     tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "data/fo_watchlist.csv"], cwd=root, capture_output=True)
     assert tracked.returncode == 0                                       # the watchlist is in git, the generated universe is not
 
