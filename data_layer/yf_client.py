@@ -36,7 +36,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -184,10 +184,31 @@ def _iv(v) -> Optional[int]:
 # Public fetch functions
 # ---------------------------------------------------------------------------
 
-def fetch_ohlc_full(tickers: list[str], market: str) -> list[OHLCRow]:
+def history_period(years: int | None = YEARS_BACK) -> str:
+    """The Yahoo `period` for a full download: "<N>y", or "max" (everything Yahoo has) when `years` is None or 0."""
+    if years is not None and years < 0:
+        raise ValueError("years must be positive, or 0 / None for everything Yahoo has")
+    return f"{years}y" if years else "max"
+
+
+def parse_years(text: str) -> int | None:
+    """Command-line value of --years: a whole number of years, or "max" (returned as None)."""
+    if text.strip().lower() == "max":
+        return None
+    n = int(text)
+    if n <= 0:
+        raise ValueError("--years must be a positive number or 'max'")
+    return n
+
+
+def fetch_ohlc_full(tickers: list[str], market: str, years: int | None = YEARS_BACK) -> list[OHLCRow]:
     """
-    Fetch YEARS_BACK years of daily OHLC for all tickers in one market.
+    Fetch `years` years of daily OHLC (default YEARS_BACK; None or 0 = everything Yahoo has) for all tickers in one market.
     Downloads in chunks of CHUNK_SIZE to stay within yfinance's sweet spot.
+
+    A full download replaces every stored day of a symbol with prices adjusted on one basis (today's), which is also the way to
+    repair a series whose older rows were adjusted before a later split or dividend.  Rows are held in memory for the whole
+    market before they are written: twenty years of a 600-stock market is about three million rows, so run one market at a time.
     """
     all_rows: list[OHLCRow] = []
     total_chunks = (len(tickers) + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -198,7 +219,7 @@ def fetch_ohlc_full(tickers: list[str], market: str) -> list[OHLCRow]:
         log.info("[%s] OHLC full chunk %d/%d (%d tickers) …",
                  market, chunk_num, total_chunks, len(chunk))
         try:
-            batch = _batch_download(chunk, period=f"{YEARS_BACK}y")
+            batch = _batch_download(chunk, period=history_period(years))
         except Exception as exc:
             log.error("Chunk %d failed: %s — skipping", chunk_num, exc)
             continue
@@ -305,10 +326,13 @@ def _write_csv(path: Path, headers: list[str], rows: Iterator) -> None:
 BARS_DIR = DATA_DIR / "bars"
 
 # Max look-back Yahoo allows per interval (calendar days)
-INTRADAY_MAX_DAYS = {"1m": 7, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
+# Tested 2026-11-11: Yahoo refuses a 1-minute request that reaches back 30 days or more ("must be within the last 30 days"), serves at most
+# about 8 days per request, and 5-minute bars only within 60 days.  So 1-minute history can be fetched 29 days back, in windows of 7 days.
+INTRADAY_MAX_DAYS = {"1m": 30, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
+WINDOW_DAYS = {"1m": 7}                 # days per request for the intervals that Yahoo serves only a few days at a time
 INTRADAY_INTERVAL = "5m"
-INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent).  Yahoo serves 7 days of 1m: a daily run with a
-                           # 5-day overlap survives a missed day or two.
+INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent).  A daily run with a 5-day overlap survives a missed
+                           # day or two.
 
 _INTERVAL_MINUTES = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
 _BAR_HEADERS = ["ts", "symbol", "market", "open", "high", "low", "close", "volume"]
@@ -351,14 +375,32 @@ def _bars_to_rows(df: pd.DataFrame, ticker: str, market: str,
     return rows
 
 
+def bar_windows(interval: str, days_back: int, today: Optional[date] = None) -> list[tuple[date, date]]:
+    """[(first day, last day)] to request when `days_back` is more than Yahoo serves in one request for `interval` (1-minute: 7 days),
+    oldest first; empty when one `period=` request is enough."""
+    size = WINDOW_DAYS.get(interval)
+    days_back = min(days_back, INTRADAY_MAX_DAYS[interval] - 1)
+    if not size or days_back <= size:
+        return []
+    today = today or datetime.now(timezone.utc).date()
+    out, first = [], today - timedelta(days=days_back)
+    while first <= today:
+        out.append((first, min(first + timedelta(days=size - 1), today)))
+        first += timedelta(days=size)
+    return out
+
+
 def fetch_bars(tickers: list[str], market: str,
                interval: str = INTRADAY_INTERVAL,
-               days_back: int = INTRADAY_DAYS_BACK) -> list[BarRow]:
-    """Fetch regular-session intraday bars for the last `days_back` days."""
+               days_back: int = INTRADAY_DAYS_BACK,
+               window: Optional[tuple[date, date]] = None) -> list[BarRow]:
+    """Fetch regular-session intraday bars for the last `days_back` days, or for the days of `window` (first, last) when it is given."""
     if interval not in INTRADAY_MAX_DAYS:
         raise ValueError(f"Unsupported interval {interval!r}; use one of {sorted(INTRADAY_MAX_DAYS)}")
-    days_back = min(days_back, INTRADAY_MAX_DAYS[interval])
+    days_back = min(days_back, INTRADAY_MAX_DAYS[interval] - 1 if interval == "1m" else INTRADAY_MAX_DAYS[interval])
     now_utc = pd.Timestamp.now(tz="UTC")
+    span = ({"start": window[0].isoformat(), "end": (window[1] + timedelta(days=1)).isoformat()} if window
+            else {"period": f"{days_back}d"})
 
     all_rows: list[BarRow] = []
     total_chunks = (len(tickers) + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -368,8 +410,7 @@ def fetch_bars(tickers: list[str], market: str,
         log.info("[%s] bars %s chunk %d/%d (%d tickers) …",
                  market, interval, chunk_num, total_chunks, len(chunk))
         try:
-            batch = _batch_download(chunk, period=f"{days_back}d",
-                                    interval=interval, prepost=False)
+            batch = _batch_download(chunk, interval=interval, prepost=False, **span)
         except Exception as exc:
             log.error("Chunk %d failed: %s — skipping", chunk_num, exc)
             continue
@@ -441,9 +482,10 @@ def run_bars(
 ) -> None:
     """
     Intraday bar collection from Yahoo: US, UK and EU by default (`ALL`), India on request (the Upstox feed records India tick by
-    tick, so a Yahoo copy of it adds nothing).  backfill=True pulls the deepest window Yahoo allows (about 59 days of 5m, 6 of 1m,
-    729 of 60m); there is no more, so 1-minute history can only be built forward.  Run AFTER each market closes (the cron job runs
-    once at 22:00 UTC, after the US close in winter and summer), then:
+    tick, so a Yahoo copy of it adds nothing).  backfill=True pulls the deepest window Yahoo allows (59 days of 5m, 29 of 1m in windows
+    of 7 days, 729 of 60m); there is no more, so longer 1-minute history can only be built forward.  Each window is written as soon as
+    it is fetched, so a 29-day backfill of a market holds one week of bars in memory, not a month.  Run AFTER each market closes (the cron
+    job runs once at 22:00 UTC, after the US close in winter and summer), then:
       python -m data_layer.lake --load bars --interval 1m
     """
     if market == "ALL":
@@ -462,14 +504,26 @@ def run_bars(
     if backfill:
         days_back = INTRADAY_MAX_DAYS[interval] - 1   # deepest window Yahoo allows
     universe = _resolve_universe(market, tickers)
+    windows = bar_windows(interval, days_back)
     if dry_run:
-        log.info("DRY RUN bars [%s] — %d tickers, interval=%s, last %d days",
-                 market, len(universe), interval, days_back)
+        log.info("DRY RUN bars [%s] — %d tickers, interval=%s, last %d days%s",
+                 market, len(universe), interval, days_back, f" in {len(windows)} windows of {WINDOW_DAYS[interval]} days" if windows else "")
         return
 
-    rows = fetch_bars(universe, market, interval, days_back)
-    _require_rows(rows, universe, market, f"{interval} bars")
-    write_bars(rows, market, interval)
+    if not windows:
+        rows = fetch_bars(universe, market, interval, days_back)
+        _require_rows(rows, universe, market, f"{interval} bars")
+        write_bars(rows, market, interval)
+        return
+    total = 0
+    for first, last in windows:                       # oldest window first; each is written before the next is fetched
+        log.info("[%s] bars %s window %s .. %s", market, interval, first, last)
+        rows = fetch_bars(universe, market, interval, days_back, window=(first, last))
+        total += len(rows)
+        if rows:
+            write_bars(rows, market, interval)
+    if universe and not total:                        # Yahoo is down or blocking us: fail loudly so cron alerts
+        raise RuntimeError(f"{interval} bars [{market}]: Yahoo returned no data for any of {len(universe)} tickers")
 
 
 # ---------------------------------------------------------------------------
@@ -491,23 +545,24 @@ def run_ohlc(
     market: str = "ALL",
     tickers: list[str] | None = None,
     dry_run: bool = False,
+    years: int | None = YEARS_BACK,
 ) -> None:
     """
-    Full historical OHLC refresh (5 years).  No API key needed.
+    Full historical OHLC refresh (`years` years, default 5; None or 0 = everything Yahoo has).  No API key needed.
     Run once for initial setup, then monthly to catch any backfill gaps.
     """
     if market == "ALL":
-        return _all_markets(run_ohlc, "full OHLC", tickers=tickers, dry_run=dry_run)
+        return _all_markets(run_ohlc, "full OHLC", tickers=tickers, dry_run=dry_run, years=years)
 
     universe = _resolve_universe(market, tickers)
 
     if dry_run:
         chunks = (len(universe) + CHUNK_SIZE - 1) // CHUNK_SIZE
-        log.info("DRY RUN full [%s] — %d tickers in %d batch(es), 0 API keys needed",
-                 market, len(universe), chunks)
+        log.info("DRY RUN full [%s] — %d tickers in %d batch(es), period %s, 0 API keys needed",
+                 market, len(universe), chunks, history_period(years))
         return
 
-    rows = fetch_ohlc_full(universe, market)
+    rows = fetch_ohlc_full(universe, market, years)
     _require_rows(rows, universe, market, "full OHLC")
     write_ohlc(rows, market)
 
@@ -557,7 +612,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="JARVIS yfinance OHLC fetcher")
     parser.add_argument("--mode", default="daily", choices=["full", "daily", "intraday"],
                         help=(
-                            "full     = 5-year OHLC for initial/monthly backfill; "
+                            "full     = --years of daily OHLC (default 5) for initial/monthly backfill; "
                             "daily    = last --days-back calendar days (run every trading day); "
                             "intraday = aggregated intraday bars (run after each market close)"
                         ))
@@ -568,6 +623,8 @@ if __name__ == "__main__":
                         help="Daily OHLC: IN, US, UK, EU or ALL. Intraday: IN only")
     parser.add_argument("--days-back", type=int, default=DAILY_OHLC_DAYS,
                         help=f"Calendar days to look back in daily mode (default: {DAILY_OHLC_DAYS})")
+    parser.add_argument("--years", default=str(YEARS_BACK), metavar="N|max",
+                        help=f"full mode: years of daily history to download (default {YEARS_BACK}); 'max' = everything Yahoo has")
     parser.add_argument("--backfill", action="store_true",
                         help="intraday: fetch the deepest window Yahoo allows for --interval")
     parser.add_argument("--tickers", nargs="*", default=None,
@@ -579,7 +636,7 @@ if __name__ == "__main__":
     (ROOT / "logs").mkdir(parents=True, exist_ok=True)
 
     if args.mode == "full":
-        run_ohlc(market=args.market, tickers=args.tickers, dry_run=args.dry_run)
+        run_ohlc(market=args.market, tickers=args.tickers, dry_run=args.dry_run, years=parse_years(args.years))
     elif args.mode == "intraday":
         run_bars(market=args.market, tickers=args.tickers, interval=args.interval,
                  days_back=args.days_back if args.days_back != DAILY_OHLC_DAYS else INTRADAY_DAYS_BACK,

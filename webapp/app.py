@@ -13,6 +13,8 @@ API (JSON):
   GET /api/overview?date=                          one row per equity: volume, spread, volatility, ...
   GET /api/fo/meta?date=                           underlyings with derivative bars that day
   GET /api/fo/chain?date=&underlying=&expiry=      futures + option chain snapshot (section 17)
+  GET /api/coverage                                what the lake holds per dataset, gaps, historical run, snapshot, storage (Data tab)
+  GET /api/coverage/markets                        per-market ranges of the daily candles and 1-minute bars (slower, cached)
 
 Admin (data browser, read-only SQL, subscription list) is at /admin when ADMIN_USER and ADMIN_PASSWORD are set;
 see webapp/admin.py.  The app never writes to the lake.  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
@@ -25,6 +27,7 @@ import base64
 import os
 import re
 import secrets
+import time
 from datetime import date
 from pathlib import Path
 
@@ -40,6 +43,7 @@ from data_layer import live_book
 from data_layer.lake import LAKE_DIR
 from data_layer import tick_store
 from data_layer.query import Lake
+from . import coverage as coverage_mod
 
 STATIC = Path(__file__).parent / "static"
 WIDTHS = (0, 1, 5, 15, 30, 60, 300)              # precision offered in the UI: 0 = raw ticks (no aggregation), else a bar width in seconds
@@ -256,6 +260,28 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         if book is None:
             raise HTTPException(503, "no live book: the feed is not running, or this instrument is not subscribed")
         return JSONResponse(_json_safe(book))
+
+    cov_cache: dict[str, tuple[float, object]] = {}
+
+    def cached(key: str, ttl: float, fn):
+        now = time.monotonic()
+        hit = cov_cache.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+        val = _json_safe(fn())
+        cov_cache[key] = (now, val)
+        return val
+
+    @app.get("/api/coverage")
+    def coverage_api():
+        """What the lake holds per dataset (first and last day, gaps, the last 60 days), the historical run, the research snapshot and storage.
+        Reads folder names and a few small files only; cached for a minute."""
+        return cached("coverage", 60.0, lambda: coverage_mod.coverage(lake_path))
+
+    @app.get("/api/coverage/markets")
+    def coverage_markets():
+        """Per-market ranges of the daily candles and the 1-minute bars (reads the bars tables with a memory cap; cached for ten minutes)."""
+        return cached("markets", 600.0, lambda: coverage_mod.market_ranges(lake_path))
 
     @app.get("/vendor/plotly.min.js", include_in_schema=False)
     def plotly_js():
