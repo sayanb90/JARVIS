@@ -18,6 +18,7 @@
       <button role="tab" id="tab-overview" data-tab="overview" aria-selected="false">Market</button>
       <button role="tab" id="tab-fo" data-tab="fo" aria-selected="false">Derivatives</button>
       <button role="tab" id="tab-candles" data-tab="candles" aria-selected="false">Candles</button>
+      <button role="tab" id="tab-history" data-tab="history" aria-selected="false">History</button>
       <button role="tab" id="tab-data" data-tab="data" aria-selected="false">Data</button>
     </nav>
     <div class="spacer"></div>
@@ -255,6 +256,46 @@
       </div>
     </div>
     <p class="note" id="cd-note"></p>
+  </section>
+
+  <!-- ===================== History: prices and volume per instrument ===================== -->
+  <section id="view-history" class="view" hidden>
+    <div class="page-head">
+      <div><h1 id="hx-title">History</h1><p class="sub" id="hx-sub">Daily candles and 1-minute bars rolled up to any width, with volume.</p></div>
+    </div>
+    <nav class="subtabs" role="tablist" aria-label="History views" data-tab="history">
+      <button role="tab" data-sub="chart">Price and volume</button>
+      <button role="tab" data-sub="volume">Most traded</button>
+    </nav>
+
+    <div class="subview" data-sub="chart">
+      <div class="toolbar" style="margin-bottom:14px">
+        <label class="field"><span>Market</span><select id="hx-market"></select></label>
+        <label class="field"><span>Group</span><select id="hx-group"></select></label>
+        <label class="field wide"><span>Instrument</span><select id="hx-inst"></select></label>
+        <label class="field wide"><span>Search all markets</span><input id="hx-symbol" list="hx-list" autocomplete="off" spellcheck="false" placeholder="Type a name or symbol"></label>
+        <datalist id="hx-list"></datalist>
+        <label class="field"><span>Bars</span><select id="hx-tf"></select></label>
+        <label class="field"><span>Range</span><select id="hx-range"></select></label>
+        <div class="field"><span>Style</span><div class="seg" id="hx-type" role="group" aria-label="Chart style"><button type="button" data-t="candle" aria-pressed="true">Candles</button><button type="button" data-t="line" aria-pressed="false">Line</button></div></div>
+      </div>
+      <div id="hx-cards" class="kpis"></div>
+      <div class="panel"><header><h3 id="hx-chart-title">Price</h3><div class="legend" id="hx-legend"></div></header>
+        <div class="body"><div id="hx-chart" class="plot" role="img" aria-label="Price and volume"></div><p class="muted" id="hx-msg" hidden></p></div></div>
+      <p class="note" id="hx-note"></p>
+    </div>
+
+    <div class="subview" data-sub="volume" hidden>
+      <div class="toolbar" style="margin-bottom:14px">
+        <label class="field"><span>Market</span><select id="hv-market"></select></label>
+        <label class="field"><span>Day</span><input type="date" id="hv-date"></label>
+        <label class="field"><span>Rank by</span><select id="hv-sort"><option value="volume">Volume</option><option value="rvol">Volume vs 20-day average</option><option value="change">Price change</option><option value="value">Traded value</option></select></label>
+        <label class="field"><span>Show</span><select id="hv-n"><option value="20">Top 20</option><option value="50">Top 50</option><option value="100">Top 100</option></select></label>
+      </div>
+      <div class="panel"><header><h3 id="hv-title">Most traded</h3><span class="hint muted" id="hv-hint"></span></header><div class="body"><div id="hv-chart" class="plot" role="img" aria-label="The most traded tickers"></div><p class="muted" id="hv-msg" hidden></p></div></div>
+      <div class="panel" style="margin-top:14px"><div class="table-wrap"><table id="hv-table" class="clickable"></table></div></div>
+      <p class="note" id="hv-note"></p>
+    </div>
   </section>
 
   <!-- ===================== Data ===================== -->
