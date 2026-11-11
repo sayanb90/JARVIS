@@ -21,12 +21,13 @@ const countText = (n, w) => (w === 0 ? `${fmtInt(n)} ticks (raw)` : `${fmtInt(n)
 const nearestDay = (days, want) => days.reduce((best, d) => (Math.abs(new Date(d) - new Date(want)) < Math.abs(new Date(best) - new Date(want)) ? d : best), days[0]);
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
 const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'],
-               candles: ['chart', 'profile'], data: ['coverage', 'run', 'storage'] };
+               candles: ['chart', 'profile'], data: ['coverage', 'run', 'storage'], history: ['chart', 'volume'] };
 const CANDLE_LABEL = { 1: '1 minute', 3: '3 minutes', 5: '5 minutes', 15: '15 minutes', 30: '30 minutes', 60: '1 hour' };
 const SOURCE_LABEL = { live: 'live feed', rest: 'REST candle API' };
 
 const state = {
-  meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary', candles: 'chart', data: 'coverage' },
+  meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary', candles: 'chart', data: 'coverage', history: 'chart' },
+  hx: { instruments: null, symbol: null, tf: '1d', span: 365, type: 'candle', data: null, vol: { market: '', date: '', sort: 'volume', n: 20 } },
   dt: null, dtMarkets: null, dtRange: 'ohlc',
   cSymbol: null, cMinutes: 1, cBins: 40, cSource: 'auto', cData: null,
   symbol: null, width: 1, volwin: 300, data: null,
@@ -164,8 +165,9 @@ function setTab(tab, load = true) {
   }
   showSub(tab, state.sub[tab], false);
   const dayPicker = document.querySelector('label.day');
-  if (dayPicker) dayPicker.hidden = tab === 'data';                                  // the Data tab is not about one trading day
+  if (dayPicker) dayPicker.hidden = tab === 'data' || tab === 'history';                                  // the Data tab is not about one trading day
   if (!load) return;
+  if (tab === 'history') { loadHistory().catch(fail); return; }
   if (tab === 'data') { loadData().catch(fail); return; }
   if (!syncDays(tab)) { setStatus('No data for this section yet', 'err'); return; }
   if (tab === 'fo') loadFoUnderlyings().catch(fail);
@@ -187,6 +189,7 @@ document.querySelectorAll('.subtabs').forEach((nav) => nav.querySelectorAll('but
   if (nav.dataset.tab === 'fo' && b.dataset.sub === 'contract' && !state.foContractData && state.foContract) loadFoContract(state.foContract);
   if (nav.dataset.tab === 'fo' && b.dataset.sub === 'greeks') loadGreeks();
   if (nav.dataset.tab === 'data' && state.dt) renderData();
+  if (nav.dataset.tab === 'history') (b.dataset.sub === 'volume' ? loadVolume() : (state.hx.data ? (renderHxChart(), loadHxChart()) : loadHxChart())).catch(fail);
 }));
 
 /* ---------------------------------------------------------------- start-up */
@@ -206,9 +209,10 @@ async function init() {
   state.cBins = (state.meta.profile_bins || []).includes(+h.bins) ? +h.bins : 40;
   state.cSource = ['auto', 'live', 'rest'].includes(h.source) ? h.source : 'auto';
   fillSelect($('cd-minutes'), cm, state.cMinutes); fillSelect($('cd-bins'), cb, state.cBins); $('cd-source').value = state.cSource;
-  if (!state.meta.days.length && !(state.meta.candle_days || []).length) {        // no intraday data yet: the Data tab still says what there is
+  if (!state.meta.days.length && !(state.meta.candle_days || []).length) {        // no intraday data yet: Data and History still say what there is
     ['instrument', 'overview', 'fo', 'candles'].forEach((t) => { $('tab-' + t).hidden = true; });
-    $('empty').hidden = false; state.sub.data = SUBS.data.includes(h.sub) ? h.sub : 'coverage'; setTab('data'); return;
+    const t = h.tab === 'history' ? 'history' : 'data';                          // the lake may hold prices and history but no intraday ticks
+    $('empty').hidden = true; state.sub[t] = SUBS[t].includes(h.sub) ? h.sub : SUBS[t][0]; setTab(t); return;
   }
   const picker = $('date');                                                       // a date picker limited to the days that have data
   const all = [...new Set([...state.meta.days, ...(state.meta.candle_days || [])])].sort().reverse();
@@ -938,6 +942,148 @@ $('date').onchange = (e) => {
   e.target.value = day;
   state.day = day; state.foContractData = null; state.greeksData = null; setTab(state.tab);
 };
+/* ================================================================ History: prices and volume per instrument */
+const HX_TF = [['1d', 'Daily'], ['1m', '1 minute'], ['5m', '5 minutes'], ['15m', '15 minutes'], ['60m', '1 hour']];
+const HX_RANGES = {
+  '1d': [['1 month', 31], ['3 months', 92], ['6 months', 183], ['1 year', 365], ['5 years', 1826], ['10 years', 3652], ['All', 40000]],
+  '1m': [['1 day', 1], ['2 days', 2], ['5 days', 5], ['10 days', 10], ['30 days', 30]],
+  '5m': [['5 days', 5], ['10 days', 10], ['30 days', 30], ['90 days', 90]],
+  '15m': [['10 days', 10], ['30 days', 30], ['90 days', 90], ['180 days', 180]],
+  '60m': [['30 days', 30], ['90 days', 90], ['180 days', 180], ['1 year', 365], ['2 years', 730]],
+};
+const HX_BAR = { '1d': 'daily', '1m': '1-minute', '5m': '5-minute', '15m': '15-minute', '60m': 'hourly' };
+const HX_DEFAULT = { '1d': 365, '1m': 5, '5m': 30, '15m': 90, '60m': 365 };
+const hxLabel = (i) => (i.name ? `${i.name} · ${i.market}` : i.market);
+async function loadHistory() {
+  setStatus('Reading the instrument list…', 'busy');
+  if (!state.hx.instruments) {
+    state.hx.instruments = await api('/api/history/instruments', {});
+    $('hx-list').innerHTML = state.hx.instruments.map((i) => `<option value="${esc(i.symbol)}">${esc(hxLabel(i))}</option>`).join('');
+    fillSelect($('hx-tf'), HX_TF, state.hx.tf);
+    const mk = [...new Set(state.hx.instruments.filter((i) => i.daily_days).map((i) => i.market))].sort();
+    fillSelect($('hv-market'), [['', 'All markets'], ...mk.map((m) => [m, MARKET_NAME[m] || m])], state.hx.vol.market);
+  }
+  if (!state.hx.instruments.length) { showHxMsg('The lake has no daily candles or 1-minute bars yet.'); setStatus('No prices yet', 'err'); return; }
+  if (!state.hx.symbol) {
+    const pick = state.hx.instruments.find((i) => i.symbol === 'NSE_INDEX:Nifty 50') || state.hx.instruments.find((i) => i.daily_days) || state.hx.instruments[0];
+    state.hx.symbol = pick.symbol;
+  }
+  $('hx-symbol').value = state.hx.symbol;
+  fillHxRanges();
+  if (state.sub.history === 'volume') await loadVolume(); else await loadHxChart();
+}
+function fillHxRanges() {
+  const rs = HX_RANGES[state.hx.tf];
+  if (!rs.some((r) => r[1] === state.hx.span)) state.hx.span = HX_DEFAULT[state.hx.tf];
+  fillSelect($('hx-range'), rs.map((r) => [r[1], r[0]]), state.hx.span);
+  $('hx-tf').value = state.hx.tf;
+}
+function showHxMsg(t) { const el = $('hx-chart'); if (el.data) Plotly.purge(el); el.style.display = 'none'; $('hx-msg').hidden = false; $('hx-msg').textContent = t; $('hx-cards').innerHTML = ''; $('hx-legend').innerHTML = ''; }
+let hxReq = 0;
+async function loadHxChart() {
+  const sym = state.hx.symbol, me = ++hxReq;
+  if (!sym) return;
+  setStatus(`Loading ${sym}…`, 'busy');
+  let d;
+  try { d = await api('/api/history/bars', { symbol: sym, tf: state.hx.tf, span: state.hx.span }); }
+  catch (e) { if (me === hxReq) { showHxMsg(e.message); setStatus(e.message, 'err'); $('hx-title').textContent = sym; } return; }
+  if (me !== hxReq) return;                                             // a newer request is on its way
+  state.hx.data = d; renderHxChart();
+  setStatus(`${sym} · ${fmtInt(d.bars)} bars · ${d.from.slice(0, 10)} to ${d.to.slice(0, 10)}`);
+}
+function renderHxChart() {
+  const d = state.hx.data, T = theme(), el = $('hx-chart'), inst = (state.hx.instruments || []).find((i) => i.symbol === d.symbol) || {};
+  el.style.display = ''; $('hx-msg').hidden = true;
+  const candle = state.hx.type === 'candle', intraday = d.tf !== '1d';
+  $('hx-title').textContent = inst.name ? `${inst.name}` : d.symbol;
+  $('hx-sub').textContent = `${d.symbol} · ${MARKET_NAME[d.market] || d.market || ''} · ${HX_BAR[d.tf]} bars · times in ${d.tz}`;
+  $('hx-chart-title').textContent = candle ? 'Candles' : 'Close';
+  const n = d.close.length, first = d.close[0], last = d.close[n - 1], chg = (last / first - 1) * 100;
+  const hi = Math.max(...d.high), lo = Math.min(...d.low), totVol = d.volume.reduce((a, b) => a + b, 0);
+  const volKpi = !d.has_volume ? ['Volume', 'none', d.is_index ? 'an index has no traded volume' : 'no volume in the bars']
+    : intraday ? ['Volume in range', fmtBig(totVol), `${fmtBig(totVol / n)} a bar`] : ['Average volume', fmtBig(totVol / n), 'per day over the range'];
+  renderKpis('hx-cards', [
+    ['Last', fmt(last), intraday ? d.t[n - 1] : niceDate(d.t[n - 1])], ['Change over the range', signed(chg, (x) => fmt(x) + '%'), `from ${fmt(first)}`],
+    ['High', fmt(hi), ''], ['Low', fmt(lo), ''], volKpi, ['Bars', fmtInt(d.bars), d.clipped ? 'range cut to fit a chart' : `since ${niceDate(d.from.slice(0, 10))}`],
+  ]);
+  const x = d.t, volTrace = d.has_volume ? [{ type: 'bar', x, y: d.volume, yaxis: 'y2', name: 'Volume', marker: { color: d.close.map((c, i) => (c >= d.open[i] ? T.up : T.down)), opacity: 0.55 },
+                                              hovertemplate: 'Volume %{y:,.0f}<extra></extra>' }] : [];
+  const price = candle
+    ? { type: 'candlestick', x, open: d.open, high: d.high, low: d.low, close: d.close, name: d.symbol, increasing: { line: { color: T.up, width: 1 }, fillcolor: T.up }, decreasing: { line: { color: T.down, width: 1 }, fillcolor: T.down } }
+    : { type: 'scatter', mode: 'lines', x, y: d.close, name: 'Close', line: { color: T.acc, width: 1.6 }, hovertemplate: '%{y:,.2f}<extra></extra>' };
+  const breaks = [{ bounds: ['sat', 'mon'] }];                                                  // no flat stretches over weekends, holidays or the night
+  if (d.missing_days.length) breaks.push({ values: d.missing_days });
+  if (intraday && d.session) breaks.push({ pattern: 'hour', bounds: [d.session[1] / 60, d.session[0] / 60] });
+  const hgt = phone() ? 420 : 540;
+  el.style.height = hgt + 'px';
+  Plotly.react(el, [price, ...volTrace], baseLayout({
+    height: hgt, margin: { l: phone() ? 50 : 70, r: phone() ? 8 : 20, t: 8, b: 34 }, hovermode: 'x unified', bargap: 0.15,
+    xaxis: { type: 'date', rangebreaks: breaks, rangeslider: { visible: false }, gridcolor: T.grid, linecolor: T.line, tickfont: { size: 10 }, showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: T.muted, spikedash: 'dot' },
+    yaxis: { domain: d.has_volume ? [0.27, 1] : [0, 1], gridcolor: T.grid, zeroline: false, tickfont: { size: 10 }, automargin: true, tickformat: ',.2f', fixedrange: false },
+    yaxis2: { domain: [0, 0.2], showgrid: false, tickfont: { size: 10 }, tickformat: '.2s', zeroline: false, automargin: true },
+  }), config());
+  $('hx-legend').innerHTML = candle ? `<span class="it"><i class="sw" style="background:${T.up}"></i>Up bar</span><span class="it"><i class="sw" style="background:${T.down}"></i>Down bar</span>` +
+      (d.has_volume ? '<span class="it" style="color:var(--muted)">Volume below, coloured the same way</span>' : '')
+    : `<span class="it"><i class="sw" style="background:${T.acc}"></i>Close</span>` + (d.has_volume ? '<span class="it" style="color:var(--muted)">Volume below: green up bar, red down bar</span>' : '');
+  const notes = [];
+  if (d.adjusted) notes.push('Daily prices are adjusted by Yahoo for splits and dividends, as of the day they were downloaded.');
+  if (d.source === 'bars_1m') notes.push(d.market === 'IN' ? '1-minute bars come from Upstox.' : '1-minute bars come from Yahoo, which keeps about a month.');
+  if (d.is_index) notes.push('An index has no traded volume; its daily candles are rolled up from the 1-minute bars (since 2022).');
+  if (d.missing_days.length) notes.push(`Weekdays with no data (holidays, or days not collected) are skipped on the axis: ${d.missing_days.length}.`);
+  if (d.clipped) notes.push('The range was cut to the most a chart can show for these bars; pick fewer days or wider bars.');
+  $('hx-note').textContent = notes.join(' ');
+}
+async function loadVolume() {
+  const v = state.hx.vol, me = ++hvReq;
+  setStatus('Ranking by volume…', 'busy');
+  let d;
+  try { d = await api('/api/history/volume', { market: v.market, date: v.date, sort: v.sort, n: v.n }); }
+  catch (e) { if (me === hvReq) { const el = $('hv-chart'); if (el.data) Plotly.purge(el); el.style.display = 'none'; $('hv-msg').hidden = false; $('hv-msg').textContent = e.message; $('hv-table').innerHTML = ''; setStatus(e.message, 'err'); } return; }
+  if (me !== hvReq) return;
+  v.date = d.date; $('hv-date').value = d.date; $('hv-date').max = d.latest;
+  $('hx-title').textContent = 'Most traded'; $('hx-sub').textContent = 'The tickers with the most shares traded on a day, with how unusual that volume is.';
+  renderVolume(d);
+  setStatus(`${d.rows.length} tickers on ${niceDate(d.date)}`);
+}
+let hvReq = 0;
+function renderVolume(d) {
+  const T = theme(), el = $('hv-chart'), sort = d.sort;
+  el.style.display = ''; $('hv-msg').hidden = true;
+  const metric = { volume: ['volume', 'Volume', fmtBig], rvol: ['rvol', 'Volume vs 20-day average', (x) => fmt(x, 1) + '×'], change: ['change_pct', 'Price change', (x) => fmt(x) + '%'], value: ['value', 'Traded value', fmtBig] }[sort];
+  const rows = d.rows.filter((r) => r[metric[0]] != null);
+  $('hv-title').textContent = `Most traded by ${metric[1].toLowerCase()}`;
+  $('hv-hint').textContent = `${niceDate(d.date)}${d.market ? ' · ' + (MARKET_NAME[d.market] || d.market) : ' · all markets'}`;
+  const hgt = Math.max(160, rows.length * 24 + 50);
+  el.style.height = hgt + 'px';
+  Plotly.react(el, [{ type: 'bar', orientation: 'h', y: rows.map((r) => r.symbol.replace(/\.NS$/, '')), x: rows.map((r) => r[metric[0]]), width: 0.65,
+    marker: { color: sort === 'change' ? rows.map((r) => (r.change_pct >= 0 ? T.up : T.down)) : T.acc }, text: rows.map((r) => metric[2](r[metric[0]])), textposition: 'outside', cliponaxis: false, textfont: { size: 11, color: T.fg2 },
+    customdata: rows.map((r) => [r.name || '', metric[2](r[metric[0]])]), hovertemplate: '<b>%{y}</b> %{customdata[0]}<br>%{customdata[1]}<extra></extra>' }],
+    baseLayout({ height: hgt, margin: { l: phone() ? 70 : 96, r: 70, t: 6, b: 18 }, bargap: 0.3,
+                 xaxis: { showgrid: false, showticklabels: false, fixedrange: true, range: [Math.min(0, ...rows.map((r) => r[metric[0]])) * 1.2, Math.max(...rows.map((r) => r[metric[0]])) * 1.2] },
+                 yaxis: { autorange: 'reversed', showgrid: false, tickfont: { size: 11 }, fixedrange: true } }), Object.assign(config(), { displayModeBar: false }));
+  $('hv-table').innerHTML = '<thead><tr><th>#</th><th class="l">Ticker</th><th class="l dt-wide">Name</th><th>Close</th><th>Change</th><th>Volume</th><th>vs 20-day avg</th><th class="dt-wide" title="Each market uses its own currency: shown when one market is selected">Traded value</th></tr></thead><tbody>' +
+    d.rows.map((r, i) => `<tr data-s="${esc(r.symbol)}"><td>${i + 1}</td><td class="l">${esc(r.symbol)}</td><td class="l dt-wide">${esc(r.name || '')}</td><td>${fmt(r.close)}</td><td>${signed(r.change_pct, (x) => fmt(x) + '%')}</td>` +
+      `<td>${fmtBig(r.volume)}</td><td>${r.rvol == null ? '–' : fmt(r.rvol, 1) + '×'}</td><td class="dt-wide">${d.market ? fmtBig(r.value) : '–'}</td></tr>`).join('') + '</tbody>';
+  $('hv-table').querySelectorAll('tbody tr').forEach((tr) => tr.onclick = () => { state.hx.symbol = tr.dataset.s; state.hx.tf = '1d'; state.sub.history = 'chart'; fillHxRanges(); setTab('history'); });
+  $('hv-note').textContent = d.note + (d.market ? '' : ' Across markets, traded value is not ranked because each market uses its own currency.');
+}
+$('hx-symbol').onchange = (e) => {
+  const v = e.target.value.trim();
+  const hit = (state.hx.instruments || []).find((i) => i.symbol === v) || (state.hx.instruments || []).find((i) => i.symbol.toLowerCase() === v.toLowerCase() || (i.name || '').toLowerCase() === v.toLowerCase());
+  if (!hit) { setStatus(`No instrument called "${v}"`, 'err'); return; }
+  state.hx.symbol = hit.symbol; e.target.value = hit.symbol; loadHxChart().catch(fail);
+};
+$('hx-symbol').onfocus = (e) => e.target.select();
+$('hx-tf').onchange = (e) => { state.hx.tf = e.target.value; state.hx.span = HX_DEFAULT[state.hx.tf]; fillHxRanges(); loadHxChart().catch(fail); };
+$('hx-range').onchange = (e) => { state.hx.span = +e.target.value; loadHxChart().catch(fail); };
+document.querySelectorAll('#hx-type button').forEach((b) => b.onclick = () => {
+  state.hx.type = b.dataset.t; document.querySelectorAll('#hx-type button').forEach((o) => o.setAttribute('aria-pressed', o === b)); if (state.hx.data) renderHxChart();
+});
+$('hv-market').onchange = (e) => { state.hx.vol.market = e.target.value; if (state.hx.vol.market === '' && state.hx.vol.sort === 'value') { state.hx.vol.sort = 'volume'; $('hv-sort').value = 'volume'; } loadVolume().catch(fail); };
+$('hv-date').onchange = (e) => { state.hx.vol.date = e.target.value; loadVolume().catch(fail); };
+$('hv-sort').onchange = (e) => { state.hx.vol.sort = e.target.value; if (state.hx.vol.sort === 'value' && !state.hx.vol.market) { const us = $('hv-market').querySelector('option[value="IN"]'); state.hx.vol.market = us ? 'IN' : ($('hv-market').options[1] || {}).value || ''; $('hv-market').value = state.hx.vol.market; } loadVolume().catch(fail); };
+$('hv-n').onchange = (e) => { state.hx.vol.n = +e.target.value; loadVolume().catch(fail); };
+
 /* ================================================================ Data: what the lake holds */
 const DT_STATE = {                                           // state -> [name, colour code, swatch colour, glyph in the cell]
   ok: ['Data', 3, '#2997ff', ''], open: ['Open: segments not compacted', 4, '#ff9f0a', '…'], missing: ['Missing', 5, '#ff453a', '×'],
@@ -1153,6 +1299,7 @@ window.addEventListener('resize', () => {                // re-layout charts whe
   if (state.tab === 'overview' && state.overview.length) renderOverview();
   if (state.tab === 'candles' && state.cData) renderCandles(state.cData);
   if (state.tab === 'data' && state.dt) renderData();
+  if (state.tab === 'history' && state.hx.data) renderHxChart();
   if (state.tab === 'fo' && state.foData) { renderFo(state.foData); if (state.foContractData) renderSeries(state.foContractData, FC); }
 });
 init();

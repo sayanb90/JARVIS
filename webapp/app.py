@@ -15,6 +15,9 @@ API (JSON):
   GET /api/fo/chain?date=&underlying=&expiry=      futures + option chain snapshot (section 17)
   GET /api/coverage                                what the lake holds per dataset, gaps, historical run, snapshot, storage (Data tab)
   GET /api/coverage/markets                        per-market ranges of the daily candles and 1-minute bars (slower, cached)
+  GET /api/history/instruments                     instruments with daily candles or 1-minute bars (History tab)
+  GET /api/history/bars?symbol=&tf=&span=|start=&end=  candles and volume for one instrument (tf 1d, 1m, 5m, 15m, 60m)
+  GET /api/history/volume?market=&date=&sort=&n=   the most traded tickers on a day
 
 Admin (data browser, read-only SQL, subscription list) is at /admin when ADMIN_USER and ADMIN_PASSWORD are set;
 see webapp/admin.py.  The app never writes to the lake.  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
@@ -44,6 +47,7 @@ from data_layer.lake import LAKE_DIR
 from data_layer import tick_store
 from data_layer.query import Lake
 from . import coverage as coverage_mod
+from . import history as history_mod
 
 STATIC = Path(__file__).parent / "static"
 WIDTHS = (0, 1, 5, 15, 30, 60, 300)              # precision offered in the UI: 0 = raw ticks (no aggregation), else a bar width in seconds
@@ -282,6 +286,28 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     def coverage_markets():
         """Per-market ranges of the daily candles and the 1-minute bars (reads the bars tables with a memory cap; cached for ten minutes)."""
         return cached("markets", 600.0, lambda: coverage_mod.market_ranges(lake_path))
+
+    def history_call(fn, *args, **kw):
+        try:
+            return fn(lake_path, *args, **kw)
+        except history_mod.HistoryError as exc:
+            raise HTTPException(404 if str(exc).startswith("no ") else 422, str(exc))
+
+    @app.get("/api/history/instruments")
+    def history_instruments():
+        """Every instrument the History tab can chart (stocks with daily candles; stocks and indices with 1-minute bars)."""
+        return cached("instruments", 600.0, lambda: history_mod.instruments(lake_path))
+
+    @app.get("/api/history/bars")
+    def history_bars(symbol: str, tf: str = "1d", start: str | None = None, end: str | None = None, span: int | None = Query(None, ge=1, le=40000)):
+        """Candles and volume for one instrument: tf 1d, 1m, 5m, 15m or 60m, over `span` calendar days back from its last day (or start..end);
+        an intraday range is clipped to what a chart can show."""
+        return JSONResponse(_json_safe(history_call(history_mod.get_bars, symbol, tf, start, end, span)))
+
+    @app.get("/api/history/volume")
+    def history_volume(market: str | None = None, date: str | None = None, sort: str = "volume", n: int = 20):
+        """The most traded tickers on a day (default: the latest), ranked by volume, relative volume, change or traded value."""
+        return JSONResponse(_json_safe(history_call(history_mod.top_volume, market or None, date or None, n, sort)))
 
     @app.get("/vendor/plotly.min.js", include_in_schema=False)
     def plotly_js():

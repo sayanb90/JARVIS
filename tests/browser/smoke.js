@@ -182,7 +182,18 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   await p3.waitForSelector('#eq-price .main-svg', { timeout: 20000 });
 
   if (errors.length) fail('browser errors: ' + JSON.stringify(errors.slice(0, 5)));
-    // ---------------- Data tab: coverage, historical run, storage ----------------
+    // ---------------- History tab: prices and volume (the demo lake has no daily candles or 1-minute bars, so it must say so) ----------------
+  {
+    const hp = await open(1400, 1000, '#tab=history');
+    await hp.waitForFunction(() => { const m = document.getElementById('hx-msg'); const c = document.getElementById('hx-chart'); return (m && !m.hidden) || (c && c.data); }, null, { timeout: 30000 })
+      .catch(() => fail('the History tab neither drew a chart nor said why not'));
+    if (await hp.$eval('label.day', (e) => !e.hidden)) fail('the trading-day picker should be hidden on the History tab');
+    await hp.click('.subtabs[data-tab="history"] button[data-sub="volume"]');
+    await hp.waitForFunction(() => { const m = document.getElementById('hv-msg'); const c = document.getElementById('hv-chart'); const s = document.getElementById('status').textContent;
+      return (m && !m.hidden) || (c && c.data) || /tickers on|No prices|no daily/i.test(s); }, null, { timeout: 30000 }).catch(() => fail('the Most traded view neither drew a chart nor said why not'));
+  }
+
+  // ---------------- Data tab: coverage, historical run, storage ----------------
   {
     const dp = await open(1400, 1000, '#tab=data');
     await dp.waitForSelector('#dt-cards .kpi', { timeout: 20000 });

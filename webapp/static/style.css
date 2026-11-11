@@ -213,3 +213,7 @@ td.note-cell{white-space:normal;min-width:260px;max-width:420px;color:var(--mute
 th.l,td.l{text-align:left}
 .stages .ico{font-size:15px}
 @media (max-width:640px){.dt-wide{display:none}#dt-table td:first-child,#dt-markets td:first-child{white-space:normal;min-width:96px}#dt-table th,#dt-table td,#dt-markets th,#dt-markets td{padding:9px 8px}}
+input[type=text],input[list]{font:inherit;font-size:13.5px;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:var(--r2);padding:7px 10px;min-width:0;width:100%;max-width:100%}
+input[type=text]:hover,input[list]:hover,input[type=text]:focus-visible,input[list]:focus-visible{border-color:var(--accent);outline:none}
+input::placeholder{color:var(--muted)}
+.field.wide input{min-width:220px}
