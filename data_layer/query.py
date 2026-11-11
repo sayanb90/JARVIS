@@ -651,6 +651,7 @@ class Lake:
                 return False
             return bool(s.iloc[-1] < s.iloc[0]) if decreasing else bool(s.iloc[-1] > s.iloc[0])
 
+        financial = "financial" in m.index and pd.notna(m["financial"]) and bool(m["financial"])
         shares, ni, fcf = num("latest_shares_outstanding"), num("avg_net_income_5y"), num("avg_fcf_5y")
         ltd, roic = num("latest_long_term_debt"), num("latest_roic")
         mkt_cap = price * shares if shares else None
@@ -665,15 +666,21 @@ class Lake:
             grew("cash_flow", "free_cash_flow"),                                         # 7 FCF growth
             bool(mkt_cap and fcf and fcf > 0 and mkt_cap / fcf < PFCF_MAX),              # 8 avg P/FCF
         ]
+        if financial:                          # banks, insurers: ROIC does not apply (SCRUM-162), the score is out of 7
+            pillars = pillars[:1] + pillars[2:]
         return sum(pillars)
 
     def score_all(self, market: str | None = None) -> pd.DataFrame:
         """symbol, market, price, score — sorted by score desc (symbols with no price score 0)."""
-        pm = self.pillar_metrics(market)[["symbol", "market"]]
+        pmf = self.pillar_metrics(market)
+        pm = pmf[["symbol", "market"] + [c for c in ("financial", "periods_used") if c in pmf.columns]]
         px = self.latest_prices(market)[["symbol", "close"]].rename(columns={"close": "price"})
         df = pm.merge(px, on="symbol", how="left")
         df["score"] = [self.score_ticker(s, p) if pd.notna(p) else 0
                        for s, p in zip(df["symbol"], df["price"])]
+        fin = df["financial"] if "financial" in df.columns else pd.Series(False, index=df.index)
+        df["max_score"] = [7 if (pd.notna(f) and bool(f)) else 8 for f in fin]       # 7 for a financial: ROIC does not apply to it
+        df = df.drop(columns=[c for c in ("financial",) if c in df.columns]).rename(columns={"periods_used": "periods"})
         return df.sort_values(["score", "symbol"], ascending=[False, True]).reset_index(drop=True)
 
     def top_by_score(self, market: str | None, n: int = 10) -> pd.DataFrame:

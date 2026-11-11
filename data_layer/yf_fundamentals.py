@@ -300,9 +300,16 @@ def write_raw(lake_dir: Path | None, symbol: str, payload: dict, day: str) -> Pa
 
 # ---------------------------------------------------------------------------------------------- what is due
 def select_due(symbols: dict[str, str], fetch_log: pd.DataFrame, now: datetime, refresh_days: float = REFRESH_DAYS,
-               limit: Optional[int] = None) -> list[str]:
-    """Symbols to fetch now, most urgent first: never fetched; then the ones whose last attempt failed (after MIN_RETRY_HOURS); then the
-    ones whose last complete fetch is the oldest and older than `refresh_days`."""
+               limit: Optional[int] = None, gap_symbols: Iterable[str] = (), gap_retry_days: float = 7,
+               catch_up: Optional[int] = None) -> list[str]:
+    """Symbols to fetch now, most urgent first:
+      1. never fetched;
+      2. the last attempt failed (retried after MIN_RETRY_HOURS, so a failing symbol is not hammered);
+      3. fetched but incomplete (`gap_symbols`: a missing year or item, see yf_completeness): retried every `gap_retry_days`;
+      4. the last complete fetch is older than `refresh_days`, oldest first.
+    The state comes from what is stored, not from the date of the last run, so a day the job did not run is caught up by the next one:
+    when more symbols are overdue than `limit` (never fetched, failed, incomplete, or late by more than a week), up to `catch_up` are taken."""
+    gaps = set(gap_symbols)
     last_attempt: dict[str, datetime] = {}
     last_complete: dict[str, datetime] = {}
     failed: set[str] = set()
@@ -317,22 +324,29 @@ def select_due(symbols: dict[str, str], fetch_log: pd.DataFrame, now: datetime, 
                 last_complete[sym] = latest["t"].max()
             else:
                 failed.add(sym)
-    never, retry, stale = [], [], []
+    never, retry, gap, stale = [], [], [], []
+    late = 0
     for sym in symbols:
         if sym not in last_attempt:
             never.append(sym)
         elif sym in failed:
             if now - last_attempt[sym] >= timedelta(hours=MIN_RETRY_HOURS):
                 retry.append((last_attempt[sym], sym))
+        elif sym in gaps and now - last_attempt[sym] >= timedelta(days=gap_retry_days):
+            gap.append((last_attempt[sym], sym))
         elif now - last_complete[sym] >= timedelta(days=refresh_days):
             stale.append((last_complete[sym], sym))
-    due = never + [s for _, s in sorted(retry)] + [s for _, s in sorted(stale)]
+            late += int(now - last_complete[sym] >= timedelta(days=refresh_days + 7))
+    due = never + [s for _, s in sorted(retry)] + [s for _, s in sorted(gap)] + [s for _, s in sorted(stale)]
+    overdue = len(never) + len(retry) + len(gap) + late
+    if limit and catch_up and overdue > limit:
+        limit = min(overdue, max(catch_up, limit))
     return due[:limit] if limit else due
 
 
 # ---------------------------------------------------------------------------------------------- the run
 def run(symbols: dict[str, str], lake_dir: Path | None = None, factory: Callable = None, limit: Optional[int] = None,
-        refresh_days: float = REFRESH_DAYS, pause_s: Optional[float] = None, now: Optional[datetime] = None,
+        refresh_days: float = REFRESH_DAYS, pause_s: Optional[float] = None, now: Optional[datetime] = None, catch_up: Optional[int] = None,
         sleep: Callable[[float], None] = time.sleep, stop=None, progress: Optional[Callable[[str], None]] = None,
         save_every: int = 25) -> dict:
     """Fetch the due symbols of {symbol: market}.  Saves every `save_every` symbols and at the end, so a stopped run keeps its work."""
@@ -344,7 +358,9 @@ def run(symbols: dict[str, str], lake_dir: Path | None = None, factory: Callable
     vpath, lpath, ppath, apath = base / "versions.parquet", base / "fetch_log.parquet", base / "profile.parquet", base / "actions.parquet"
     versions, fetch_log = _read(vpath, VERSION_COLUMNS), _read(lpath, LOG_COLUMNS)
     profiles, actions = _read(ppath, PROFILE_COLUMNS), _read(apath, ACTION_COLUMNS)
-    due = select_due(symbols, fetch_log, now, refresh_days, limit)
+    from . import yf_completeness
+    gap = yf_completeness.gap_symbols(lake_dir, now.date())
+    due = select_due(symbols, fetch_log, now, refresh_days, limit, gap_symbols=gap, catch_up=catch_up)
     summary = {"due": len(due), "symbols": 0, "complete": 0, "partial": 0, "classes": {}, "rows": 0, "new_versions": 0, "stopped": False}
     pend_rows: list[dict] = []
     pend_log: list[dict] = []
@@ -434,15 +450,34 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="fetch the symbols that are due")
     r.add_argument("--limit", type=int, default=None, help="at most this many symbols (a slice a day)")
+    r.add_argument("--catch-up", type=int, default=None, help="when more symbols are overdue than --limit (missed days, a first pass), take up to this many")
     r.add_argument("--market", default=None, help="comma-separated markets, e.g. US,UK (default: all)")
     r.add_argument("--symbols", default=None, help="comma-separated symbols instead of the universe")
     r.add_argument("--refresh-days", type=float, default=REFRESH_DAYS)
     sub.add_parser("status", help="what is stored and what failed last time")
+    c = sub.add_parser("check", help="four-year completeness of every symbol (writes completeness.parquet)")
+    c.add_argument("--min-complete", type=float, default=0.9, help="exit 1 when a market has a smaller share of complete symbols")
+    c.add_argument("--market", default=None)
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if a.cmd == "status":
         print(json.dumps(status(), indent=2, default=str))
         return 0
+    if a.cmd == "check":
+        from . import yf_completeness
+        df = yf_completeness.check(universe_symbols([m.strip() for m in a.market.split(",")] if a.market else None))
+        sm = yf_completeness.summary(df)
+        print(f"{_now():%Y-%m-%d %H:%M:%S} yahoo fundamentals completeness: {sm['symbols']} symbols, by status {sm['by_status']}")
+        low = []
+        for m, d in sorted(sm["by_market"].items()):
+            print(f"  {m:<3} {d['symbols']:>4} symbols, {d['complete']:>4} complete ({d['complete_share'] if d['complete_share'] is not None else 'n/a'} of those fetched)"
+                  + "".join(f", {k} {v}" for k, v in d.items() if k not in ("symbols", "complete", "complete_share")))
+            if d["complete_share"] is not None and d["complete_share"] < a.min_complete:
+                low.append(m)
+        bad = df[~df["status"].isin(["complete", "pending"])].head(15)
+        for r in bad.itertuples():
+            print(f"  {r.symbol:<12} {r.market:<3} {r.status:<12} {r.reason}")
+        return 1 if low else 0
     if a.symbols:
         syms = {s.strip(): "?" for s in a.symbols.split(",") if s.strip()}
     else:
@@ -453,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
     log.info("yahoo fundamentals: %d symbols in scope, limit %s, refresh %s days", len(syms), a.limit, a.refresh_days)
-    s = run(syms, limit=a.limit, refresh_days=a.refresh_days, stop=stop, progress=log.info)
+    s = run(syms, limit=a.limit, refresh_days=a.refresh_days, stop=stop, progress=log.info, catch_up=a.catch_up)
     log.info("yahoo fundamentals done: %s", json.dumps(s))
     print(f"{_now():%Y-%m-%d %H:%M:%S} yahoo fundamentals: {s['symbols']} symbols ({s['complete']} complete, {s['partial']} partial), "
           f"{s['new_versions']} new values; problems by class: {({k: v for k, v in s['classes'].items() if k != 'ok'})}")

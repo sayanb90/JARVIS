@@ -10,7 +10,7 @@
 
 ---
 
-JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to **NSE-listed Indian equities**, keeps 5 years of daily prices for **India, US, UK and EU**, and ingests live tick / L1 data for India from the Upstox API, storing everything in a **Parquet lake queried with DuckDB** (no database server, no memory ceiling, free).
+JARVIS is a quantitative research platform that applies an 8-pillar fundamental scoring model to a **global universe** (India plus S&P 500, FTSE 100, STOXX 600, Nikkei 225, KOSPI 200, Taiwan 50, STI, CSI 300 and Hang Seng), keeps 5 years of daily prices and collects 1-minute bars for all of those markets, and ingests live tick / L1 data for India from the Upstox API, storing everything in a **Parquet lake queried with DuckDB** (no database server, no memory ceiling, free).
 
 ---
 
@@ -19,7 +19,11 @@ JARVIS is a quantitative research platform that applies an 8-pillar fundamental 
 ```
 JARVIS/
 ├── data_layer/
-│   ├── fmp_client.py     # FMP API client — annual fundamentals only
+│   ├── yf_fundamentals.py  # Yahoo Finance fundamentals (yfinance): statements, profile, dividends, splits; classified failures, versioned values
+│   ├── yf_pillars.py     # pillar inputs: ROIC, debt, FCF, shares in the price's currency
+│   ├── yf_completeness.py  # four-year completeness of every symbol; drives the daily backfill
+│   ├── fx.py             # daily FX rates from Yahoo
+│   ├── fmp_client.py     # retired FMP client (unscheduled; still provides read_universe)
 │   ├── yf_client.py      # Yahoo Finance client — daily OHLC (free, no key)
 │   ├── lake.py           # CSV staging files → Parquet lake (idempotent upserts)
 │   └── query.py          # DuckDB query helpers + 8-pillar scoring
@@ -27,7 +31,7 @@ JARVIS/
 ├── data/
 │   ├── universe.csv      # Stock universe with all identifiers (see below)
 │   ├── fund_meta.csv     # Auto-generated: last fundamentals refresh per ticker
-│   ├── fundamentals/     # FMP output CSVs (income, balance, cashflow, ratios)
+│   ├── fundamentals/     # retired FMP staging CSVs (no longer written)
 │   └── ohlc/             # yfinance output CSVs (year-partitioned + daily)
 ├── lake/                 # Parquet lake (created by lake.py, git-ignored)
 │   ├── fundamentals/     # one file per table, both markets
@@ -64,37 +68,44 @@ To expand the universe, add rows to `data/universe.csv`. The scheduler will auto
 
 ## Data Layer
 
-### Two data sources
+### Data sources
 
 | Source | Data | Cost | API key |
 |---|---|---|---|
-| **FMP** (Financial Modeling Prep) | Annual fundamentals | Free tier: 250 calls/day | Required |
-| **Yahoo Finance** (`yfinance`) | Daily OHLC | Free, unlimited | None |
+| **Yahoo Finance** (`yfinance`, an open-source library that reads Yahoo's own endpoints; not an official API) | Daily and 1-minute prices for every market but India, annual fundamentals, dividends, splits, FX rates | Free | None |
+| **Upstox** | India: live ticks, option Greeks, company fundamentals (statements, key ratios) | Plus plan | Required |
+
+FMP was used for fundamentals until 2026-11-11 (decision record SCRUM-138): its free plan covers US exchanges only and its global tier is expensive for the whole universe, so it is retired. Yahoo is unofficial and can change without notice, so every call is classified (ok, empty, throttled, exception, parse) and a completeness report names what to fix.
 
 ### What gets fetched
 
 | Dataset | Source | Frequency | Fields |
 |---|---|---|---|
-| Income Statement | FMP `/income-statement` | Monthly refresh | revenue, netIncome, ebit |
-| Balance Sheet | FMP `/balance-sheet-statement` | Monthly refresh | totalAssets, totalLiabilities, longTermDebt, totalEquity |
-| Cash Flow | FMP `/cash-flow-statement` | Monthly refresh | freeCashFlow |
-| Ratios | FMP `/ratios` | Monthly refresh | roic (true ROIC), sharesOutstanding |
+| Income statement | Yahoo, last 4 annual statements | A daily slice, each stock about monthly | revenue, net income, EBIT, tax rate, share counts |
+| Balance sheet | Yahoo | same | total debt, long-term debt, invested capital, equity, shares, cash |
+| Cash flow | Yahoo | same | operating cash flow, capex, free cash flow |
+| Profile | Yahoo | same | price currency, reporting currency, market cap, sector |
+| Dividends and splits | Yahoo | same | full history |
+| FX rates | Yahoo | Daily | 18 currencies against the dollar, 5 years |
 | OHLC | yfinance | Daily | open, high, low, close, volume |
+| 1-minute bars | yfinance | Daily, built forward (Yahoo keeps 7 days) | every market but India |
 
 ### 8 Pillar scoring model
 
-Scores each ticker 0–8. All data is sourced and verified against FMP.
+Scores each ticker 0-8 (0-7 for banks and insurers, see below). Inputs come from the last four annual Yahoo statements (`python -m data_layer.yf_pillars build` writes them into the lake tables `Lake.score_ticker` reads). The multi-year pillars need at least 3 statements; with fewer they are not scored. The tables keep every fiscal year ever stored, so the window grows past four years as Yahoo adds one each year.
 
-| # | Pillar | Metric | Threshold | Data source |
+| # | Pillar | Metric | Threshold | Inputs (Yahoo lines, with fallbacks) |
 |---|---|---|---|---|
-| 1 | Normalised P/E | Market cap / 5-yr avg net income | < 22.5 | `pillarMetrics.avgNetIncome5y` |
-| 2 | ROIC | Return on Invested Capital | > 9% | `ratios.roic` (true ROIC via FMP) |
-| 3 | Revenue Growth | Latest revenue vs 5 years ago | Positive trend | `incomeStatement.revenue` |
-| 4 | Net Income Growth | Latest NI vs 5 years ago | Positive trend | `incomeStatement.netIncome` |
-| 5 | Buybacks | Shares outstanding over period | Declining | `ratios.sharesOutstanding` |
-| 6 | Debt serviceability | Long-term debt / 5-yr avg FCF | < 5× | `pillarMetrics.latestLongTermDebt / avgFcf5y` |
-| 7 | FCF Growth | Latest FCF vs 5 years ago | Positive trend | `cashFlow.freeCashFlow` |
-| 8 | Normalised P/FCF | Market cap / 5-yr avg FCF | < 20 | `pillarMetrics.avgFcf5y` |
+| 1 | Normalised P/E | Market cap / average net income over the window | < 22.5 | `NetIncome`; market cap = latest close x latest share count |
+| 2 | ROIC | NOPAT / invested capital (average of this and last year) | > 9% | NOPAT = `EBIT` (or `OperatingIncome`, or pretax income plus interest) x (1 - `TaxRateForCalcs`); `InvestedCapital` (or debt + equity) |
+| 3 | Revenue Growth | Latest revenue vs the oldest year in the window | Positive trend | `TotalRevenue` |
+| 4 | Net Income Growth | Latest NI vs the oldest year | Positive trend | `NetIncome` |
+| 5 | Buybacks | Share count over the window | Declining | `OrdinarySharesNumber` (or `ShareIssued`, `DilutedAverageShares`) |
+| 6 | Debt serviceability | Long-term debt / average FCF | < 5x | `LongTermDebt`, else `LongTermDebtAndCapitalLeaseObligation`, else `TotalDebt - CurrentDebt`, else `TotalDebt` |
+| 7 | FCF Growth | Latest FCF vs the oldest year | Positive trend | `FreeCashFlow` (or operating cash flow minus capex) |
+| 8 | Normalised P/FCF | Market cap / average FCF | < 20 | price x shares, `FreeCashFlow` |
+
+Currency: statements are in the reporting currency and prices in the listing currency (pence for London). Earnings, cash flow and debt are converted into the price's own unit with the latest stored FX rate before pillars 1, 6 and 8 divide by them; a missing rate leaves them empty (`fx_missing`), never a guess. ROIC is not applicable to banks, insurers and other financial-sector companies: their score is out of 7 (`max_score` in `Lake.score_all`). Each stock's `pillar_metrics` row carries `periods_used`, the currencies, the FX rate used and a `flags` text naming every fallback used.
 
 ---
 
@@ -103,7 +114,7 @@ Scores each ticker 0–8. All data is sourced and verified against FMP.
 ### 1. Configure
 
 ```bash
-cp .env.example .env      # add FMP_API_KEY
+cp .env.example .env      # Upstox settings for India; Yahoo needs no key
 pip install -r requirements.txt
 ```
 
@@ -118,19 +129,14 @@ Edit `data/universe.csv` to add your stocks. The 10 NSE rows shipped with the re
 python -m data_layer.yf_client --mode full --market ALL    # India, US, UK, EU (daily, 5 years)
 ```
 
-### 4. Initial fundamentals load (FMP — uses API quota)
+### 4. Initial fundamentals and FX load (Yahoo, free)
 
 ```bash
-# Dry run first to see the call plan
-python -m data_layer.fmp_client --market IN --dry-run
-
-# Full run for all stocks in universe.csv
-python -m data_layer.fmp_client --market IN
-
-# Or batch to stay within 250-call free tier (62 tickers × 4 calls = 248)
-python -m data_layer.fmp_client --market IN --slice 0 61
-python -m data_layer.fmp_client --market IN --slice 62 123
-# ... etc.
+python -m data_layer.index_universe fetch && python -m data_layer.index_universe build --validate   # the global universe
+python -m data_layer.fx refresh                      # 5 years of daily FX rates
+python -m data_layer.yf_fundamentals run --limit 100 # a first slice; the cron job continues with the rest
+python -m data_layer.yf_pillars build                # pillar inputs for the scorer
+python -m data_layer.yf_fundamentals check           # four-year completeness of every symbol
 ```
 
 ### 5. Load into the lake
@@ -161,29 +167,20 @@ lake.sql("SELECT market, count(*) FROM ohlc GROUP BY 1")   # ad-hoc SQL
 
 ## Scheduler (daily automation)
 
-`scheduler.py` is designed to be invoked by cron. It reads `data/universe.csv` and `data/fund_meta.csv` to automatically prioritise the stocks with the oldest fundamentals refresh date.
-
-**Add to crontab** (`crontab -e`):
+`scheduler.py` runs the price jobs; the fundamentals and FX jobs are their own modules. The cron template is `deploy/crontab` (every job in it must be installed: `python -m data_layer.cron_check`).
 
 ```bash
-# Daily OHLC — 6:30 PM weekdays (~10 seconds, 0 API calls)
-30 18 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job ohlc-daily >> logs/scheduler.log 2>&1
-
-# Fundamentals rotation — 7:00 PM weekdays (auto-picks 62 stalest stocks)
-0 19 * * 1-5 cd /home/user/JARVIS && python scheduler.py --job fundamentals >> logs/scheduler.log 2>&1
+# Daily OHLC for every market, after the 22:00 UTC 1-minute bars job (both take the scheduler lock)
+0 23 * * 1-5  cd $JARVIS && python scheduler.py --job ohlc-daily >> logs/scheduler.log 2>&1
+# Daily FX rates
+30 0 * * *    cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1
+# Yahoo fundamentals: a daily slice, with a catch-up cap for missed days
+0 1 * * *     cd $JARVIS && python -m data_layer.yf_fundamentals run --limit 150 --catch-up 400 >> logs/yf-fundamentals.log 2>&1
+# Then the pillar inputs and the four-year completeness check
+0 2 * * *     cd $JARVIS && python -m data_layer.yf_pillars build >> logs/yf-pillars.log 2>&1 && python -m data_layer.yf_fundamentals check >> logs/yf-completeness.log 2>&1
 ```
 
-**How fundamentals rotation works** (250 stocks, free tier):
-
-| Day | Stocks fetched | FMP calls used |
-|---|---|---|
-| Mon | 62 oldest (never-fetched first) | 248 |
-| Tue | next 62 by staleness | 248 |
-| Wed | next 62 | 248 |
-| Thu | remaining ~64 | 256 |
-| Following Mon | back to whoever is oldest | — |
-
-Each stock gets a full refresh roughly once a week.
+**How the fundamentals job backfills.** What is due is decided from what is stored, not from the date of the last run, in this order: symbols never fetched; symbols whose last fetch failed (retried after 20 hours); symbols fetched but incomplete (a missing year or item in the latest four years; retried every 7 days, because Yahoo fills gaps slowly and a young company stays short); then the oldest complete fetches past 30 days. A day the job did not run is therefore caught up by the next one: when more symbols are overdue than `--limit`, it takes up to `--catch-up`. The check (`yf_completeness`) gives each symbol a status (complete, short, incomplete, gap, stale, fetch_failed, pending) and writes `lake/yf_fundamentals/completeness.parquet`; the health report shows the totals.
 
 **Interim Yahoo intraday bars** (5-minute, a stopgap cross-check only; the intraday base is the 1-second Upstox feed below):
 
@@ -223,8 +220,8 @@ Go-live steps, daily ops, backups and the futures/options section are in [the JA
 **Manual runs:**
 
 ```bash
-python scheduler.py --job ohlc-daily                # daily OHLC, all four markets
-python scheduler.py --job fundamentals              # fundamentals only
+python scheduler.py --job ohlc-daily                # daily OHLC, all markets
+python scheduler.py --job fundamentals              # the retired FMP rotation (unscheduled)
 python scheduler.py --job all                       # ohlc + fundamentals
 python scheduler.py --job all --dry-run             # print plan only
 python scheduler.py --job fundamentals --budget 200 # custom call budget
@@ -234,9 +231,8 @@ python scheduler.py --job fundamentals --budget 200 # custom call budget
 
 | Variable | Default | Description |
 |---|---|---|
-| `FMP_API_KEY` | — | Required for fundamentals |
-| `FMP_DAILY_BUDGET` | `248` | FMP calls to spend per scheduler run |
-| `FMP_RATE_LIMIT_DELAY` | `0.5` | Seconds between FMP calls (free tier) |
+| `JARVIS_YF_FUND_PAUSE_S` | `1.0` | Seconds between two symbols of the Yahoo fundamentals job |
+| `JARVIS_YF_CHUNK_PAUSE_S` | `2` | Seconds between two Yahoo price downloads |
 | `JARVIS_LAKE` | `<root>/lake` | Parquet lake directory |
 
 ---
@@ -246,12 +242,14 @@ python scheduler.py --job fundamentals --budget 200 # custom call budget
 ```
 lake/
 ├── fundamentals/           ← income_statement, balance_sheet, cash_flow,
-│                              ratios, pillar_metrics, fund_meta (.parquet)
+│                              ratios, pillar_metrics (.parquet; written by yf_pillars)
+├── yf_fundamentals/        ← versions, profile, actions, fetch_log, completeness (.parquet), raw/
+├── fx/rates.parquet        ← daily FX rates (usd per unit)
 ├── ohlc/year=YYYY/ohlc.parquet
 └── bars/interval=5m/date=YYYY-MM-DD/bars.parquet
 ```
 
-All tables carry a `market` column (`IN`, `US`, `UK`, `EU` for daily OHLC; India only for bars and fundamentals). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in the JARVIS Runbook (Notion).
+All tables carry a `market` column (`IN`, `US`, `UK`, `EU`, `JP`, `KR`, `TW`, `SG`, `CN`, `HK`). Keys: fundamentals (symbol, date); pillar_metrics and fund_meta (symbol); ohlc (symbol, date); bars (symbol, ts, UTC). Files are ZSTD-compressed and replaced atomically. DuckDB reads only the columns and partitions a query touches, so memory is bounded by the query, not the dataset. Storage decision record: ADR-1 in the JARVIS Runbook (Notion).
 
 ---
 
