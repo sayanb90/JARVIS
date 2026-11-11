@@ -17,6 +17,7 @@
       <button role="tab" id="tab-instrument" data-tab="instrument" aria-selected="true">Equities</button>
       <button role="tab" id="tab-overview" data-tab="overview" aria-selected="false">Market</button>
       <button role="tab" id="tab-fo" data-tab="fo" aria-selected="false">Derivatives</button>
+      <button role="tab" id="tab-data" data-tab="data" aria-selected="false">Data</button>
     </nav>
     <div class="spacer"></div>
     <span id="date-note" class="date-note" role="status" hidden></span>
@@ -216,6 +217,46 @@
         </div>
         <p class="note" id="fo-greeks-note"></p>
       </div>
+    </div>
+  </section>
+
+  <!-- ===================== Data ===================== -->
+  <section id="view-data" class="view" hidden>
+    <div class="page-head">
+      <div><h1>Data</h1><p class="sub" id="dt-sub">What the lake holds, what the historical run has done, and how much room is left.</p></div>
+    </div>
+    <div id="dt-cards" class="kpis"></div>
+    <nav class="subtabs" role="tablist" aria-label="Data views" data-tab="data">
+      <button role="tab" data-sub="coverage">Coverage</button>
+      <button role="tab" data-sub="run">Historical run</button>
+      <button role="tab" data-sub="storage">Storage</button>
+    </nav>
+
+    <div class="subview stack" data-sub="coverage">
+      <div class="panel"><header><h3>Last 60 days<span class="hint">one cell per day, UTC</span></h3><div class="legend" id="dt-legend"></div></header>
+        <div class="body"><div id="dt-strip" class="plot" role="img" aria-label="Which of the last 60 days have data, per dataset. The table below gives the same facts as numbers."></div></div></div>
+      <div class="panel"><header><h3>How far back<span class="hint" id="dt-range-hint"></span></h3>
+        <div class="seg" id="dt-range-seg" role="group" aria-label="Series"><button type="button" data-r="ohlc" aria-pressed="true">Daily candles</button><button type="button" data-r="bars_1m" aria-pressed="false">1-minute bars</button></div></header>
+        <div class="body"><div id="dt-range" class="plot" role="img" aria-label="First to last day of each market. The table below gives the same facts as numbers."></div><p class="muted" id="dt-range-msg" hidden></p></div></div>
+      <div class="panel"><header><h3>Datasets</h3></header><div class="table-wrap"><table id="dt-table"></table></div></div>
+      <div class="panel" id="dt-markets-panel" hidden><header><h3>Markets</h3></header><div class="table-wrap"><table id="dt-markets"></table></div></div>
+      <p class="note">A gap is an open market day, after a dataset began, with no data. India uses the exchange holiday calendar; other markets count weekends only, so a holiday there can show as a gap. Live datasets cannot be backfilled: they start the day capture began. Bars from Upstox and Yahoo hold prices and volume only: no bid, ask or size.</p>
+    </div>
+
+    <div class="subview stack" data-sub="run" hidden>
+      <div class="split">
+        <div class="panel"><header><h3>Stages<span class="hint">deploy/historical-run.sh</span></h3></header><div class="body" id="dt-stages"></div></div>
+        <div class="stack">
+          <div class="panel"><header><h3>Research snapshot</h3></header><div class="body" id="dt-snapshot"></div></div>
+        </div>
+      </div>
+      <div class="panel"><header><h3>Upstox backfill<span class="hint">pieces fetched so far: one instrument and month each</span></h3><div class="legend" id="dt-bf-legend"></div></header><div class="body" id="dt-backfill"></div></div>
+    </div>
+
+    <div class="subview stack" data-sub="storage" hidden>
+      <div id="dt-storage-cards" class="kpis"></div>
+      <div class="panel"><header><h3>Size by dataset</h3></header><div class="body"><div id="dt-storage" class="plot" role="img" aria-label="Disk space used by each dataset"></div></div></div>
+      <p class="note" id="dt-storage-note"></p>
     </div>
   </section>
 </main>
