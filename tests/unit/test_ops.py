@@ -10,7 +10,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from data_layer import backup, health, market_calendar, tick_store, universe
+from data_layer import backup, fx, health, market_calendar, tick_store, universe
 from data_layer.ticks import Tick
 from tests.helpers import OHLC_H, UNI_HEADER, write_csv
 
@@ -206,6 +206,9 @@ def healthy(world, tmp_path, monkeypatch):
     tick_store.compact_ticks_day(date(2026, 10, 27), world.lakedir)
     (world.root / "logs/scheduler.log").write_text("2026-10-26 22:31:00,100  INFO  [scheduler]  Scheduler finished successfully\n")
     market_calendar.save(CAL_HOLIDAYS, world.lakedir, now=datetime(2026, 10, 27, 3, 0))
+    import pandas as pd
+    fx.refresh(world.lakedir, currencies=list(fx.REQUIRED), now=datetime(2026, 10, 27, 0, 30),
+               download=lambda t, **kw: {x: pd.DataFrame({"Close": [1.0] * 3}, index=pd.bdate_range("2026-10-23", periods=3)) for x in t})
     bk = tmp_path / "bk"
     (bk / "2026-10-27").mkdir(parents=True); (bk / "2026-10-27/MANIFEST.json").write_text("{}")
     monkeypatch.setenv("UPSTOX_ACCESS_TOKEN", "tok"); monkeypatch.delenv("UPSTOX_FEED_TOKEN", raising=False)
@@ -264,6 +267,17 @@ def test_closed_today_expects_no_data_and_names_the_holiday(healthy, capsys, mon
     out = capsys.readouterr().out
     assert "NSE is closed today (Diwali-Balipratipada): no data is expected" in out
     assert "live feed is NOT writing" not in out and "live feed is writing" not in out
+
+
+def test_fx_rates_are_reported_and_a_stale_or_missing_file_warns(healthy, capsys):
+    world, bk = healthy
+    run_health(world, bk, after_close=True)
+    assert "[PASS] FX rates: newest 2026-10-27 (0 days old), 9 currencies" in capsys.readouterr().out
+    health.check(datetime(2026, 11, 5, 12, 0), lake_dir=world.lakedir, root=world.root, backup_path=bk, after_close=True)
+    assert "[WARN] FX rates: newest 2026-10-27 (9 days old)" in capsys.readouterr().out
+    fx.rates_path(world.lakedir).unlink()
+    run_health(world, bk, after_close=True)
+    assert "[WARN] no FX rates yet (run: python -m data_layer.fx refresh)" in capsys.readouterr().out
 
 
 def test_no_calendar_file_is_a_warning_not_a_silent_assumption(healthy, capsys):
