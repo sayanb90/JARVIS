@@ -8,7 +8,7 @@ Upstox fundamentals loader (SCRUM-103): everything the /v2/fundamentals API retu
 
 Endpoints (per company): income statement (yearly, quarterly, and the full line-item statement), balance sheet (and full),
 cash flow (and full), key ratios (company and sector value, today only), shareholding, corporate actions, profile, peers.
-Upstox gives no filing dates and no ROIC, share count, market cap, capex or free cash flow; those come from FMP.
+Upstox gives no filing dates and no ROIC, share count, market cap, capex or free cash flow; those come from Yahoo (yf_fundamentals).
 
 Storage, under lake/upstox_fundamentals/:
   versions.parquet   one row per (isin, endpoint, item, period, value) ever seen: value, text, change, first_seen, last_seen.

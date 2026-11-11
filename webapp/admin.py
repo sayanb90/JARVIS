@@ -37,7 +37,7 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from data_layer import fmp_client, tick_store, universe as uni
+from data_layer import tick_store, universe_files, universe as uni
 from data_layer import lake as lake_mod
 from data_layer.query import Lake
 from data_layer.upstox import fo_instruments as fo
@@ -78,9 +78,25 @@ CATALOG = [
     Table("aggregates", "ohlc_daily", "Daily OHLC", "Five years of daily bars for India, US, UK and EU (Yahoo).", "years", "ohlc", "date"),
     Table("aggregates", "bars_1s", "1-second bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 1),
     Table("aggregates", "bars_1m", "1-minute bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 60),
-    *[Table("fundamentals", n, n.replace("_", " ").capitalize(), f"FMP {n.replace('_', ' ')} (India).", "file", f"fundamentals/{n}.parquet",
-            "date" if n in ("income_statement", "balance_sheet", "cash_flow", "ratios") else None)
-      for n in ("income_statement", "balance_sheet", "cash_flow", "ratios", "pillar_metrics", "fund_meta")],
+    Table("fundamentals", "income_statement", "Income statement", "Revenue, net income and EBIT per fiscal year, from the Yahoo statements (reporting currency).",
+          "file", "fundamentals/income_statement.parquet", "date"),
+    Table("fundamentals", "balance_sheet", "Balance sheet", "Assets, liabilities, long-term debt and equity per fiscal year, from the Yahoo statements.",
+          "file", "fundamentals/balance_sheet.parquet", "date"),
+    Table("fundamentals", "cash_flow", "Cash flow", "Free cash flow per fiscal year, from the Yahoo statements.", "file", "fundamentals/cash_flow.parquet", "date"),
+    Table("fundamentals", "ratios", "Ratios", "ROIC (computed from EBIT, tax rate and invested capital) and share count per fiscal year.", "file",
+          "fundamentals/ratios.parquet", "date"),
+    Table("fundamentals", "pillar_metrics", "Pillar metrics", "One row per stock in its price's currency: averages, latest values, ROIC, periods used, currencies, FX rate and flags.",
+          "file", "fundamentals/pillar_metrics.parquet"),
+    Table("fundamentals", "yf_fundamentals", "Yahoo statements", "Every kept statement line of the last annual reports, with the day we first and last saw "
+          "each value (a restated value is a new row).", "file", "yf_fundamentals/versions.parquet"),
+    Table("fundamentals", "yf_profile", "Yahoo profile", "Price currency, reporting currency, market cap, shares and sector per stock.", "file",
+          "yf_fundamentals/profile.parquet"),
+    Table("fundamentals", "yf_actions", "Dividends and splits", "Every dividend and split Yahoo knows, per stock and date.", "file", "yf_fundamentals/actions.parquet"),
+    Table("fundamentals", "yf_fetch_log", "Yahoo fetch log", "One row per call: stock, part, time, result class (ok, empty, throttled, exception, parse) and message.",
+          "file", "yf_fundamentals/fetch_log.parquet"),
+    Table("fundamentals", "yf_completeness", "Four-year completeness", "Per stock: complete, short, incomplete, gap, stale, failed or pending, with the missing years and items.",
+          "file", "yf_fundamentals/completeness.parquet"),
+    Table("reference", "fx_rates", "FX rates", "Daily rates from Yahoo: US dollars per unit of each currency.", "file", "fx/rates.parquet", "date"),
     Table("fundamentals", "upstox_fundamentals", "Upstox fundamentals", "Every statement line, ratio, holding and corporate action Upstox returned, "
           "with the day we first and last saw each value (a restated value is a new row).", "file", "upstox_fundamentals/versions.parquet"),
     Table("fundamentals", "upstox_fundamentals_log", "Upstox fundamentals fetch log", "One row per call: company, endpoint, time, result and error code.",
@@ -148,9 +164,9 @@ class Catalog:
     def frame(self, t: Table) -> pd.DataFrame:
         try:
             if t.location == "universe":
-                df = pd.DataFrame(fmp_client.read_universe(None))
+                df = pd.DataFrame(universe_files.read_universe(None))
                 if len(df):
-                    df["source"] = fmp_client.active_universe_csv().name
+                    df["source"] = universe_files.active_universe_csv().name
                 return df
             if t.location == "fo_watchlist":
                 p = self.data / "fo_watchlist.csv"
@@ -411,7 +427,7 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
 
     @r.get("/api/universe")
     def universe_snapshot():
-        current = fmp_client.read_universe("IN")
+        current = universe_files.read_universe("IN")
         eq = fo.load_eq_table(cat.lake)
         meta = {r.symbol: r for r in eq.itertuples()} if len(eq) else {}
         day, ticks = today_ticks()
@@ -440,7 +456,7 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
                                 "ticking": int(len(g)), "ticks": int(g["ticks"].sum()) if len(g) else 0})
         watch = cat.frame(BY_KEY[("reference", "fo_watchlist")])
         return JSONResponse(_jsonable({
-            "source": fmp_client.active_universe_csv().name, "eq_table": bool(meta), "eq_listings": len(eq),
+            "source": universe_files.active_universe_csv().name, "eq_table": bool(meta), "eq_listings": len(eq),
             "tick_day": day, "equities": rows, "fo": fo_rows, "watchlist": watch.to_dict("records") if len(watch) else [],
             "history": uni.history(data_dir / "universe_history"),
         }), headers=noindex)
@@ -486,7 +502,7 @@ def _plan(body: dict, cat: Catalog) -> dict:
     mode = body.get("mode", "replace")
     if mode not in ("replace", "add"):
         raise HTTPException(422, "mode must be replace or add")
-    current = fmp_client.read_universe(None)
+    current = universe_files.read_universe(None)
     eq = fo.load_eq_table(cat.lake)
     m = uni.map_tickers(tickers, eq, current)
     plan = uni.plan_india(m["rows"], current, mode)

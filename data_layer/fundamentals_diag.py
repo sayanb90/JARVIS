@@ -7,7 +7,6 @@ Why is the fundamentals and reference data incomplete?  A read-only analysis of 
 It reads, and never writes anything but its own report:
   lake/upstox_fundamentals/fetch_log.parquet, versions.parquet, raw/date=*/        (Upstox: one row per call, the values, the payloads)
   logs/fundamentals.log                                                              (Upstox runs: starts, progress, 429 warnings, summaries)
-  logs/scheduler.log, logs/fmp_client.log, data/fund_meta.csv, lake/fundamentals/    (FMP: the 12:00 UTC rotation and what it stored)
   data/universe.csv (or universe.local.csv), logs/fo-select.log                      (the reference data the jobs start from)
 
 Every section ends in plain findings.  The sections that need a file skip themselves, and say so, when the file is not there.
@@ -31,8 +30,6 @@ LINE = re.compile(r"^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d:\d\d)(?:[,.]\d+)?\s+([A-Z]+
 RATE = re.compile(r"(/v2/fundamentals/(\S+?)/(\S+)) -> HTTP (\d+) \(attempt (\d+)/(\d+)\), waiting (\d+)s")
 RUN_START = re.compile(r"fundamentals: (\d+) companies, endpoints (\S+), max age (\S+) days")
 RUN_DONE = re.compile(r"fundamentals done: (\{.*\})")
-FMP_META = re.compile(r"fund_meta\.csv updated: (\d+) total entries \((\d+) refreshed today\)")
-FMP_DONE = re.compile(r"Done \[IN\]\. (\d+) tickers")
 EXPECTED_DAILY_UTC = "12:50"            # weekdays: key ratios;  Sunday 13:00: the full set (deploy/crontab)
 
 
@@ -296,20 +293,7 @@ def upstox_text_log(rep: Report, path: Path, days: int) -> None:
         rep.add("", "No rate-limit warnings in the period.")
 
 
-# ---------------------------------------------------------------------------------------------- FMP
-def _read_meta(path: Path) -> dict[str, date]:
-    out: dict[str, date] = {}
-    if not path.exists():
-        return out
-    with path.open(newline="", encoding="utf-8") as f:
-        for rec in csv.DictReader(r for r in f if not r.startswith("#")):
-            try:
-                out[rec["symbol"].strip()] = date.fromisoformat(rec["last_updated"].strip().replace(".", "-"))
-            except (ValueError, KeyError):
-                pass
-    return out
-
-
+# ---------------------------------------------------------------------------------------------- reference data helpers
 def _universe(data: Path) -> list[dict]:
     path = data / "universe.local.csv"
     path = path if path.exists() else data / "universe.csv"
@@ -320,98 +304,9 @@ def _universe(data: Path) -> list[dict]:
                 if (r.get("symbol") or "").strip()]
 
 
-def fmp_section(rep: Report, root: Path, lake: Path, days: int) -> None:
-    rep.h("4. FMP statements (the 12:00 UTC rotation): logs and what reached the lake")
-    cutoff = datetime.now() - timedelta(days=days)
-    ev = [e for e in parse_log(root / "logs" / "scheduler.log") + parse_log(root / "logs" / "fmp_client.log") if e[0] >= cutoff]
-    ev.sort(key=lambda e: e[0])
-    if not ev:
-        rep.add("No lines in logs/scheduler.log or logs/fmp_client.log for the period.")
-        rep.find("WARN", "No FMP job output in the period (logs/scheduler.log and fmp_client.log are empty or missing).")
-    per_day: dict[str, Counter] = defaultdict(Counter)
-    for t, lvl, msg in ev:
-        c = per_day[t.date().isoformat()]
-        if "Fetching fundamentals:" in msg:
-            c["tickers tried"] += 1
-        if re.search(r"\b401\b|Unauthorized", msg):
-            c["HTTP 401"] += 1
-        if re.search(r"\b403\b|Forbidden", msg):
-            c["HTTP 403"] += 1
-        if "Rate-limited by FMP" in msg:
-            c["429"] += 1
-        if "Exhausted retries" in msg:
-            c["gave up"] += 1
-        if "FMP server error" in msg:
-            c["5xx"] += 1
-        if "your_fmp_api_key_here" in msg or "apikey=your_" in msg:
-            c["placeholder key"] += 1
-        m = FMP_META.search(msg)
-        if m:
-            c["stamped fresh"] = int(m.group(2))
-        if "Scheduler finished successfully" in msg:
-            c["job says success"] += 1
-        if "Scheduler finished with errors" in msg:
-            c["job says errors"] += 1
-        if "got no answer" in msg:
-            c["not stamped (no answer)"] += 1
-        if "FMP has no statements" in msg:
-            c["empty answer"] += 1
-    cols = ["tickers tried", "HTTP 401", "HTTP 403", "429", "5xx", "gave up", "placeholder key", "stamped fresh", "job says success", "job says errors"]
-    rows = [[d] + [per_day[d].get(c, 0) for c in cols] for d in sorted(per_day)]
-    rep.add(*_table(rows, ["day"] + cols))
-    placeholder_days = [d for d in per_day if per_day[d].get("placeholder key")]
-    if placeholder_days:
-        rep.find("PROBLEM", f"FMP calls carried the placeholder key (your_fmp_api_key_here) on {len(placeholder_days)} day(s), "
-                            f"last {max(placeholder_days)}: no real FMP key is configured, so every statement call fails with 401.")
-    for d in sorted(per_day):
-        c = per_day[d]
-        if c.get("job says success") and (c.get("HTTP 401") or c.get("HTTP 403")):
-            rep.find("PROBLEM", f"{d}: the scheduler logged 'finished successfully' although FMP refused the key ({c.get('HTTP 401', 0) + c.get('HTTP 403', 0)} times). "
-                                f"Before the 2026-11-05 fix a failed ticker was still stamped as refreshed.")
-            break
-
-    # cross-check stamped dates against what is really in the lake
-    meta = _read_meta(root / "data" / "fund_meta.csv")
-    uni = [r["symbol"] for r in _universe(root / "data") if r.get("market", "IN") in ("IN", "")]
-    inc_path = lake / "fundamentals" / "income_statement.parquet"
-    have: dict[str, str] = {}
-    if inc_path.exists():
-        inc = pd.read_parquet(inc_path, columns=["symbol", "date"])
-        have = {s: str(d) for s, d in inc.groupby("symbol")["date"].max().items()}
-    rep.add("", f"Universe {len(uni)} stocks; fund_meta has {len(meta)}; the lake's income statements cover {len(have)} stocks.")
-    if meta:
-        ages = Counter()
-        for s, d in meta.items():
-            n = (date.today() - d).days
-            ages["0-2 d" if n <= 2 else "3-7 d" if n <= 7 else "8-14 d" if n <= 14 else "older"] += 1
-        rep.add("Stamped age: " + ", ".join(f"{k}: {ages.get(k, 0)}" for k in ("0-2 d", "3-7 d", "8-14 d", "older")))
-        stamped_empty = sorted(s for s in meta if s not in have)
-        if stamped_empty:
-            rep.add(f"Stamped as refreshed but with NO income statement in the lake: {len(stamped_empty)} (first: {', '.join(stamped_empty[:8])})")
-            rep.find("PROBLEM", f"{len(stamped_empty)} stocks are stamped as refreshed in fund_meta but have no statements in the lake: the rotation "
-                                f"believes they are done and will not try them again for about {max(1, len(uni) // 62)} weekdays. "
-                                f"Reset them with: remove those symbols from data/fund_meta.csv (the new code no longer stamps failures).")
-    if uni:
-        never = [s for s in uni if s not in meta]
-        rep.add(f"Never fetched (not in fund_meta): {len(never)} of {len(uni)}")
-        if len(never) > 0.5 * len(uni):
-            rep.find("WARN", f"{len(never)} of {len(uni)} universe stocks have never had an FMP fetch. At 62 stocks a weekday a full pass takes "
-                             f"about {-(-len(uni) // 62)} weekdays, if every run works.")
-        rep.add(f"Latest statement date per stock: {Counter(d[:4] for d in have.values()).most_common(4)} (year: stocks)")
-
-    pm_path = lake / "fundamentals" / "pillar_metrics.parquet"
-    if pm_path.exists():
-        pm = pd.read_parquet(pm_path)
-        vals = [c for c in pm.columns if c not in ("symbol", "market")]
-        empty_rows = int(pm[vals].isna().all(axis=1).sum()) if vals else 0
-        rep.add(f"pillar_metrics: {len(pm)} rows, of which {empty_rows} hold only nulls.")
-        if empty_rows:
-            rep.find("PROBLEM", f"pillar_metrics has {empty_rows} stocks whose row is all nulls: written by a run whose calls failed, overwriting any earlier values.")
-
-
 # ---------------------------------------------------------------------------------------------- reference data
 def reference_section(rep: Report, root: Path) -> None:
-    rep.h("5. Reference data the jobs start from")
+    rep.h("4. Reference data the jobs start from")
     uni = _universe(root / "data")
     if not uni:
         rep.add("No universe file found.")
@@ -441,7 +336,7 @@ def analyse(lake: Path, root: Path, days: int = 30) -> Report:
     base = lake / "upstox_fundamentals"
     for fn, args in ((upstox_fetch_log, (rep, base, days)), (upstox_values, (rep, base)),
                      (upstox_text_log, (rep, root / "logs" / "fundamentals.log", days)),
-                     (fmp_section, (rep, root, lake, days)), (reference_section, (rep, root))):
+                     (reference_section, (rep, root))):
         try:
             fn(*args)
         except Exception as exc:                                          # noqa: BLE001 -- one broken section must not hide the rest

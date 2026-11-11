@@ -14,11 +14,11 @@ ACCESS, EXTENDED = "ACCESS-TOKEN-VALUE-1234", "EXTENDED-TOKEN-VALUE-5678"
 @pytest.fixture()
 def envfile(ctx, monkeypatch):
     p = ctx.w.root / ".env"
-    p.write_text("FMP_API_KEY=keep-me\nUPSTOX_API_KEY=APPKEY\nUPSTOX_API_SECRET=APPSECRET\n"
+    p.write_text("OTHER_API_KEY=keep-me\nUPSTOX_API_KEY=APPKEY\nUPSTOX_API_SECRET=APPSECRET\n"
                  "UPSTOX_REDIRECT_URI=http://localhost:8000\n")
     monkeypatch.setattr(auth, "ENV_PATH", p)
     for v in ("UPSTOX_API_KEY", "UPSTOX_API_SECRET", "UPSTOX_REDIRECT_URI", "UPSTOX_ACCESS_TOKEN",
-              "UPSTOX_EXTENDED_TOKEN", "UPSTOX_FEED_TOKEN", "FMP_API_KEY"):
+              "UPSTOX_EXTENDED_TOKEN", "UPSTOX_FEED_TOKEN", "OTHER_API_KEY"):
         monkeypatch.delenv(v, raising=False)
     return p
 
@@ -75,7 +75,7 @@ def _hidden(ctx):
 
 @then("my other settings in the environment file are untouched")
 def _others(envfile):
-    assert "FMP_API_KEY=keep-me" in envfile.read_text()
+    assert "OTHER_API_KEY=keep-me" in envfile.read_text()
 
 
 def start_feed(ctx, reject: set[str]):

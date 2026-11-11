@@ -1,7 +1,7 @@
 """Lake query helpers and the 8-pillar scorer (each pillar broken in isolation)."""
 import pytest
 
-from tests.helpers import OHLC_H, seed_scoring, write_csv
+from tests.helpers import OHLC_H, load_fundamentals, seed_scoring, write_csv
 
 # (case id, overrides, price, expected score).  Base case is 8/8 at price 9.
 CASES = [
@@ -55,7 +55,7 @@ def test_score_all_sorts_desc_and_unpriced_score_zero(world):
                "latest_total_equity", "latest_roic", "latest_shares_outstanding"],
               [["GOOD.NS", "IN", 45, 45, 200, 1, 1000, 400, 50, 600, 0.15, 90],
                ["UNPRICED.NS", "IN", 45, 45, 200, 1, 1000, 400, 50, 600, 0.15, 90]])
-    world.lake.load_fundamentals(("IN",))
+    load_fundamentals(world.lake, ("IN",))
     from data_layer.query import Lake
     df = Lake().score_all("IN")
     assert df.symbol.tolist() == ["GOOD.NS", "UNPRICED.NS"] and df.score.tolist() == [8, 0]

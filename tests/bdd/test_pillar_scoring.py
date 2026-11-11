@@ -1,7 +1,7 @@
 import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 
-from tests.helpers import seed_scoring, write_csv
+from tests.helpers import load_fundamentals, seed_scoring, write_csv
 
 scenarios("../features/pillar_scoring.feature")
 pytestmark = pytest.mark.bdd
@@ -37,7 +37,7 @@ def _unpriced(ctx):
                "latest_total_assets", "latest_total_liabilities", "latest_long_term_debt",
                "latest_total_equity", "latest_roic", "latest_shares_outstanding"],
               [["UNPRICED.NS", "IN", 45, 45, 200, 1, 1000, 400, 50, 600, 0.15, 90]])
-    ctx.w.lake.load_fundamentals(("IN",))
+    load_fundamentals(ctx.w.lake, ("IN",))
 
 
 @when("I score the stock")

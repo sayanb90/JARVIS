@@ -16,7 +16,7 @@ How it works, and where it can go wrong:
     code, name [, exchange, country, sector, yahoo].  A `yahoo` value wins over the symbol worked out from `code`.
   * `build` turns codes into Yahoo symbols (7203 -> 7203.T, 005930 -> 005930.KS, 600519 -> 600519.SS, 700 -> 0700.HK ...), drops
     duplicates across indices, and with --validate asks Yahoo for five days of daily bars: symbols with no data are rejected and listed.
-  * The result is data/universe_global.csv (git-ignored).  fmp_client.read_universe uses it for every market but India.
+  * The result is data/universe_global.csv (git-ignored).  universe_files.read_universe uses it for every market but India.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import fmp_client
+from . import universe_files
 from .lake import MARKETS, ROOT
 
 UA = {"User-Agent": "Mozilla/5.0 (compatible; JARVIS-research/1.0)"}
@@ -489,7 +489,7 @@ def main(argv: list[str] | None = None, root: Path | None = None, getter: Callab
             age = f"{(datetime.now() - datetime.fromtimestamp(p.stat().st_mtime)).days} days old" if p.exists() else "missing"
             ok = "ok" if ix.expect[0] <= n <= ix.expect[1] else "OUT OF RANGE" if p.exists() else ""
             print(f"{ix.key:<10} {ix.market}  {n:>4} members (expect {ix.expect[0]}-{ix.expect[1]})  {age}  {ok}")
-        g = fmp_client._global_rows() if root == ROOT else []
+        g = universe_files._global_rows() if root == ROOT else []
         print("universe_global.csv:", counts(g) or "not built")
         return 0
 

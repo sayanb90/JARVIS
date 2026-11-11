@@ -183,10 +183,10 @@ def test_exchange_posts_form_and_update_env_preserves_lines(tmp_path):
     assert seen["data"] == {"code": "CODE", "client_id": "KEY", "client_secret": "SECRET",
                             "redirect_uri": "http://localhost:8000", "grant_type": "authorization_code"}
     env = tmp_path / ".env"
-    env.write_text("FMP_API_KEY=abc\n# note\nUPSTOX_ACCESS_TOKEN=old\n")
+    env.write_text("OTHER_API_KEY=abc\n# note\nUPSTOX_ACCESS_TOKEN=old\n")
     auth.update_env(env, {"UPSTOX_ACCESS_TOKEN": tok["access_token"], "UPSTOX_EXTENDED_TOKEN": tok["extended_token"]})
     lines = env.read_text().splitlines()
-    assert lines == ["FMP_API_KEY=abc", "# note", "UPSTOX_ACCESS_TOKEN=ACC-1234567890",
+    assert lines == ["OTHER_API_KEY=abc", "# note", "UPSTOX_ACCESS_TOKEN=ACC-1234567890",
                      "UPSTOX_EXTENDED_TOKEN=EXT-0987654321"]
     assert oct(env.stat().st_mode & 0o777) == "0o600"
     assert "ACC-1234567890" not in auth.mask("ACC-1234567890")

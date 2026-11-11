@@ -5,7 +5,7 @@ import csv
 
 import pytest
 
-from data_layer import fmp_client, index_universe as iu
+from data_layer import index_universe as iu
 
 
 def page(headers, rows) -> str:
@@ -117,14 +117,14 @@ def test_command_line_fetch_build_and_status(tmp_path, capsys):
 
 def test_read_universe_uses_the_global_file_for_covered_markets_and_the_active_file_for_the_rest(world):
     world.set_universe({"IN": ["A.NS"], "US": ["AAPL"], "UK": ["SHEL.L"], "EU": ["SAP.DE"]})
-    assert [r["symbol"] for r in world.fmp.read_universe("US")] == ["AAPL"]                   # no global file yet
+    assert [r["symbol"] for r in world.universe_files.read_universe("US")] == ["AAPL"]                   # no global file yet
     glob = world.data / "universe_global.csv"
     glob.write_text(",".join(iu.HEADER) + "\nMSFT,Microsoft,US,,,,,,,USD\nNVDA,Nvidia,US,,,,,,,USD\n7203.T,Toyota,JP,,,,,,,JPY\n")
-    assert [r["symbol"] for r in world.fmp.read_universe("US")] == ["MSFT", "NVDA"]            # the index build replaces the placeholder rows
-    assert [r["symbol"] for r in world.fmp.read_universe("JP")] == ["7203.T"]
-    assert [r["symbol"] for r in world.fmp.read_universe("UK")] == ["SHEL.L"]                  # not covered by the build: unchanged
-    assert [r["symbol"] for r in world.fmp.read_universe("IN")] == ["A.NS"]
-    assert {r["symbol"] for r in world.fmp.read_universe()} == {"A.NS", "SHEL.L", "SAP.DE", "MSFT", "NVDA", "7203.T"}
+    assert [r["symbol"] for r in world.universe_files.read_universe("US")] == ["MSFT", "NVDA"]            # the index build replaces the placeholder rows
+    assert [r["symbol"] for r in world.universe_files.read_universe("JP")] == ["7203.T"]
+    assert [r["symbol"] for r in world.universe_files.read_universe("UK")] == ["SHEL.L"]                  # not covered by the build: unchanged
+    assert [r["symbol"] for r in world.universe_files.read_universe("IN")] == ["A.NS"]
+    assert {r["symbol"] for r in world.universe_files.read_universe()} == {"A.NS", "SHEL.L", "SAP.DE", "MSFT", "NVDA", "7203.T"}
 
 
 def test_a_downloaded_ishares_file_and_a_plain_csv_both_import(tmp_path, capsys):

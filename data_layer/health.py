@@ -21,7 +21,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from . import backup, fx, market_calendar, tick_store
-from .fmp_client import read_universe
+from .universe_files import read_universe
 from .lake import BARS_MARKETS, LAKE_DIR, MARKETS, ROOT
 from .query import Lake
 from .verify import Report

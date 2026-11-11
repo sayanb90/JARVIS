@@ -11,7 +11,7 @@ from tests.helpers import UNI_HEADER, universe_rows, write_csv
 
 
 HOST_SETTINGS = ("UPSTOX_ACCESS_TOKEN", "UPSTOX_EXTENDED_TOKEN", "UPSTOX_ANALYTICS_TOKEN", "UPSTOX_FEED_TOKEN", "UPSTOX_API_KEY",
-                 "UPSTOX_API_SECRET", "UPSTOX_REDIRECT_URI", "FMP_API_KEY", "FMP_DAILY_BUDGET", "FMP_RATE_LIMIT_DELAY",
+                 "UPSTOX_API_SECRET", "UPSTOX_REDIRECT_URI",
                  "JARVIS_ENV", "JARVIS_BACKUP_DIR", "JARVIS_GREEKS", "JARVIS_GREEKS_RATE", "JARVIS_GREEKS_CARRY",
                  "JARVIS_GREEKS_IV_SCALE", "JARVIS_GREEKS_THETA_BASIS", "JARVIS_SYSMON", "JARVIS_SYSMON_INTERVAL_S",
                  "JARVIS_EXT_FIELDS", "JARVIS_INDEX_KEYS", "JARVIS_COMPACT_MEMORY_GB", "JARVIS_VIEWER_MEMORY_GB", "JARVIS_TICK_STORE",
@@ -47,10 +47,10 @@ def env(tmp_path, monkeypatch):
 @pytest.fixture()
 def world(tmp_path, monkeypatch):
     """
-    Redirect every module-level path (lake, query, tick_store, fmp_client, yf_client) into tmp_path
+    Redirect every module-level path (lake, query, tick_store, universe_files, yf_client) into tmp_path
     and return handles.  Uses monkeypatch.setattr, so no module reloads and no leakage between tests.
     """
-    import data_layer.fmp_client as fmp
+    import data_layer.universe_files as universe_files
     import data_layer.lake as lake
     import data_layer.query as query
     import data_layer.tick_store as tick_store
@@ -64,8 +64,7 @@ def world(tmp_path, monkeypatch):
         (lake, {"ROOT": tmp_path, "DATA_DIR": data, "LAKE_DIR": lakedir}),
         (query, {"LAKE_DIR": lakedir}),
         (tick_store, {"LAKE_DIR": lakedir}),
-        (fmp, {"LOG_DIR": tmp_path / "logs", "DATA_DIR": data, "FUND_DIR": data / "fundamentals",
-               "UNIVERSE_CSV": data / "universe.csv", "FUND_META_CSV": data / "fund_meta.csv"}),
+        (universe_files, {"DATA_DIR": data, "UNIVERSE_CSV": data / "universe.csv"}),
         (yf, {"DATA_DIR": data, "OHLC_DIR": data / "ohlc", "BARS_DIR": data / "bars"}),
     ):
         for k, v in attrs.items():
@@ -75,7 +74,7 @@ def world(tmp_path, monkeypatch):
         write_csv(data / "universe.csv", UNI_HEADER, universe_rows(spec))
 
     return SimpleNamespace(root=tmp_path, data=data, lakedir=lakedir, lake=lake, query=query,
-                           tick_store=tick_store, fmp=fmp, yf=yf, set_universe=set_universe)
+                           tick_store=tick_store, universe_files=universe_files, yf=yf, set_universe=set_universe)
 
 
 @pytest.fixture()

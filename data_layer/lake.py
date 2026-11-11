@@ -1,15 +1,14 @@
 """
 JARVIS Parquet lake — CSV staging files -> partitioned Parquet.
 
-The collectors (fmp_client.py, yf_client.py) keep writing CSVs under data/.
+The price collector (yf_client.py) writes CSVs under data/.
 This module upserts them into an on-disk Parquet lake that DuckDB queries
 (see query.py).  Nothing here needs a server process.
 
 Lake layout (LAKE_DIR, default ./lake):
-  lake/fundamentals/<table>.parquet          income_statement, balance_sheet,
-                                             cash_flow, ratios, pillar_metrics,
-                                             fund_meta   (both markets, one file)
-  lake/ohlc/year=YYYY/ohlc.parquet           daily bars, both markets
+  lake/fundamentals/<table>.parquet          income_statement, balance_sheet, cash_flow, ratios, pillar_metrics
+                                             (written by yf_pillars from the Yahoo statements)
+  lake/ohlc/year=YYYY/ohlc.parquet           daily bars, every market
   lake/bars/interval=5m/date=YYYY-MM-DD/bars.parquet
                                              intraday bars, UTC session day
 
@@ -18,7 +17,6 @@ load is idempotent.  Files are written to a temp name and renamed, so a reader
 never sees a half-written file.
 
 CLI:
-  python -m data_layer.lake --load fundamentals
   python -m data_layer.lake --load ohlc          # full-history year files
   python -m data_layer.lake --load daily         # ohlc_daily_*.csv
   python -m data_layer.lake --load bars [--interval 5m] [--since 2026-10-20]
@@ -48,33 +46,8 @@ LAKE_DIR = Path(os.getenv("JARVIS_LAKE", ROOT / "lake"))
 MARKETS = ("IN", "US", "UK", "EU", "JP", "KR", "TW", "SG", "CN", "HK")
 BARS_MARKETS = MARKETS                    # markets whose intraday bars can be collected from Yahoo (India first: verify.py reads [0])
 BARS_YF_DEFAULT = tuple(m for m in MARKETS if m != "IN")   # what `--market ALL` collects: India is recorded tick by tick by the Upstox feed
-FUND_MARKETS = ("IN",)                # fundamentals (FMP free-tier budget) are India only
 
-# table -> (csv stem, key columns, {column: sql type})
-# Types are applied to the CSV on read; dates in the CSVs may be YYYY.MM.DD.
-FUNDAMENTALS: dict[str, tuple[str, list[str], dict[str, str]]] = {
-    "income_statement": ("income_statement", ["symbol", "date"], {
-        "date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR",
-        "revenue": "DOUBLE", "net_income": "DOUBLE", "ebit": "DOUBLE"}),
-    "balance_sheet": ("balance_sheet", ["symbol", "date"], {
-        "date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR",
-        "total_assets": "DOUBLE", "total_liabilities": "DOUBLE",
-        "long_term_debt": "DOUBLE", "total_equity": "DOUBLE"}),
-    "cash_flow": ("cash_flow", ["symbol", "date"], {
-        "date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR",
-        "free_cash_flow": "DOUBLE"}),
-    "ratios": ("ratios", ["symbol", "date"], {
-        "date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR",
-        "roic": "DOUBLE", "shares_outstanding": "DOUBLE"}),
-    "pillar_metrics": ("pillar_metrics", ["symbol"], {
-        "symbol": "VARCHAR", "market": "VARCHAR",
-        "avg_net_income_5y": "DOUBLE", "avg_fcf_5y": "DOUBLE",
-        "latest_revenue": "DOUBLE", "latest_ebit": "DOUBLE",
-        "latest_total_assets": "DOUBLE", "latest_total_liabilities": "DOUBLE",
-        "latest_long_term_debt": "DOUBLE", "latest_total_equity": "DOUBLE",
-        "latest_roic": "DOUBLE", "latest_shares_outstanding": "DOUBLE"}),
-}
-FUND_META_TYPES = {"symbol": "VARCHAR", "market": "VARCHAR", "last_updated": "DATE"}
+# column types applied to the CSV on read; dates in the CSVs may be YYYY.MM.DD
 OHLC_TYPES = {"date": "DATE", "symbol": "VARCHAR", "market": "VARCHAR",
               "open": "DOUBLE", "high": "DOUBLE", "low": "DOUBLE",
               "close": "DOUBLE", "volume": "BIGINT"}
@@ -143,22 +116,6 @@ def _csv_paths(pattern: str, markets: tuple[str, ...]) -> list[Path]:
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
-def load_fundamentals(markets: tuple[str, ...] = FUND_MARKETS) -> None:
-    con = duckdb.connect()
-    for name, (stem, keys, types) in FUNDAMENTALS.items():
-        for csv_path in _csv_paths(f"fundamentals/{stem}_{{m}}.csv", markets):
-            n = _upsert(con, LAKE_DIR / "fundamentals" / f"{name}.parquet",
-                        _read_csv_sql(csv_path, types), keys, keys)
-            log.info("%s <- %s (table now %d rows)", name, csv_path.name, n)
-    meta = DATA_DIR / "fund_meta.csv"
-    if meta.exists():
-        meta_types = {**FUND_META_TYPES}
-        # Header is symbol, market, last_updated; comment lines start with '#'
-        n = _upsert(con, LAKE_DIR / "fundamentals" / "fund_meta.parquet",
-                    _read_csv_sql(meta, meta_types), ["symbol"], ["symbol"])
-        log.info("fund_meta <- %s (%d rows)", meta.name, n)
-
-
 def load_ohlc(markets: tuple[str, ...] = MARKETS, daily: bool = False) -> None:
     """Full-history year files (ohlc_YYYY_<m>.csv) or the incremental ohlc_daily_<m>.csv."""
     con = duckdb.connect()
@@ -202,7 +159,6 @@ def load_bars(interval: str = "5m", since: date | None = None,
 
 
 def load_all(markets: tuple[str, ...] = MARKETS) -> None:
-    load_fundamentals(tuple(m for m in markets if m in FUND_MARKETS))
     load_ohlc(markets)
 
 
@@ -210,7 +166,7 @@ def load_all(markets: tuple[str, ...] = MARKETS) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Load staging CSVs into the Parquet lake")
     ap.add_argument("--load", required=True,
-                    choices=["fundamentals", "ohlc", "daily", "bars", "all"])
+                    choices=["ohlc", "daily", "bars", "all"])
     ap.add_argument("--market", choices=[*MARKETS, "ALL"], default="ALL")
     ap.add_argument("--interval", default="5m")
     ap.add_argument("--since", type=date.fromisoformat, default=None,
@@ -218,10 +174,8 @@ def main() -> None:
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     mk = MARKETS if a.market == "ALL" else (a.market,)
-    mk_f = tuple(m for m in mk if m in FUND_MARKETS)
     mk_b = tuple(m for m in mk if m in BARS_MARKETS)
-    {"fundamentals": lambda: load_fundamentals(mk_f),
-     "ohlc": lambda: load_ohlc(mk),
+    {"ohlc": lambda: load_ohlc(mk),
      "daily": lambda: load_ohlc(mk, daily=True),
      "bars": lambda: load_bars(a.interval, a.since, mk_b),
      "all": lambda: load_all(mk)}[a.load]()

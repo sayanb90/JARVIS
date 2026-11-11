@@ -16,7 +16,7 @@ Feature: Scheduler operations
 
   Scenario: A dry run changes nothing
     Given Yahoo would fail the test if it were called
-    When cron runs all jobs as a dry run
+    When cron runs the daily job as a dry run
     Then the job succeeds
     And no data files were written
 

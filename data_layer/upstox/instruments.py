@@ -13,7 +13,7 @@ import json
 import logging
 from pathlib import Path
 
-from ..fmp_client import read_universe
+from ..universe_files import read_universe
 
 log = logging.getLogger(__name__)
 
