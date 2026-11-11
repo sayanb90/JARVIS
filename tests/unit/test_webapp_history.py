@@ -75,7 +75,7 @@ def test_an_index_day_is_rolled_up_from_its_minute_bars_and_has_no_volume(lake):
     assert r["missing_days"] == ["2026-11-05"]                                                                              # the holiday inside the range
 
 
-def test_intraday_rolls_up_on_the_days_own_open_and_shows_india_in_ist(lake):
+def test_intraday_rolls_up_on_the_days_own_open_and_shows_each_market_in_its_own_time(lake):
     one = hx.get_bars(lake, "BBB.NS", "1m", "2026-11-03", "2026-11-03")
     assert one["tz"] == "IST" and one["bars"] == 120 and one["t"][0] == "2026-11-03 09:15" and one["session"] == [9 * 60 + 15, 9 * 60 + 15 + 119 + 1]
     five = hx.get_bars(lake, "BBB.NS", "5m", "2026-11-03", "2026-11-03")
@@ -84,7 +84,7 @@ def test_intraday_rolls_up_on_the_days_own_open_and_shows_india_in_ist(lake):
     hour = hx.get_bars(lake, "BBB.NS", "60m", "2026-11-03", "2026-11-04")
     assert hour["bars"] == 4 and hour["t"][:2] == ["2026-11-03 09:15", "2026-11-03 10:15"]                                 # the first bar starts at the open, not on the hour
     us = hx.get_bars(lake, "AAA", "1m", "2026-11-09", "2026-11-09")
-    assert us["tz"] == "UTC" and us["t"][0] == "2026-11-09 14:30"
+    assert us["tz"] == "EST" and us["t"][0] == "2026-11-09 09:30" and us["currency"] == "USD"          # 14:30 UTC is the New York open
 
 
 def test_default_range_ends_on_the_latest_day_the_symbol_has_and_long_ranges_are_clipped(lake):

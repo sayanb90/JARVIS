@@ -17,7 +17,7 @@
       <button role="tab" id="tab-instrument" data-tab="instrument" aria-selected="true">Equities</button>
       <button role="tab" id="tab-overview" data-tab="overview" aria-selected="false">Market</button>
       <button role="tab" id="tab-fo" data-tab="fo" aria-selected="false">Derivatives</button>
-      <button role="tab" id="tab-candles" data-tab="candles" aria-selected="false">Candles</button>
+      <button role="tab" id="tab-candles" data-tab="candles" aria-selected="false">Session</button>
       <button role="tab" id="tab-history" data-tab="history" aria-selected="false">History</button>
       <button role="tab" id="tab-data" data-tab="data" aria-selected="false">Data</button>
     </nav>
@@ -77,7 +77,7 @@
     <div class="subview stack" data-sub="vol" hidden>
       <div class="panel"><header><h3>Realised volatility<span class="hint">rolling, annualised</span></h3><div class="legend" data-for="eq-vol"></div></header>
         <div class="body"><div id="eq-vol" class="plot h-lg"></div></div></div>
-      <p class="note">Realised volatility = sqrt(sum of squared 1-second log returns over the window, scaled to a trading year). At 1-second sampling the bid-ask bounce inflates it relative to 1-minute estimates, so compare instruments with each other rather than with published figures. When the precision is Ticks, volatility is still estimated from 1-second bars and shown at each tick.</p>
+      <p class="note">Realised volatility is annualised from 1-second returns. Compare instruments with each other, not with published figures.</p>
     </div>
   </section>
 
@@ -112,7 +112,7 @@
     </div>
     <div class="subview" data-sub="table" hidden>
       <div class="panel"><div class="table-wrap"><table id="table" class="sortable clickable"></table></div></div>
-      <p class="note">Click a column to sort, a row to open the instrument. Realised volatility is annualised from 1-second returns.</p>
+      <p class="note">Click a column to sort, or a row to open the instrument.</p>
     </div>
   </section>
 
@@ -147,7 +147,7 @@
           <div class="panel"><header><h3>Key strikes<span class="hint">largest open interest</span></h3></header>
             <div class="body" id="fo-keys"></div></div>
         </div>
-        <p class="note">Spot is a proxy: the last price of the nearest future (the index itself is not collected). Max pain is the strike at which option buyers' total payoff at expiry would be smallest, from today's open interest.</p>
+        <p class="note">Spot is the nearest future (the index itself is not collected). Max pain is the strike where option buyers' total payoff at expiry is smallest.</p>
       </div>
 
       <div class="subview" data-sub="chain" hidden>
@@ -157,7 +157,7 @@
               <option value="5">ATM &plusmn; 5</option><option value="10" selected>ATM &plusmn; 10</option><option value="20">ATM &plusmn; 20</option><option value="0">All strikes</option></select></label></header>
           <div class="table-wrap scroll-y"><table id="fo-chain" class="chain"></table></div>
         </div>
-        <p class="note">Tap a price or open-interest cell to open that contract. Shaded bars show open interest relative to the largest on each side; the highlighted row is at the money.</p>
+        <p class="note">Tap a price or open-interest cell to open that contract. The highlighted row is at the money.</p>
       </div>
 
       <div class="subview stack" data-sub="oi" hidden>
@@ -222,32 +222,36 @@
     </div>
   </section>
 
-  <!-- ===================== Candles ===================== -->
+  <!-- ===================== Session: one trading day of one instrument, in its exchange's time ===================== -->
   <section id="view-candles" class="view" hidden>
     <div class="page-head">
-      <div><h1 id="cd-title">Candles</h1><p class="sub" id="cd-sub"></p></div>
-      <div class="toolbar">
-        <label class="field wide"><span>Instrument</span><select id="cd-symbol"></select></label>
-        <label class="field"><span>Candle</span><select id="cd-minutes"></select></label>
-        <label class="field"><span>Profile levels</span><select id="cd-bins"></select></label>
-        <label class="field"><span>Source</span><select id="cd-source">
-          <option value="auto">Automatic</option><option value="live">Live feed</option><option value="rest">REST candles</option></select></label>
-      </div>
+      <div><h1 id="cd-title">Session</h1><p class="sub" id="cd-sub"></p></div>
+    </div>
+    <div class="toolbar" style="margin-bottom:14px">
+      <label class="field"><span>Market</span><select id="cd-market"></select></label>
+      <label class="field"><span>Group</span><select id="cd-group"></select></label>
+      <label class="field wide"><span>Instrument</span><select id="cd-symbol"></select></label>
+      <label class="field wide"><span>Search all markets</span><input id="cd-search" list="cd-list" autocomplete="off" spellcheck="false" placeholder="Type a name or symbol"></label>
+      <datalist id="cd-list"></datalist>
+      <label class="field"><span>Candle</span><select id="cd-minutes"></select></label>
+      <label class="field"><span>Price levels</span><select id="cd-bins"></select></label>
+      <label class="field" id="cd-source-field"><span>Source</span><select id="cd-source">
+        <option value="auto">Automatic</option><option value="live">Live feed</option><option value="rest">REST candles</option></select></label>
     </div>
     <div id="cd-cards" class="kpis"></div>
-    <nav class="subtabs" role="tablist" aria-label="Candle views" data-tab="candles">
-      <button role="tab" data-sub="chart">Candles &amp; profile</button>
+    <nav class="subtabs" role="tablist" aria-label="Session views" data-tab="candles">
+      <button role="tab" data-sub="chart">Price and volume</button>
       <button role="tab" data-sub="profile">Volume profile</button>
     </nav>
     <div class="subview stack" data-sub="chart">
-      <div class="panel"><header><h3>Candles with volume profile<span class="hint">IST · profile on the right shares the price axis</span></h3><div class="legend" data-for="cd-price"></div></header>
+      <div class="panel"><header><h3>Price<span class="hint" id="cd-price-hint"></span></h3><div class="legend" data-for="cd-price"></div></header>
         <div class="body"><div id="cd-price" class="plot h-xl" aria-label="Candlestick chart with volume profile"></div></div></div>
-      <div class="panel"><header><h3>Volume per candle<span class="hint">green = closed up, red = closed down</span></h3><div class="legend" data-for="cd-volume"></div></header>
+      <div class="panel"><header><h3>Volume<span class="hint">green = closed up, red = closed down</span></h3><div class="legend" data-for="cd-volume"></div></header>
         <div class="body"><div id="cd-volume" class="plot h-sm" aria-label="Volume per candle"></div></div></div>
     </div>
     <div class="subview" data-sub="profile" hidden>
       <div class="split">
-        <div class="panel"><header><h3>Volume at price<span class="hint">up candles vs down candles</span></h3><div class="legend" data-for="cd-profile"></div></header>
+        <div class="panel"><header><h3>Volume by price<span class="hint">up candles vs down candles</span></h3><div class="legend" data-for="cd-profile"></div></header>
           <div class="body"><div id="cd-profile" class="plot h-xl" aria-label="Volume at price"></div></div></div>
         <aside class="panel" aria-label="Key levels">
           <header><h3>Key levels</h3></header>
@@ -261,7 +265,7 @@
   <!-- ===================== History: prices and volume per instrument ===================== -->
   <section id="view-history" class="view" hidden>
     <div class="page-head">
-      <div><h1 id="hx-title">History</h1><p class="sub" id="hx-sub">Daily candles and 1-minute bars rolled up to any width, with volume.</p></div>
+      <div><h1 id="hx-title">History</h1><p class="sub" id="hx-sub">Price and volume for any stock or index.</p></div>
     </div>
     <nav class="subtabs" role="tablist" aria-label="History views" data-tab="history">
       <button role="tab" data-sub="chart">Price and volume</button>
@@ -301,7 +305,7 @@
   <!-- ===================== Data ===================== -->
   <section id="view-data" class="view" hidden>
     <div class="page-head">
-      <div><h1>Data</h1><p class="sub" id="dt-sub">What the lake holds, what the historical run has done, and how much room is left.</p></div>
+      <div><h1>Data</h1><p class="sub" id="dt-sub">What the lake holds, the historical run, and the room left.</p></div>
     </div>
     <div id="dt-cards" class="kpis"></div>
     <nav class="subtabs" role="tablist" aria-label="Data views" data-tab="data">
@@ -318,7 +322,7 @@
         <div class="body"><div id="dt-range" class="plot" role="img" aria-label="First to last day of each market. The table below gives the same facts as numbers."></div><p class="muted" id="dt-range-msg" hidden></p></div></div>
       <div class="panel"><header><h3>Datasets</h3></header><div class="table-wrap"><table id="dt-table"></table></div></div>
       <div class="panel" id="dt-markets-panel" hidden><header><h3>Markets</h3></header><div class="table-wrap"><table id="dt-markets"></table></div></div>
-      <p class="note">A gap is an open market day, after a dataset began, with no data. India uses the exchange holiday calendar; other markets count weekends only, so a holiday there can show as a gap. Live datasets cannot be backfilled: they start the day capture began. Bars from Upstox and Yahoo hold prices and volume only: no bid, ask or size.</p>
+      <p class="note">A gap is an open market day with no data after a dataset began. India uses the exchange holiday calendar; other markets count weekends only.</p>
     </div>
 
     <div class="subview stack" data-sub="run" hidden>

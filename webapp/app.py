@@ -42,6 +42,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from analytics.microstructure import day_summary, rolling_realised_vol, series_payload, to_ist_strings
 from analytics.profile import candle_summary, candles_payload, volume_profile
+from . import markets as mkt
 from data_layer import live_book
 from data_layer.lake import LAKE_DIR
 from data_layer import tick_store
@@ -181,7 +182,14 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             have[s]["live"] = True
         for s in rest["symbol"]:
             have[s]["rest"] = True
-        rows = sorted((r for s, r in have.items() if s not in skip and not s.startswith(tick_store.INDEX_PREFIX)), key=lambda r: r["symbol"])
+        info = cached("universe-info", 600, mkt.universe_info)
+        rows = []
+        for s, r in sorted(have.items()):
+            if s in skip or s.startswith(tick_store.INDEX_PREFIX):
+                continue
+            u = info.get(s) or {}
+            market = u.get("market") or mkt.market_of(s)
+            rows.append({**r, "market": market, "name": u.get("name", ""), "group": u.get("sector") or "Other"})
         if not rows:
             raise HTTPException(404, f"no minute candles for {date}")
         return rows
@@ -198,9 +206,13 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         df, used = lake().minute_candles(date, symbol, minutes, source, interval)
         if df.empty:
             raise HTTPException(404, f"no {'minute ' if source == 'auto' else source + ' '}candles for {symbol} on {date}")
+        u = (cached("universe-info", 600, mkt.universe_info)).get(symbol) or {}
+        ex = mkt.exchange_for(symbol, u.get("market"))
         return JSONResponse(_json_safe({
-            "symbol": symbol, "date": date, "minutes": minutes, "bins": bins, "source": used,
-            "summary": candle_summary(df, minutes), "series": candles_payload(df), "profile": volume_profile(df, bins)}))
+            "symbol": symbol, "date": date, "minutes": minutes, "bins": bins, "source": used, "name": u.get("name", ""),
+            "exchange": mkt.public(ex, date),
+            "summary": candle_summary(df, minutes, ex["tz"], mkt.session_minutes(ex)), "series": candles_payload(df, ex["tz"]),
+            "profile": volume_profile(df, bins)}))
 
     @app.get("/api/overview")
     def overview(date: str):

@@ -7,8 +7,8 @@ Prices and volume per instrument, from the lake's bars: the viewer's History tab
                   open, so a 60-minute bar starts at the session open, not at the top of the hour
 
 Read-only.  Every query is parameterised (a symbol never reaches the SQL text) and reads only the day folders in the requested range, with a
-memory cap.  Indices carry no traded volume (the feed sends zero), which the payload says.  Times of Indian instruments are shown in IST,
-the others in UTC (the payload names the zone).
+memory cap.  Indices carry no traded volume (the feed sends zero), which the payload says.  Intraday times are shown in the instrument's own exchange time
+(the payload names the zone and the quote currency).
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from . import markets
+
 INSTRUMENT_RE = re.compile(r"^[A-Za-z0-9&._: -]{1,48}$")
 INDEX_PREFIX = "NSE_INDEX:"
 TFS = ("1d", "1m", "5m", "15m", "60m")
@@ -30,7 +32,6 @@ MAX_SPAN_DAYS = {"1m": 30, "5m": 90, "15m": 180, "60m": 730}           # a longe
 DEFAULT_SPAN_DAYS = {"1d": 365, "1m": 5, "5m": 30, "15m": 90, "60m": 365}
 MAX_DAILY_ROWS = 8000
 SORTS = ("volume", "rvol", "change", "value")
-IST = timedelta(hours=5, minutes=30)
 DB_MEMORY = "1GB"
 
 
@@ -203,9 +204,11 @@ def get_bars(lake: Path, symbol: str, tf: str = "1d", start: Optional[str] = Non
     market = _market_of(con, lake, symbol)
     intraday = tf != "1d"
     t = pd.to_datetime(df["t"])
+    ex = markets.exchange_for(symbol, market)
     tz = "UTC"
-    if market == "IN" and intraday:
-        t, tz = t + IST, "IST"
+    if intraday:                                                      # bars are stored in UTC; show them in the exchange's own time
+        t = t.dt.tz_localize("UTC").dt.tz_convert(ex["tz"]).dt.tz_localize(None)
+        tz = markets.tz_label(ex["tz"], t.iloc[-1].date())
     missing, session = [], None
     present = set(t.dt.date)
     d = min(present)
@@ -219,7 +222,7 @@ def get_bars(lake: Path, symbol: str, tf: str = "1d", start: Optional[str] = Non
         session = [int(first.median()), int(lastm.median()) + MINUTES[tf]]
     vol = df["volume"].fillna(0).astype("float64")
     out = {
-        "symbol": symbol, "market": market, "tf": tf, "tz": tz, "source": source, "adjusted": adjusted, "clipped": clipped,
+        "symbol": symbol, "market": market, "tf": tf, "tz": tz, "currency": ex["currency"], "source": source, "adjusted": adjusted, "clipped": clipped,
         "from": str(t.iloc[0])[:19].replace(" ", "T") if intraday else str(t.iloc[0].date()), "to": str(t.iloc[-1])[:19].replace(" ", "T") if intraday else str(t.iloc[-1].date()),
         "has_volume": bool((vol > 0).any()), "is_index": is_index, "missing_days": missing, "session": session, "bars": int(len(df)),
         "t": [x.strftime("%Y-%m-%d %H:%M") if intraday else x.strftime("%Y-%m-%d") for x in t],
