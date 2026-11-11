@@ -61,7 +61,7 @@ main{max-width:var(--maxw);margin:0 auto;padding:6px var(--gut) 64px}
 .kpi{background:var(--panel);padding:14px 16px;min-width:0}
 .kpi b{display:block;font-size:11px;font-weight:500;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi>span{display:block;margin-top:3px;font-size:21px;font-weight:600;letter-spacing:-.01em;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kpi small{display:block;margin-top:2px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi small{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;margin-top:2px;font-size:12px;line-height:1.35;color:var(--muted);font-variant-numeric:tabular-nums;overflow:hidden;overflow-wrap:anywhere}
 
 /* sub-tabs: a reusable section navigation (Signals and future tools add a button + a .subview) */
 .subtabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:0 0 18px;overflow-x:auto;scrollbar-width:none}

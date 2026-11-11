@@ -366,6 +366,34 @@ def fallback_comment(path: Path) -> str:
     return first.lstrip("# ").strip() if first.startswith("#") else ""
 
 
+LEGAL = {"PLC": "plc", "INC": "Inc", "LTD": "Ltd", "CO": "Co", "CORP": "Corp", "OYJ": "Oyj", "SPA": "SpA", "KGAA": "KGaA", "LLC": "LLC", "LP": "LP"}
+SMALL_WORDS = {"AND", "OF", "THE", "DE", "DI", "LA", "ET", "FOR", "IN", "DEL", "VAN", "VON"}
+ACRONYMS = {"ASML", "BASF", "AXA", "ABB", "SKF", "KBC", "DSM", "EDP", "OMV", "TUI", "ING", "UBS", "SGS", "BAE", "BMW", "SAP"}
+WORDS = {"BANK", "CORP", "FUND", "GOLD", "GAS", "OIL", "LAND", "HOME", "CARE", "LINE", "PORT", "RAIL", "AUTO", "TECH", "LIFE", "BIO", "WORK", "WEST", "EAST",
+         "NORD", "SOUTH", "NORTH", "FOOD", "FIRST", "MEGA", "NEW", "OLD", "BLUE", "STAR", "SUN", "PEAK", "CITY", "REAL", "FAST", "SAFE", "TRUST", "CAPITAL",
+         "ENERGY", "GROUP", "STEEL", "POWER", "WATER", "PAPER", "METAL", "RETAIL", "HOTEL", "MARINE", "SHIP", "AIR", "SEA", "RE", "RIO", "ONE", "SKY", "NET", "TOP", "KEY"}
+
+
+def tidy_name(name: str) -> str:
+    """Display case for a name a provider shouts in capitals ("ASML HOLDING" -> "ASML Holding", "HSBC HOLDINGS PLC" -> "HSBC Holdings plc").  Short
+    tokens that look like tickers stay upper case; names that are not all capitals are returned as given."""
+    n = " ".join((name or "").split())
+    if not n or n != n.upper() or not any(c.isalpha() for c in n):
+        return n
+    out = []
+    for i, tok in enumerate(n.split(" ")):
+        core = tok.strip(".,()&-")
+        if core in LEGAL:
+            out.append(tok.replace(core, LEGAL[core]))
+        elif core in SMALL_WORDS and i > 0:
+            out.append(tok.lower())
+        elif "/" in core or "." in core.strip(".") or core in ACRONYMS or (core.isalpha() and core not in WORDS and (len(core) <= 3 or not set(core) & set("AEIOUY"))):
+            out.append(tok)                                          # A/S, E.SUN, SAP, BMW, UBS, HSBC, LVMH, ASML ... (best effort: a four-letter word with vowels is a word)
+        else:
+            out.append("-".join(w.capitalize() for w in tok.split("-")) if "-" in tok else tok.capitalize())
+    return " ".join(out)
+
+
 def _number(text: str) -> float:
     try:
         return float(re.sub(r"[^0-9.\-]", "", text.replace(",", "").replace("\u2019", "").replace("'", "")) or "nan")
@@ -387,7 +415,7 @@ def make_fallback(ix: Index, path: Path, top: Optional[int] = None, note: str = 
     for m in members:
         if m["code"] not in seen:
             seen.add(m["code"])
-            rows.append(m)
+            rows.append({**m, "name": tidy_name(m.get("name", ""))})
     if not ix.expect[0] <= len(rows) <= ix.expect[1]:
         return False, f"{len(rows)} members found, expected {ix.expect[0]} to {ix.expect[1]}: no fallback written" + ("" if top else " (try --top N)")
     asof = next((re.sub(r'^[^,]*,', "", l).strip().strip('"') for l in text.splitlines()[:6] if "as of" in l.lower()), "")

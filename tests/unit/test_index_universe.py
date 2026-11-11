@@ -224,3 +224,18 @@ def test_the_lists_committed_in_the_repository_are_in_range_and_map_to_yahoo_sym
         assert rows and ix.expect[0] <= len({r["code"] for r in rows}) <= ix.expect[1], key
     built = iu.assemble(None, only=["stoxx600", "taiwan50"])
     assert iu.counts(built.rows)["TW"] == 50 and iu.counts(built.rows)["EU"] > 400 and not built.rejects
+
+
+@pytest.mark.parametrize("raw,shown", [
+    ("ASML HOLDING", "ASML Holding"), ("HSBC HOLDINGS PLC", "HSBC Holdings plc"), ("TAIWAN SEMICONDUCTOR MANUFACTURING", "Taiwan Semiconductor Manufacturing"),
+    ("DANSKE BANK A/S", "Danske Bank A/S"), ("E.SUN FINANCIAL HOLDING", "E.SUN Financial Holding"), ("LVMH MOET HENNESSY LOUIS VUITTON", "LVMH Moet Hennessy Louis Vuitton"),
+    ("CHINA STEEL CORP", "China Steel Corp"), ("Aberdeen Group", "Aberdeen Group"), ("BP", "BP"), ("", ""),
+])
+def test_names_a_provider_shouts_are_shown_in_normal_case_and_mixed_case_names_are_left_alone(raw, shown):
+    assert iu.tidy_name(raw) == shown
+
+
+def test_the_fallback_lists_in_the_repository_have_readable_names():
+    for key in ("stoxx600", "taiwan50"):
+        names = [r["name"] for r in iu.read_source(iu.BY_KEY[key], iu.ROOT)] if (iu.fallback_dir(iu.ROOT) / f"{key}.csv").exists() else []
+        assert names and sum(1 for n in names if n == n.upper() and len(n) > 6) < len(names) * 0.1, key
