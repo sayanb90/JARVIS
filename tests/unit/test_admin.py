@@ -84,9 +84,9 @@ def test_viewer_and_admin_credentials_are_separate(lake, monkeypatch):
 
 
 # -- catalog and paging ----------------------------------------------------------------------------
-def test_catalog_groups_tables_into_the_five_services(client):
+def test_catalog_groups_tables_into_services(client):
     cat = client.get("/admin/api/catalog", auth=A).json()
-    assert [s["service"] for s in cat] == ["reference", "market", "aggregates", "fundamentals", "analytics"]
+    assert [s["service"] for s in cat] == ["reference", "market", "aggregates", "yahoo", "indices", "fundamentals", "analytics"]
     tables = {(s["service"], t["name"]): t for s in cat for t in s["tables"]}
     assert tables[("market", "ticks")]["days"] == ["2026-10-23", "2026-10-22"] and tables[("market", "ticks")]["available"]
     assert tables[("reference", "eq_instruments")]["available"] and tables[("reference", "universe")]["available"]
