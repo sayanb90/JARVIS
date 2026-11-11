@@ -986,27 +986,36 @@ async function loadHistory() {
   if (state.sub.history === 'volume') await loadVolume(); else await loadHxChart();
 }
 // Market -> Group (Indices, then sectors) -> Instrument: each list stays short. Index membership is not stored, so a stock is grouped by sector.
-const instLabel = (i) => (i.name ? `${i.name} (${i.symbol.replace(/^[A-Z_]+:/, '').replace(/\.NS$/, '')})` : i.symbol.replace(/\.NS$/, ''));
+const instLabel = (i) => { const t = i.symbol.replace(/^[A-Z_]+:/, '').replace(/\.NS$/, ''); return i.name && i.name !== t ? `${i.name} (${t})` : t; };
+const groupChoice = {};                                   // picker -> {market, group} while the viewer has narrowed to one group; otherwise the group shows All
 function syncPickers(ids, all, symbol) {
   const cur = all.find((i) => i.symbol === symbol) || all[0];
   const markets = [...new Set(all.map((i) => i.market))].sort((a, b) => (a === 'IN' ? -1 : b === 'IN' ? 1 : a.localeCompare(b)));
   fillSelect($(ids.market), markets.map((m) => [m, MARKET_NAME[m] || m]), cur.market);
   const inMarket = all.filter((i) => i.market === cur.market);
   const groups = [...new Set(inMarket.map((i) => i.group))].sort((a, b) => (a === 'Indices' ? -1 : b === 'Indices' ? 1 : a.localeCompare(b)));
-  fillSelect($(ids.group), groups.map((g) => [g, `${g} (${inMarket.filter((i) => i.group === g).length})`]), cur.group);
-  fillSelect($(ids.inst), inMarket.filter((i) => i.group === cur.group).map((i) => [i.symbol, instLabel(i)]), cur.symbol);
+  const ch = groupChoice[ids.group], narrowed = !!ch && ch.market === cur.market && groups.includes(ch.group);
+  fillSelect($(ids.group), [['__all__', `All (${inMarket.length})`], ...groups.map((g) => [g, `${g} (${inMarket.filter((i) => i.group === g).length})`])], narrowed ? ch.group : '__all__');
+  const members = (narrowed ? inMarket.filter((i) => i.group === ch.group) : inMarket)
+    .sort((a, b) => ((a.group === 'Indices' ? 0 : 1) - (b.group === 'Indices' ? 0 : 1)) || instLabel(a).localeCompare(instLabel(b)));
+  fillSelect($(ids.inst), members.map((i) => [i.symbol, instLabel(i)]), cur.symbol);
   return cur;
 }
 function bindPickers(ids, getAll, onPick) {
   const first = (pred) => (getAll() || []).find(pred);
-  $(ids.market).onchange = (e) => { const f = first((i) => i.market === e.target.value && i.group === 'Indices') || first((i) => i.market === e.target.value); if (f) onPick(f.symbol); };
-  $(ids.group).onchange = (e) => { const f = first((i) => i.market === $(ids.market).value && i.group === e.target.value); if (f) onPick(f.symbol); };
+  $(ids.market).onchange = (e) => { delete groupChoice[ids.group]; const f = first((i) => i.market === e.target.value && i.group === 'Indices') || first((i) => i.market === e.target.value); if (f) onPick(f.symbol); };
+  $(ids.group).onchange = (e) => {
+    const market = $(ids.market).value;
+    if (e.target.value === '__all__') { delete groupChoice[ids.group]; onPick($(ids.inst).value); return; }          // back to everything in the market, same instrument
+    groupChoice[ids.group] = { market, group: e.target.value };
+    const f = first((i) => i.market === market && i.group === e.target.value); if (f) onPick(f.symbol);
+  };
   $(ids.inst).onchange = (e) => onPick(e.target.value);
   $(ids.search).onchange = (e) => {
     const v = e.target.value.trim().toLowerCase();
     const hit = first((i) => i.symbol.toLowerCase() === v) || first((i) => (i.name || '').toLowerCase() === v) || first((i) => i.symbol.replace(/\.NS$/, '').toLowerCase() === v);
     if (!hit) { setStatus(`No instrument called "${e.target.value.trim()}"`, 'err'); return; }
-    e.target.value = ''; onPick(hit.symbol);
+    e.target.value = ''; delete groupChoice[ids.group]; onPick(hit.symbol);
   };
   $(ids.search).onfocus = (e) => e.target.select();
 }
