@@ -41,6 +41,11 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 import pandas as pd
+import warnings
+
+# yfinance 1.7 on pandas 3 prints a deprecation warning for every call (an `inplace` keyword it uses); with two thousand symbols that would
+# bury the real lines of the cron logs
+warnings.filterwarnings("ignore", message=r".*inplace keyword.*")
 import yfinance as yf
 
 from .fmp_client import read_universe
