@@ -114,7 +114,8 @@ def instruments(lake: Path) -> list[dict]:
         name, sector = names.get(sym, ("", ""))
         if sym.startswith(INDEX_PREFIX):
             name, sector = sym[len(INDEX_PREFIX):], "Index"
-        out.append({**rec, "name": name, "sector": sector, "kind": "index" if sym.startswith(INDEX_PREFIX) else "stock"})
+        kind = "index" if sym.startswith(INDEX_PREFIX) else "stock"
+        out.append({**rec, "name": name, "sector": sector, "kind": kind, "group": "Indices" if kind == "index" else (sector or "Other")})
     return sorted(out, key=lambda r: (r["kind"] != "index", r["market"] != "IN", r["market"], r["symbol"]))
 
 

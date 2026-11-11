@@ -53,6 +53,7 @@ def test_instrument_list_names_kinds_and_where_each_has_data(lake):
     assert out["AAA"]["market"] == "US" and out["AAA"]["daily_days"] == 10 and out["AAA"]["minute"] is True and out["AAA"]["kind"] == "stock"
     assert out["BBB.NS"]["minute"] is True and out["CCC"]["minute"] is False
     assert out[NIFTY]["kind"] == "index" and out[NIFTY]["daily_days"] == 0 and out[NIFTY]["name"] == "Nifty 50" and out[NIFTY]["minute"] is True
+    assert out[NIFTY]["group"] == "Indices" and all(r["group"] for r in out.values())     # every instrument sits in a group for the Market > Group > Instrument pickers
     assert hx.instruments(lake)[0]["symbol"] == NIFTY                                              # indices first, then India
 
 

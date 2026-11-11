@@ -170,7 +170,7 @@ table.clickable tbody tr:hover td{background:var(--panel2)}
   .appbar-inner{height:auto;flex-wrap:wrap;padding-top:10px;padding-bottom:10px;gap:10px}
   .appbar .spacer{display:none}
   .primary{order:3;width:100%}
-  .primary button{flex:1;padding:7px 8px}
+  .primary button{flex:1 1 0;min-width:0;padding:7px 2px;font-size:12px}
   .day{margin-left:auto}
   .day>span{display:none}
   .page-head{margin:6px 0 14px}

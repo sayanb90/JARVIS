@@ -960,6 +960,8 @@ async function loadHistory() {
     state.hx.instruments = await api('/api/history/instruments', {});
     $('hx-list').innerHTML = state.hx.instruments.map((i) => `<option value="${esc(i.symbol)}">${esc(hxLabel(i))}</option>`).join('');
     fillSelect($('hx-tf'), HX_TF, state.hx.tf);
+    const hmk = [...new Set(state.hx.instruments.map((i) => i.market))].sort((a, b) => (a === 'IN' ? -1 : b === 'IN' ? 1 : a.localeCompare(b)));
+    fillSelect($('hx-market'), hmk.map((m) => [m, MARKET_NAME[m] || m]), hmk[0]);
     const mk = [...new Set(state.hx.instruments.filter((i) => i.daily_days).map((i) => i.market))].sort();
     fillSelect($('hv-market'), [['', 'All markets'], ...mk.map((m) => [m, MARKET_NAME[m] || m])], state.hx.vol.market);
   }
@@ -968,10 +970,23 @@ async function loadHistory() {
     const pick = state.hx.instruments.find((i) => i.symbol === 'NSE_INDEX:Nifty 50') || state.hx.instruments.find((i) => i.daily_days) || state.hx.instruments[0];
     state.hx.symbol = pick.symbol;
   }
-  $('hx-symbol').value = state.hx.symbol;
+  $('hx-symbol').value = '';
+  syncHxPickers();
   fillHxRanges();
   if (state.sub.history === 'volume') await loadVolume(); else await loadHxChart();
 }
+// Market -> Group (Indices, then sectors) -> Instrument: each list stays short. Index membership is not stored, so a stock is grouped by sector.
+function syncHxPickers() {
+  const all = state.hx.instruments, cur = all.find((i) => i.symbol === state.hx.symbol) || all[0];
+  const mkEl = $('hx-market'), grEl = $('hx-group'), inEl = $('hx-inst');
+  mkEl.value = cur.market;
+  const inMarket = all.filter((i) => i.market === cur.market);
+  const groups = [...new Set(inMarket.map((i) => i.group))].sort((a, b) => (a === 'Indices' ? -1 : b === 'Indices' ? 1 : a.localeCompare(b)));
+  fillSelect(grEl, groups.map((g) => [g, `${g} (${inMarket.filter((i) => i.group === g).length})`]), cur.group);
+  const members = inMarket.filter((i) => i.group === cur.group);
+  fillSelect(inEl, members.map((i) => [i.symbol, i.name ? `${i.name} (${i.symbol.replace(/^[A-Z_]+:/, '')})` : i.symbol]), cur.symbol);
+}
+function pickHx(sym) { state.hx.symbol = sym; syncHxPickers(); loadHxChart().catch(fail); }
 function fillHxRanges() {
   const rs = HX_RANGES[state.hx.tf];
   if (!rs.some((r) => r[1] === state.hx.span)) state.hx.span = HX_DEFAULT[state.hx.tf];
@@ -1071,8 +1086,11 @@ $('hx-symbol').onchange = (e) => {
   const v = e.target.value.trim();
   const hit = (state.hx.instruments || []).find((i) => i.symbol === v) || (state.hx.instruments || []).find((i) => i.symbol.toLowerCase() === v.toLowerCase() || (i.name || '').toLowerCase() === v.toLowerCase());
   if (!hit) { setStatus(`No instrument called "${v}"`, 'err'); return; }
-  state.hx.symbol = hit.symbol; e.target.value = hit.symbol; loadHxChart().catch(fail);
+  e.target.value = ''; pickHx(hit.symbol);
 };
+$('hx-market').onchange = (e) => { const f = state.hx.instruments.find((i) => i.market === e.target.value && i.group === 'Indices') || state.hx.instruments.find((i) => i.market === e.target.value); pickHx(f.symbol); };
+$('hx-group').onchange = (e) => { const f = state.hx.instruments.find((i) => i.market === $('hx-market').value && i.group === e.target.value); pickHx(f.symbol); };
+$('hx-inst').onchange = (e) => pickHx(e.target.value);
 $('hx-symbol').onfocus = (e) => e.target.select();
 $('hx-tf').onchange = (e) => { state.hx.tf = e.target.value; state.hx.span = HX_DEFAULT[state.hx.tf]; fillHxRanges(); loadHxChart().catch(fail); };
 $('hx-range').onchange = (e) => { state.hx.span = +e.target.value; loadHxChart().catch(fail); };

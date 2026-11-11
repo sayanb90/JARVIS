@@ -256,6 +256,7 @@
       </div>
     </div>
     <p class="note" id="cd-note"></p>
+  </section>
 
   <!-- ===================== History: prices and volume per instrument ===================== -->
   <section id="view-history" class="view" hidden>
@@ -269,7 +270,10 @@
 
     <div class="subview" data-sub="chart">
       <div class="toolbar" style="margin-bottom:14px">
-        <label class="field wide"><span>Instrument</span><input id="hx-symbol" list="hx-list" autocomplete="off" spellcheck="false" placeholder="Type a name or symbol"></label>
+        <label class="field"><span>Market</span><select id="hx-market"></select></label>
+        <label class="field"><span>Group</span><select id="hx-group"></select></label>
+        <label class="field wide"><span>Instrument</span><select id="hx-inst"></select></label>
+        <label class="field wide"><span>Search all markets</span><input id="hx-symbol" list="hx-list" autocomplete="off" spellcheck="false" placeholder="Type a name or symbol"></label>
         <datalist id="hx-list"></datalist>
         <label class="field"><span>Bars</span><select id="hx-tf"></select></label>
         <label class="field"><span>Range</span><select id="hx-range"></select></label>
