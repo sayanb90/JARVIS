@@ -98,3 +98,15 @@ def test_missing_python_and_unknown_arguments_stop_with_a_message(box):
     assert out.returncode == 1 and "not found" in out.stdout
     bad = run(box, "--nonsense")
     assert bad.returncode == 1 and "unknown argument" in bad.stdout
+
+
+def test_a_stage_that_starts_late_only_gets_the_time_left_until_stop_by():
+    """The limit used to be worked out once when the script started, so `expired` after a long `spot` could run for hours past STOP_BY."""
+    import re
+    src = SCRIPT.read_text()
+    assert "LIMIT_MIN" not in src and src.count("$(limit_min)") == 3                         # fundamentals, spot and expired each ask when they start
+    fn = re.search(r"left_min\(\) \{.*?\n\}", src, re.S).group(0)
+    out = subprocess.run(["bash", "-c", f'{fn}\nSTOP_BY=00:00; left_min'], capture_output=True, text=True).stdout.strip()
+    assert out == "0"                                                                          # STOP_BY has passed today: no time left, never tomorrow's
+    out = subprocess.run(["bash", "-c", f'{fn}\nSTOP_BY=23:59:59; left_min'], capture_output=True, text=True).stdout.strip()
+    assert out.isdigit() and 0 <= int(out) <= 1439
