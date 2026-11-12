@@ -8,7 +8,8 @@ near-money measure; full-chain versions come from the live feed (signals.options
                              short covering), calls and puts; max pain within the band
   vol_demand_proxy      B4   per session: volume signed by bulk volume classification (Easley, Lopez de Prado, O'Hara), weighted by vega
                              and by delta x lot: a crude volatility-demand and delta-flow proxy from candles
-  gex                   B5   near-money gamma exposure, US dealer convention (dealers long calls, short puts) and an Indian convention
+  gex                   B5   near-money gamma exposure (total, and the call and put walls: the strikes with the most call and put gamma
+                             exposure), US dealer convention (dealers long calls, short puts) and an Indian convention
                              from participant OI (dealers on the other side of clients' net position, from the previous session's file);
                              the gamma flip level (where the US-convention exposure changes sign as the forward moves +/- 3 %)
   participant_positioning B11 net long minus short index calls, puts and futures per participant, the change, and a 250-session percentile;
@@ -149,6 +150,10 @@ def gex_table(ch: pd.DataFrame, participant: pd.DataFrame | None, max_k: float, 
     s = s.assign(gex_c=np.where(s["cp"] == "C", unit, 0.0), gex_p=np.where(s["cp"] == "P", unit, 0.0))
     out = s.groupby(["date", "snap", "known_at"]).agg(gex_calls=("gex_c", "sum"), gex_puts=("gex_p", "sum"), fwd=("fwd", "first")).reset_index()
     out["gex_us"] = out["gex_calls"] - out["gex_puts"]
+    by_k = s.groupby(["date", "snap", "strike"], as_index=False).agg(gc=("gex_c", "sum"), gp=("gex_p", "sum"))
+    cw = by_k.loc[by_k.groupby(["date", "snap"])["gc"].idxmax(), ["date", "snap", "strike"]].rename(columns={"strike": "call_wall"})
+    pw = by_k.loc[by_k.groupby(["date", "snap"])["gp"].idxmax(), ["date", "snap", "strike"]].rename(columns={"strike": "put_wall"})
+    out = out.merge(cw, on=["date", "snap"], how="left").merge(pw, on=["date", "snap"], how="left")
     if participant is not None and len(participant):
         pt = participant[participant["participant"] == "Client"].copy()
         pt["client_net_calls"] = pt["option_index_call_long"] - pt["option_index_call_short"]

@@ -127,6 +127,7 @@ def test_gex_conventions_and_flip(ctx):
     g = ctx.compute("gex").dropna(subset=["gex_participant"])
     # synthetic clients are net long calls and net short puts: dealers short calls, long puts -> the Indian sign flips the US one
     assert np.allclose(g["gex_participant"], -g["gex_us"])
+    assert (g["call_wall"] > 0).all() and (g["put_wall"] > 0).all()
 
 
 def test_participant_positioning(ctx):
