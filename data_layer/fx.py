@@ -177,6 +177,8 @@ def refresh(lake_dir: Path | None = None, currencies=None, period: Optional[str]
 
 # ---------------------------------------------------------------------------------------------- command line
 def main(argv: list[str] | None = None) -> int:
+    from .limits import raise_open_files
+    raise_open_files()
     ap = argparse.ArgumentParser(description="Daily FX rates from Yahoo")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("refresh")

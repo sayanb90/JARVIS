@@ -48,6 +48,7 @@ import warnings
 warnings.filterwarnings("ignore", message=r".*inplace keyword.*")
 import yfinance as yf
 
+from .limits import raise_open_files
 from .universe_files import read_universe
 from .lake import BARS_MARKETS, BARS_YF_DEFAULT, MARKETS
 
@@ -60,6 +61,8 @@ DAILY_OHLC_DAYS  = 7          # calendar days back for incremental pulls
 CHUNK_SIZE       = 100         # tickers per yfinance batch call
 
 from .lake import ROOT
+
+raise_open_files()      # yfinance opens many connections: the default soft limit of 1,024 failed every market (see limits.py)
 
 DATA_DIR = ROOT / "data"
 OHLC_DIR = DATA_DIR / "ohlc"

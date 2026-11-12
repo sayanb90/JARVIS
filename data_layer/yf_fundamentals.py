@@ -446,6 +446,8 @@ def universe_symbols(markets: Optional[Iterable[str]] = None) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .limits import raise_open_files
+    raise_open_files()
     ap = argparse.ArgumentParser(description="Fundamentals from Yahoo Finance (yfinance)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="fetch the symbols that are due")
