@@ -281,25 +281,32 @@ def run_spot(fetch: Fetcher, key_map: dict[str, str], d0: date, d1: date, state:
     return stats
 
 
-def run_recent(fetch: Fetcher, key_map: dict[str, str], missing: list[date], state: State, lake_dir: Path, dry_run: bool = False) -> dict:
-    """Fetch the 1-minute candles of the days in `missing` (open days with no India rows) for every instrument: one call per instrument and
-    month, over the range from the oldest to the newest of them, keeping only the missing days.  Nothing here depends on the resume
-    state: the point is to ask again for what is not there."""
-    wanted = set(missing)
-    todo = [(k, s, a, b) for a, b in month_chunks(min(missing), max(missing)) for k, s in key_map.items()]
+def run_recent(fetch: Fetcher, key_map: dict[str, str], missing: list[date], state: State, lake_dir: Path, dry_run: bool = False,
+               pending: Optional[dict] = None) -> dict:
+    """Fetch the 1-minute candles of the days in `missing` (open days with no India rows) for every instrument, and of the days an instrument
+    failed on in an earlier run (`pending`, {symbol: {"key", "days"}}): one call per instrument and month, over the range from its oldest to its
+    newest wanted day, keeping only those days.  `pending` comes from gaps.india_holes: instruments missing from a day that most instruments have
+    (an earlier call that failed), which a day-level check would never ask for again.  Nothing here depends on the resume state."""
+    wanted: dict[str, set[date]] = {s: set(missing) for s in key_map.values()}
+    keys = {s: k for k, s in key_map.items()}
+    for sym, rec in (pending or {}).items():
+        keys.setdefault(sym, rec.get("key", ""))
+        wanted.setdefault(sym, set()).update(date.fromisoformat(d) for d in rec.get("days", []))
+    wanted = {s: d for s, d in wanted.items() if d and keys.get(s)}
+    todo = [(keys[s], s, a, b, d) for s, d in wanted.items() for a, b in month_chunks(min(d), max(d))]
     stats = {"calls_planned": len(todo), "calls": 0, "bars": 0, "empty": 0, "errors": 0}
     if dry_run:
         return stats
     sink = Sink(lake_dir, state)
     try:
-        for key, sym, a, b in todo:
+        for key, sym, a, b, days in todo:
             raw, err = fetch.minute_candles(key, a, b)
             stats["calls"] += 1
             if raw is None:
                 stats["errors"] += 1
                 log.warning("recent: %s %s..%s: %s", sym, a, b, err)
                 continue
-            bars = [x for x in candles_to_bars(raw, sym, 1) if x.ts.date() in wanted]
+            bars = [x for x in candles_to_bars(raw, sym, 1) if x.ts.date() in days]
             stats["bars"] += len(bars)
             stats["empty"] += 0 if bars else 1
             sink.add(f"recent|{sym}|{a}", bars)
@@ -541,17 +548,23 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
         if a.cmd == "recent":
             from .. import gaps
             missing = gaps.india_missing(lake_dir, ist_today(), span=a.days)
-            if not missing:
-                print(f"recent: no open NSE day in the last {a.days} is missing from the 1-minute bars: nothing to fetch")
-                return 0
             km = spot_key_map(a.limit, True)
-            st = run_recent(fetch, km, missing, State(lake_dir / "backfill" / "recent_state.json"), lake_dir, a.dry_run)
+            keys = {sym: k for k, sym in km.items()}
+            pending = {sym: {"key": keys[sym], "days": sorted(d.isoformat() for d in days)}
+                       for sym, days in gaps.india_holes(lake_dir, keys, ist_today(), span=a.days).items() if sym in keys and not (set(days) <= set(missing))}
+            if not missing and not pending:
+                print(f"recent: no open NSE day in the last {a.days} is missing from the 1-minute bars, and no instrument is missing from a day: nothing to fetch")
+                return 0
+            st = run_recent(fetch, km, missing, State(lake_dir / "backfill" / "recent_state.json"), lake_dir, a.dry_run, pending)
             if a.dry_run:
-                print(f"recent, {len(missing)} missing day(s) ({missing[0]}..{missing[-1]}), {len(km)} instruments: {estimate(st['calls_planned'], a.budget_30min)}")
+                print(f"recent, {len(missing)} missing day(s) ({missing[0] if missing else '-'}..{missing[-1] if missing else '-'}), {len(pending)} instrument(s) "
+                      f"missing from a day, {len(km)} instruments: {estimate(st['calls_planned'], a.budget_30min)}")
                 return 0
             gone = gaps.record(lake_dir, "1m", "IN", missing)
-            print(f"recent done: days {', '.join(str(d) for d in missing)}; {st['calls']:,} calls, {st['bars']:,} bars stored, {st['empty']:,} empty, "
-                  f"{st['errors']:,} errors" + (f"; given up on {', '.join(str(d) for d in gone)} (still empty: taken to be holidays)" if gone else ""))
+            print(f"recent done: days {', '.join(str(d) for d in missing) or '-'}; {st['calls']:,} calls, {st['bars']:,} bars stored, {st['empty']:,} empty, "
+                  f"{st['errors']:,} errors" + (" (any instrument missing from a day is asked for again next run)" if st["errors"] else "")
+                  + (f" ({len(pending)} instrument(s) retried from earlier runs)" if pending else "")
+                  + (f"; given up on {', '.join(str(d) for d in gone)} (still empty: taken to be holidays)" if gone else ""))
             return 1 if st["errors"] and not st["bars"] else 0
         if a.cmd == "spot":
             km = spot_key_map(a.limit, not a.no_index)

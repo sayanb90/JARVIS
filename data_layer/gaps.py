@@ -135,3 +135,38 @@ def record(lake_dir: Path, interval: str, market: str, days: Iterable[date]) -> 
     tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
     tmp.replace(p)
     return gone
+
+
+# -- instruments missing from a day that most instruments have --------------------------------------------------------------------------------------
+def india_holes(lake_dir: Path, symbols: Iterable[str], today: date, span: int = 14, now: Optional[datetime] = None) -> dict[str, set[date]]:
+    """{symbol: days} for instruments that had 1-minute rows on an earlier open day of the window but none on this one, over the last `span` days.  A day with
+    rows for most instruments counts as present (see india_missing), so an instrument whose call failed that night (a rate limit, an error) would
+    otherwise stay empty for ever; this finds it from what is stored, whatever the cause.  Only `symbols` (the stocks and indices, not option
+    contracts, which change every day) are compared."""
+    now = now or datetime.now(timezone.utc)
+    cal = market_calendar.load(Path(lake_dir))
+    first, last = today - timedelta(days=span), today
+    base = Path(lake_dir) / "bars" / "interval=1m"
+    wanted, per_day = set(symbols), {}
+    con = duckdb.connect()
+    for d in (first + timedelta(days=i) for i in range((last - first).days + 1)):
+        folder = base / f"date={d}"
+        files = sorted(folder.glob("*.parquet")) if folder.is_dir() else []
+        if not files or not market_calendar.status(d, "NSE", cal=cal, today=today).expects_data:
+            continue
+        try:
+            names = ", ".join("'" + str(f).replace("'", "''") + "'" for f in files)
+            got = {r[0] for r in con.execute(f"SELECT DISTINCT symbol FROM read_parquet([{names}], union_by_name=true) WHERE market = 'IN'").fetchall()}
+        except duckdb.Error:
+            continue
+        if got:
+            per_day[d] = got & wanted
+    con.close()
+    out: dict[str, set[date]] = {}
+    seen: set[str] = set()                                          # every instrument that had rows on an earlier day of the window
+    for d in sorted(per_day):
+        if seen and len(per_day[d]) >= 0.5 * len(seen):             # a day mostly empty is a missing day (india_missing), not a few holes
+            for sym in seen - per_day[d]:
+                out.setdefault(sym, set()).add(d)
+        seen |= per_day[d]
+    return out
