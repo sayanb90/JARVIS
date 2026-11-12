@@ -23,6 +23,10 @@ JARVIS=/home/jarvis/JARVIS
 # for two nights is taken to be a special holiday and not asked for again.  The 400 calls per 30 minutes leave room for the long history backfill
 # (1,500) and the 12:50 fundamentals job inside Upstox's 2,000, while the backfill is still running.
 30 10 * * 1-5  cd $JARVIS && python -m data_layer.upstox.backfill recent --budget-30min 400 >> logs/backfill-recent.log 2>&1
+# NSE participant-wise open interest and volume (Client, DII, FII, Pro; SCRUM-175): two ~1 KB files a day from NSE's public archive, published
+# in the IST evening.  Looks at the last 10 weekdays, so a file NSE posts late is picked up the next night; a day that stays missing is a holiday.
+# The history from 2012 is a one-off:  python -m data_layer.participant_oi backfill --from 2012-01-01   (about 7,500 requests at 1 a second)
+10 16 * * 1-5  cd $JARVIS && python -m data_layer.participant_oi daily --days 10 >> logs/participant-oi.log 2>&1
 # Daily FX rates from Yahoo (for comparing earnings in one currency with prices in another); after the Asian and European closes
 30 0 * * *     cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1
 # Fundamentals from Yahoo (decision SCRUM-138): a daily slice, never-fetched and failed symbols first, then symbols
