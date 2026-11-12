@@ -329,6 +329,13 @@ BARS_DIR = DATA_DIR / "bars"
 # Tested 2026-11-11: Yahoo refuses a 1-minute request that reaches back 30 days or more ("must be within the last 30 days"), serves at most
 # about 8 days per request, and 5-minute bars only within 60 days.  So 1-minute history can be fetched 29 days back, in windows of 7 days.
 INTRADAY_MAX_DAYS = {"1m": 30, "2m": 60, "5m": 60, "15m": 60, "30m": 60, "60m": 730}
+def deepest(interval: str) -> int:
+    """How many days back to ask for.  Yahoo refuses a 1-minute request whose start is more than 30 days old *when it arrives*, and a window's
+    start is the exchange's local midnight: for Tokyo or Seoul that is 15:00 UTC the day before, so "29 days" was 30 days and minutes old at
+    15:09 UTC and the first window was rejected (2026-11-11).  Two days of margin keeps every time zone and every hour of the day inside."""
+    return INTRADAY_MAX_DAYS[interval] - 2 if interval == "1m" else INTRADAY_MAX_DAYS[interval]
+
+
 WINDOW_DAYS = {"1m": 7}                 # days per request for the intervals that Yahoo serves only a few days at a time
 INTRADAY_INTERVAL = "5m"
 INTRADAY_DAYS_BACK = 5     # overlap window; re-fetched bars overwrite (idempotent).  A daily run with a 5-day overlap survives a missed
@@ -379,7 +386,7 @@ def bar_windows(interval: str, days_back: int, today: Optional[date] = None) -> 
     """[(first day, last day)] to request when `days_back` is more than Yahoo serves in one request for `interval` (1-minute: 7 days),
     oldest first; empty when one `period=` request is enough."""
     size = WINDOW_DAYS.get(interval)
-    days_back = min(days_back, INTRADAY_MAX_DAYS[interval] - 1)
+    days_back = min(days_back, deepest(interval))
     if not size or days_back <= size:
         return []
     today = today or datetime.now(timezone.utc).date()
@@ -397,7 +404,7 @@ def fetch_bars(tickers: list[str], market: str,
     """Fetch regular-session intraday bars for the last `days_back` days, or for the days of `window` (first, last) when it is given."""
     if interval not in INTRADAY_MAX_DAYS:
         raise ValueError(f"Unsupported interval {interval!r}; use one of {sorted(INTRADAY_MAX_DAYS)}")
-    days_back = min(days_back, INTRADAY_MAX_DAYS[interval] - 1 if interval == "1m" else INTRADAY_MAX_DAYS[interval])
+    days_back = min(days_back, deepest(interval))
     now_utc = pd.Timestamp.now(tz="UTC")
     span = ({"start": window[0].isoformat(), "end": (window[1] + timedelta(days=1)).isoformat()} if window
             else {"period": f"{days_back}d"})
@@ -502,7 +509,7 @@ def run_bars(
     if market not in BARS_MARKETS:
         raise ValueError(f"intraday bars are collected for {BARS_MARKETS} only, not {market!r}")
     if backfill:
-        days_back = INTRADAY_MAX_DAYS[interval] - 1   # deepest window Yahoo allows
+        days_back = deepest(interval) if interval == "1m" else INTRADAY_MAX_DAYS[interval] - 1      # deepest Yahoo allows, with a margin for 1-minute (see deepest)
     universe = _resolve_universe(market, tickers)
     windows = bar_windows(interval, days_back)
     if dry_run:

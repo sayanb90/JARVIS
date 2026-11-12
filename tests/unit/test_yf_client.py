@@ -105,7 +105,7 @@ def test_fetch_bars_validates_interval_and_clips_days(world, monkeypatch):
     seen = {}
     monkeypatch.setattr(world.yf, "_batch_download", lambda c, **kw: seen.update(kw) or {})
     world.yf.fetch_bars(["A.NS"], "IN", interval="1m", days_back=30)
-    assert seen["period"] == "29d" and seen["interval"] == "1m" and seen["prepost"] is False      # Yahoo refuses 1-minute requests 30 days back
+    assert seen["period"] == "28d" and seen["interval"] == "1m" and seen["prepost"] is False      # Yahoo refuses 1-minute requests 30 days back
 
 
 def test_write_bars_is_idempotent_and_corrections_win(world):
@@ -130,7 +130,7 @@ def test_run_bars_all_means_every_market_but_india_and_backfill_uses_deepest_win
     world.set_universe({"IN": ["A.NS"], "US": ["AAPL"], "UK": ["SHEL.L"], "EU": ["SAP.DE"], "JP": ["7203.T"], "HK": ["0700.HK"]})
     world.yf.run_bars(market="ALL", interval="1m", backfill=True)
     assert [g[0] for g in got if g[3]][::5] == ["US", "UK", "EU", "JP", "HK"]                                     # India is not fetched
-    assert {g[1] for g in got} == {29} and {g[2] for g in got} == {"1m"} and all(g[4] for g in got)              # 29 days, in windows
+    assert {g[1] for g in got} == {28} and {g[2] for g in got} == {"1m"} and all(g[4] for g in got)              # 28 days, in windows
     got.clear()
     world.yf.run_bars(market="IN", interval="60m", backfill=True)                      # but it can be asked for by name
     assert got[0][:2] == ("IN", 729)
@@ -218,15 +218,28 @@ def test_full_run_passes_the_years_down_to_yahoo(world, monkeypatch):
     assert seen == [{"period": "20y"}, {"period": "max"}, {"period": "5y"}]
 
 
-# -- 1-minute backfill in windows (Yahoo serves 1-minute bars only 29 days back, about a week per request) ------------------------
-def test_bar_windows_cover_29_days_in_weeks_oldest_first(world):
+# -- 1-minute backfill in windows (Yahoo serves 1-minute bars only 30 days back, about a week per request) --------------------------
+def test_bar_windows_cover_28_days_in_weeks_oldest_first(world):
     from datetime import date
     w = world.yf.bar_windows("1m", 29, today=date(2026, 11, 11))
-    assert w[0][0] == date(2026, 10, 13) and w[-1][1] == date(2026, 11, 11) and len(w) == 5
+    assert w[0][0] == date(2026, 10, 14) and w[-1][1] == date(2026, 11, 11) and len(w) == 5
     assert all((b - a).days <= 6 for a, b in w) and all(w[i][1] < w[i + 1][0] for i in range(len(w) - 1))
     assert (w[1][0] - w[0][1]).days == 1                                                       # no gap and no overlap between windows
     assert world.yf.bar_windows("1m", 5) == [] and world.yf.bar_windows("5m", 59) == []         # one `period=` request is enough
-    assert world.yf.bar_windows("1m", 100, today=date(2026, 11, 11))[0][0] == date(2026, 10, 13)   # never asks for more than 29 days
+    assert world.yf.bar_windows("1m", 100, today=date(2026, 11, 11))[0][0] == date(2026, 10, 14)   # never asks for more than 28 days
+
+
+def test_the_oldest_window_is_inside_yahoos_30_days_in_every_time_zone_and_at_every_hour(world):
+    """Yahoo rejects a start more than 30 days old when the request arrives.  The start is the exchange's local midnight."""
+    from datetime import date, datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    today = date(2026, 11, 11)
+    first = world.yf.bar_windows("1m", 100, today=today)[0][0]
+    for tz in ("Asia/Tokyo", "Asia/Seoul", "Asia/Hong_Kong", "Asia/Kolkata", "Europe/Paris", "America/New_York"):
+        start = datetime(first.year, first.month, first.day, tzinfo=ZoneInfo(tz)).astimezone(timezone.utc)
+        for hour in (0, 6, 15, 23):                                   # the run can start at any hour of `today` (UTC)
+            call = datetime(2026, 11, 11, hour, 59, tzinfo=timezone.utc)
+            assert call - start < timedelta(days=30), (tz, hour)
 
 
 def test_fetch_bars_uses_start_and_end_for_a_window_and_period_otherwise(world, monkeypatch):
