@@ -25,7 +25,7 @@
 # Timing: start after 10:30 UTC (the feeds compact at 10:05) and the script stops long stages at STOP_BY (default 21:30 UTC), before the
 # 22:00 UTC cron jobs.  A long stage that is cut off is marked "partial": run the script again the next day.  It refuses to start inside
 # 21:30-10:30 UTC unless FORCE=1.  Upstox REST calls use BUDGET calls per 30 minutes (default 1500 of the 2000 allowed), leaving room for the
-# 12:50 UTC fundamentals job that shares the quota.
+# 12:50 UTC fundamentals job that shares the quota.  Each stage gets the time left until STOP_BY at the moment it starts, so a late stage cannot run past it.
 #
 # Environment: PY (default .venv/bin/python)  DAILY_YEARS (20)  STOP_BY (21:30)  BUDGET (1500)  FROM_UPSTOX (2022-01-01)  TO_UPSTOX (2026-11-02)  MIN_FREE_GB (40)  FORCE
 # Exit code: 0 everything done, 75 something partial (run again), 1 something failed.  Nothing is deleted.  Logs: logs/historical-run-<day>.log.
@@ -98,7 +98,14 @@ run() {                                            # run a command (or print it 
     printf '+ %s\n' "$*"
     if [ "$APPLY" = 1 ]; then "$@"; else return 0; fi
 }
-LIMIT_MIN=$(minutes_until "$STOP_BY")
+left_min() {                                       # whole minutes until STOP_BY today, never tomorrow's; 0 once it has passed
+    local now t
+    now=$(date -u +%s); t=$(date -u -d "today $STOP_BY" +%s)
+    if [ "$t" -le "$now" ]; then echo 0; else echo $(( (t - now) / 60 )); fi
+}
+limit_min() {                                      # the time a stage may use: what is left until STOP_BY *now*, so a stage that starts late
+    if [ "$APPLY" = 0 ] || [ "${FORCE:-0}" = 1 ]; then minutes_until "$STOP_BY"; else left_min; fi    # does not run past it (a dry run prints a fixed figure)
+}
 
 selected() {                                       # is this stage chosen by --only (or is no --only given)?
     [ -z "$ONLY" ] && return 0
@@ -123,7 +130,9 @@ st_fx() {
     run "$PY" -m data_layer.fx refresh
 }
 st_fundamentals() {
-    run timeout -s INT "${LIMIT_MIN}m" "$PY" -m data_layer.yf_fundamentals run
+    local limit; limit=$(limit_min)
+    [ "$limit" -ge 1 ] || { echo "no time left before $STOP_BY UTC: run again tomorrow"; return 75; }
+    run timeout -s INT "${limit}m" "$PY" -m data_layer.yf_fundamentals run
     local rc=$?
     if [ "$rc" = 124 ] || [ "$rc" = 130 ] || [ "$rc" = 75 ]; then echo "stopped at the time limit; the symbols fetched so far are saved"; return 75; fi
     [ "$rc" = 0 ] || return "$rc"
@@ -139,11 +148,15 @@ st_trial_expired() {
 }
 st_spot() {
     [ "$APPLY" = 0 ] || [ "$(state_of trial-spot)" = ok ] || { echo "trial-spot is not done: run it first"; return 1; }
-    run "$PY" -m data_layer.upstox.backfill spot --from "$FROM_UPSTOX" --to "$TO_UPSTOX" --budget-30min "$BUDGET" --max-minutes "$LIMIT_MIN"
+    local limit; limit=$(limit_min)
+    [ "$limit" -ge 1 ] || { echo "no time left before $STOP_BY UTC: run again tomorrow"; return 75; }
+    run "$PY" -m data_layer.upstox.backfill spot --from "$FROM_UPSTOX" --to "$TO_UPSTOX" --budget-30min "$BUDGET" --max-minutes "$limit"
 }
 st_expired() {
     [ "$APPLY" = 0 ] || [ "$(state_of trial-expired)" = ok ] || { echo "trial-expired is not done (it needs the Upstox token and Upstox Plus): skipping"; return 1; }
-    run "$PY" -m data_layer.upstox.backfill expired --from "$FROM_UPSTOX" --budget-30min "$BUDGET" --max-minutes "$LIMIT_MIN"
+    local limit; limit=$(limit_min)
+    [ "$limit" -ge 1 ] || { echo "no time left before $STOP_BY UTC: run again tomorrow"; return 75; }
+    run "$PY" -m data_layer.upstox.backfill expired --from "$FROM_UPSTOX" --budget-30min "$BUDGET" --max-minutes "$limit"
 }
 
 PARTIAL=0; FAILED=0
