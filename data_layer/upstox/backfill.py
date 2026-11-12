@@ -281,6 +281,35 @@ def run_spot(fetch: Fetcher, key_map: dict[str, str], d0: date, d1: date, state:
     return stats
 
 
+def run_recent(fetch: Fetcher, key_map: dict[str, str], missing: list[date], state: State, lake_dir: Path, dry_run: bool = False) -> dict:
+    """Fetch the 1-minute candles of the days in `missing` (open days with no India rows) for every instrument: one call per instrument and
+    month, over the range from the oldest to the newest of them, keeping only the missing days.  Nothing here depends on the resume
+    state: the point is to ask again for what is not there."""
+    wanted = set(missing)
+    todo = [(k, s, a, b) for a, b in month_chunks(min(missing), max(missing)) for k, s in key_map.items()]
+    stats = {"calls_planned": len(todo), "calls": 0, "bars": 0, "empty": 0, "errors": 0}
+    if dry_run:
+        return stats
+    sink = Sink(lake_dir, state)
+    try:
+        for key, sym, a, b in todo:
+            raw, err = fetch.minute_candles(key, a, b)
+            stats["calls"] += 1
+            if raw is None:
+                stats["errors"] += 1
+                log.warning("recent: %s %s..%s: %s", sym, a, b, err)
+                continue
+            bars = [x for x in candles_to_bars(raw, sym, 1) if x.ts.date() in wanted]
+            stats["bars"] += len(bars)
+            stats["empty"] += 0 if bars else 1
+            sink.add(f"recent|{sym}|{a}", bars)
+    except BaseException:
+        _safe_flush(sink)
+        raise
+    sink.flush()
+    return stats
+
+
 def _safe_flush(sink: Sink) -> None:
     """Flush while an error is already propagating: keep what was fetched, and let the original error be the one that is reported."""
     try:
@@ -479,6 +508,9 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
     ex.add_argument("--strikes", type=int, default=5, help="strikes kept on each side of the money (default 5)")
     ex.add_argument("--window-days", type=int, default=21, help="calendar days before expiry pulled for each option (default 21)")
     ex.add_argument("--future-window-days", type=int, default=95, help="calendar days before expiry pulled for each future (default 95)")
+    rc = sub.add_parser("recent", parents=[common], help="nightly: the 1-minute candles of any recent day NSE was open with no India rows stored")
+    rc.add_argument("--days", type=int, default=14, help="how many days back to look for missing days (default 14)")
+    rc.add_argument("--anonymous", action="store_true", help="send no token (also used when none is configured)")
     sub.add_parser("status", help="what has been stored so far")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -496,16 +528,31 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
         from dotenv import load_dotenv
         load_dotenv(lake_mod.ENV_FILE)
         token = os.getenv(a.token_env, "") if a.token_env else (os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN", ""))
-        if not token and a.cmd != "spot":
+        if not token and a.cmd not in ("spot", "recent"):
             print("no token: run python -m data_layer.upstox.auth first (or name the variable with --token-env)", file=sys.stderr)
             return 2
         if not token:
             print("no token configured: asking for the candles without one (the endpoint allowed it on 2026-11-11)", file=sys.stderr)
         rest = UpstoxRest(lambda: token, limiter=RateLimiter(windows=((1.0, 50), (60.0, 500), (1800.0, a.budget_30min))))
-    anonymous = a.cmd == "spot" and (a.anonymous or (not injected and not token))
+    anonymous = a.cmd in ("spot", "recent") and (a.anonymous or (not injected and not token))
     fetch = Fetcher(rest, a.dump_raw, anonymous=anonymous, max_minutes=a.max_minutes)
     d1 = a.d_to or ist_today() - timedelta(days=1)
     try:
+        if a.cmd == "recent":
+            from .. import gaps
+            missing = gaps.india_missing(lake_dir, ist_today(), span=a.days)
+            if not missing:
+                print(f"recent: no open NSE day in the last {a.days} is missing from the 1-minute bars: nothing to fetch")
+                return 0
+            km = spot_key_map(a.limit, True)
+            st = run_recent(fetch, km, missing, State(lake_dir / "backfill" / "recent_state.json"), lake_dir, a.dry_run)
+            if a.dry_run:
+                print(f"recent, {len(missing)} missing day(s) ({missing[0]}..{missing[-1]}), {len(km)} instruments: {estimate(st['calls_planned'], a.budget_30min)}")
+                return 0
+            gone = gaps.record(lake_dir, "1m", "IN", missing)
+            print(f"recent done: days {', '.join(str(d) for d in missing)}; {st['calls']:,} calls, {st['bars']:,} bars stored, {st['empty']:,} empty, "
+                  f"{st['errors']:,} errors" + (f"; given up on {', '.join(str(d) for d in gone)} (still empty: taken to be holidays)" if gone else ""))
+            return 1 if st["errors"] and not st["bars"] else 0
         if a.cmd == "spot":
             km = spot_key_map(a.limit, not a.no_index)
             if not km:

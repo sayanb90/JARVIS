@@ -13,10 +13,16 @@ JARVIS=/home/jarvis/JARVIS
 # (NYSE closes 21:00 UTC in winter).  It runs an hour after the 1-minute bars job below because both take the scheduler lock: with about
 # two thousand tickers the bars job can take 20 to 30 minutes, and a second scheduler that finds the lock held exits.
 0 23 * * 1-5   cd $JARVIS && python scheduler.py --job ohlc-daily  >> logs/scheduler.log 2>&1
-# Intraday 1-minute bars for every market but India (US, UK, EU, JP, KR, TW, SG, CN, HK) from Yahoo, once after the last close.  Yahoo serves only 7 days of 1m, so this builds the
-# history forward; each run re-fetches the last 5 days (idempotent), so a missed day or two is filled in.  India is recorded tick by
-# tick by the Upstox feed instead.
+# Intraday 1-minute bars for every market but India (US, UK, EU, JP, KR, TW, SG, CN, HK) from Yahoo, once after the last close.  Each run re-fetches the last 5 days
+# (idempotent) and also looks for weekdays in the last 28 with no rows for a market (see data_layer/gaps.py): those are fetched back to the oldest one, since
+# Yahoo keeps only 30 days of 1-minute bars.  A weekday still empty after two nights is taken to be a holiday.  India has its own job above.
 0 22 * * 1-5   cd $JARVIS && python scheduler.py --job bars --market ALL --interval 1m >> logs/scheduler.log 2>&1
+# India 1-minute candles from Upstox (the feed stores ticks; this keeps the minute-candle history, which the viewer's History tab and
+# the research reads, current).  After the close and the 10:05 compaction.  It looks at the last 14 days against the NSE holiday calendar and fetches
+# only the open days with no India rows: about 500 calls (10 to 15 minutes) when yesterday is missing, none when nothing is.  A day that stays empty
+# for two nights is taken to be a special holiday and not asked for again.  The 400 calls per 30 minutes leave room for the long history backfill
+# (1,500) and the 12:50 fundamentals job inside Upstox's 2,000, while the backfill is still running.
+30 10 * * 1-5  cd $JARVIS && python -m data_layer.upstox.backfill recent --budget-30min 400 >> logs/backfill-recent.log 2>&1
 # Daily FX rates from Yahoo (for comparing earnings in one currency with prices in another); after the Asian and European closes
 30 0 * * *     cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1
 # Fundamentals from Yahoo (decision SCRUM-138): a daily slice, never-fetched and failed symbols first, then symbols

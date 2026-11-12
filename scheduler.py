@@ -44,7 +44,7 @@ from pathlib import Path
 ROOT = Path(os.getenv("JARVIS_ROOT", Path(__file__).parent)).resolve()
 sys.path.insert(0, str(ROOT))
 
-from data_layer import lake
+from data_layer import gaps, lake
 from data_layer.yf_client import INTRADAY_INTERVAL, INTRADAY_MAX_DAYS, run_bars, run_ohlc_daily
 
 # ---------------------------------------------------------------------------
@@ -106,12 +106,13 @@ def _load_lake(description: str, fn, *args, **kwargs) -> bool:
 # Jobs
 # ---------------------------------------------------------------------------
 
-def job_ohlc_daily(market: str = "ALL", days_back: int = 7,
+def job_ohlc_daily(market: str = "ALL", days_back: int = 30,
                    dry_run: bool = False) -> bool:
     """
     Fetch incremental OHLC via yfinance → upsert into the Parquet lake.
 
-    Safe to run every trading day.
+    Safe to run every trading day.  The last 30 days are re-fetched each time (idempotent): a day Yahoo failed to serve, or served late, is
+    filled in by a later run, and a split or dividend adjustment reaches the recent rows.
     """
     log.info("=== JOB: ohlc-daily [market=%s, days_back=%d] ===", market, days_back)
     try:
@@ -129,11 +130,25 @@ def job_ohlc_daily(market: str = "ALL", days_back: int = 7,
 
 def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
              dry_run: bool = False, backfill: bool = False) -> bool:
-    """Fetch aggregated intraday bars -> data/bars/ -> upsert recent day files."""
+    """Fetch aggregated intraday bars -> data/bars/ -> upsert recent day files.
+
+    1-minute bars also heal: the weekdays of the last 28 with no rows for a market (see gaps.py) are fetched again, back to the oldest
+    one, because Yahoo keeps only 30 days.  A day that stays empty after two nights is taken to be a holiday and not asked for again."""
     log.info("=== JOB: bars [market=%s, interval=%s] ===", market, interval)
+    markets = lake.BARS_YF_DEFAULT if market == "ALL" else (market,)
+    today, plan = date.today(), {}
+    if interval == "1m" and not backfill:
+        try:
+            plan = {m: d for m, d in gaps.yahoo_plan(lake.LAKE_DIR, interval, markets, today).items() if d}
+        except Exception as exc:                          # noqa: BLE001 -- a failed scan must not stop the night's normal fetch
+            log.error("gap scan failed, fetching the usual window only: %s", exc)
+        for m, days in plan.items():
+            log.info("[%s] %d weekday(s) with no 1-minute bars in the last %d days, fetching back to %s: %s", m, len(days), gaps.SPAN_DAYS,
+                     days[0], ", ".join(str(d) for d in days[:8]) + (" ..." if len(days) > 8 else ""))
+    back = {m: gaps.days_back_for(days, today) for m, days in plan.items()}
     fetched = True
     try:
-        run_bars(market=market, interval=interval, dry_run=dry_run, backfill=backfill)
+        run_bars(market=market, interval=interval, dry_run=dry_run, backfill=backfill, days_back_by=back or None)
     except Exception as exc:
         log.error("Bars fetch failed: %s", exc)
         fetched = False                                   # the markets that did work wrote day files: still load them
@@ -142,11 +157,20 @@ def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
         log.info("DRY RUN — skipping lake load")
         return True
 
-    markets = lake.BARS_YF_DEFAULT if market == "ALL" else (market,)
     since = None                                         # default: the last 7 days of day files
     if backfill:                                         # a backfill wrote up to 59 days of files: load all of them
         since = date.today() - timedelta(days=INTRADAY_MAX_DAYS.get(interval, 7) + 1)
-    return _load_lake("intraday bars", lake.load_bars, interval, since, markets=markets) and fetched
+    elif back:                                           # a fill reached further back than a week: load those day files too
+        since = today - timedelta(days=max(max(back.values()), 7) + 1)
+    loaded = _load_lake("intraday bars", lake.load_bars, interval, since, markets=markets)
+    for m, days in plan.items():
+        try:
+            gone = gaps.record(lake.LAKE_DIR, interval, m, days)
+            if gone:
+                log.info("[%s] still no data after %d attempts, taken to be holidays: %s", m, gaps.GIVE_UP, ", ".join(str(d) for d in gone))
+        except Exception as exc:                          # noqa: BLE001
+            log.error("could not record the fill attempt for %s: %s", m, exc)
+    return loaded and fetched
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +187,8 @@ def main() -> int:
                         help="Which job to run")
     parser.add_argument("--market", default="ALL", choices=[*lake.MARKETS, "ALL"],
                         help="Markets (default ALL; for bars, ALL means every market but India)")
-    parser.add_argument("--days-back", type=int, default=7,
-                        help="Calendar days to look back for OHLC (default: 7)")
+    parser.add_argument("--days-back", type=int, default=30,
+                        help="Calendar days to look back for OHLC (default: 30)")
     parser.add_argument("--backfill", action="store_true",
                         help="bars job: fetch the deepest intraday window Yahoo allows")
     parser.add_argument("--interval", default=INTRADAY_INTERVAL,

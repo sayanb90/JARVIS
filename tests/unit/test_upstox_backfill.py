@@ -380,3 +380,36 @@ def test_spot_runs_without_a_token_but_expired_does_not(lake_dir, monkeypatch, c
     assert bf.main(["spot", "--from", "2024-01-01", "--to", "2024-01-31", "--no-index", "--dry-run"]) == 0
     assert "without one" in capsys.readouterr().err
     assert bf.main(["expired", "--dry-run"]) == 2 and "no token" in capsys.readouterr().err
+
+
+def test_recent_fetches_only_the_missing_open_days_and_a_second_run_finds_nothing(lake_dir, monkeypatch, capsys):
+    from data_layer import gaps, market_calendar
+    day = date(2026, 11, 11)
+    market_calendar.save([], lake_dir, now=datetime(2026, 11, 12, 3, 0))
+    monkeypatch.setattr(bf, "ist_today", lambda: date(2026, 11, 12))
+    monkeypatch.setattr(bf, "build_key_map", lambda: ({"NSE_EQ|INE002A01018": "RELIANCE.NS"}, []))
+    monkeypatch.setattr(bf, "INDEX_KEYS", {})
+    fake = FakeUpstox(candle_days={"NSE_EQ%7CINE002A01018": ["2026-11-10", "2026-11-11"]})
+    assert gaps.india_missing(lake_dir, date(2026, 11, 12), datetime(2026, 11, 12, 9, 0, tzinfo=__import__("datetime").timezone.utc), span=3) == \
+        [date(2026, 11, 9), date(2026, 11, 10), day]
+    st = bf.run_recent(fetcher(fake), {"NSE_EQ|INE002A01018": "RELIANCE.NS"}, [day], bf.State(lake_dir / "backfill" / "recent_state.json"), lake_dir)
+    assert st["calls"] == 1 and st["bars"] == 3 and st["errors"] == 0 and "/2026-11-11/2026-11-11" in fake.calls[0][0]
+    df = Lake(lake_dir).sql("SELECT symbol, count(*) n, min(CAST(ts AS DATE)) d FROM bars_1m GROUP BY 1")
+    assert list(df.symbol) == ["RELIANCE.NS"] and list(df.n) == [3] and str(df.d[0])[:10] == "2026-11-11"           # the 10th was not asked to be stored
+    assert "IN" in gaps.days_with_rows(lake_dir, "1m", day, day)[day]
+
+
+def test_recent_cli_says_so_when_nothing_is_missing_and_keeps_going_when_some_calls_fail(lake_dir, monkeypatch, capsys):
+    from data_layer import market_calendar
+    market_calendar.save([], lake_dir, now=datetime(2026, 11, 12, 3, 0))
+    monkeypatch.setattr(bf, "ist_today", lambda: date(2026, 11, 14))                         # a Saturday after a week with no rows: every weekday is missing
+    monkeypatch.setattr(bf, "build_key_map", lambda: ({"NSE_EQ|INE002A01018": "RELIANCE.NS"}, []))
+    monkeypatch.setattr(bf, "INDEX_KEYS", {})
+    fake = FakeUpstox(candle_days={"NSE_EQ%7CINE002A01018": ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13"]})
+    assert bf.main(["recent", "--days", "5", "--dry-run"], rest=rest_for(fake)) == 0 and "1 instruments" in capsys.readouterr().out and not fake.calls
+    assert bf.main(["recent", "--days", "5"], rest=rest_for(fake)) == 0
+    assert "15 bars stored" in capsys.readouterr().out
+    assert bf.main(["recent", "--days", "5"], rest=rest_for(FakeUpstox())) == 0 and "nothing to fetch" in capsys.readouterr().out
+    bad = FakeUpstox(fail={"historical-candle": err(500, "UDAPI100500")})
+    monkeypatch.setattr(bf, "ist_today", lambda: date(2026, 12, 4))
+    assert bf.main(["recent", "--days", "3"], rest=rest_for(bad)) == 1                      # every call failed and nothing was stored: cron sees a failure

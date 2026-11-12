@@ -67,6 +67,7 @@ def test_bars_job_for_all_means_every_market_but_india_and_loads_the_last_week(s
     seen = {}
     monkeypatch.setattr(sched, "run_bars", lambda **kw: seen.update(kw))
     monkeypatch.setattr(sched.lake, "load_bars", lambda iv, since, markets: seen.update(load=(iv, since, markets)))
+    monkeypatch.setattr(sched.gaps, "yahoo_plan", lambda lake_dir, iv, markets, today: {m: [] for m in markets})        # nothing missing: the usual window
     assert sched.job_bars("ALL", "1m") is True
     assert seen["market"] == "ALL" and seen["load"] == ("1m", None, ("US", "UK", "EU", "JP", "KR", "TW", "SG", "CN", "HK"))
 
