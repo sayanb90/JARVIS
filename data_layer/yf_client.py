@@ -486,9 +486,10 @@ def run_bars(
     days_back: int = INTRADAY_DAYS_BACK,
     dry_run: bool = False,
     backfill: bool = False,
+    days_back_by: dict[str, int] | None = None,
 ) -> None:
     """
-    Intraday bar collection from Yahoo: US, UK and EU by default (`ALL`), India on request (the Upstox feed records India tick by
+    Intraday bar collection from Yahoo (`days_back_by` {market: days} reaches further back for a market with missing days; see gaps.py): US, UK and EU by default (`ALL`), India on request (the Upstox feed records India tick by
     tick, so a Yahoo copy of it adds nothing).  backfill=True pulls the deepest window Yahoo allows (59 days of 5m, 29 of 1m in windows
     of 7 days, 729 of 60m); there is no more, so longer 1-minute history can only be built forward.  Each window is written as soon as
     it is fetched, so a 29-day backfill of a market holds one week of bars in memory, not a month.  Run AFTER each market closes (the cron
@@ -499,7 +500,7 @@ def run_bars(
         failed = []
         for m in BARS_YF_DEFAULT:                                  # one market failing must not stop the others
             try:
-                run_bars(m, tickers, interval, days_back, dry_run, backfill)
+                run_bars(m, tickers, interval, days_back, dry_run, backfill, days_back_by)
             except Exception as exc:
                 log.error("bars %s [%s] failed: %s", interval, m, exc)
                 failed.append(m)
@@ -508,6 +509,8 @@ def run_bars(
         return
     if market not in BARS_MARKETS:
         raise ValueError(f"intraday bars are collected for {BARS_MARKETS} only, not {market!r}")
+    if days_back_by and market in days_back_by:
+        days_back = max(days_back, days_back_by[market])             # a gap in the stored days: fetch back to cover it
     if backfill:
         days_back = deepest(interval) if interval == "1m" else INTRADAY_MAX_DAYS[interval] - 1      # deepest Yahoo allows, with a margin for 1-minute (see deepest)
     universe = _resolve_universe(market, tickers)
