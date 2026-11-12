@@ -45,6 +45,7 @@ ROOT = Path(os.getenv("JARVIS_ROOT", Path(__file__).parent)).resolve()
 sys.path.insert(0, str(ROOT))
 
 from data_layer import gaps, lake
+from data_layer.limits import raise_open_files
 from data_layer.yf_client import INTRADAY_INTERVAL, INTRADAY_MAX_DAYS, run_bars, run_ohlc_daily
 
 # ---------------------------------------------------------------------------
@@ -177,6 +178,7 @@ def job_bars(market: str = "ALL", interval: str = INTRADAY_INTERVAL,
 # CLI
 # ---------------------------------------------------------------------------
 def main() -> int:
+    raise_open_files()                                   # cron starts jobs with the default of 1,024; the fetch needs more (see data_layer/limits.py)
     parser = argparse.ArgumentParser(
         description="JARVIS Scheduler — invoke via cron or manually",
         formatter_class=argparse.RawDescriptionHelpFormatter,
