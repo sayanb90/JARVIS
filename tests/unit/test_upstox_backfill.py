@@ -413,3 +413,31 @@ def test_recent_cli_says_so_when_nothing_is_missing_and_keeps_going_when_some_ca
     bad = FakeUpstox(fail={"historical-candle": err(500, "UDAPI100500")})
     monkeypatch.setattr(bf, "ist_today", lambda: date(2026, 12, 4))
     assert bf.main(["recent", "--days", "3"], rest=rest_for(bad)) == 1                      # every call failed and nothing was stored: cron sees a failure
+
+
+def test_an_instrument_whose_call_failed_is_asked_for_again_on_the_next_run_even_though_the_day_has_rows(lake_dir, monkeypatch, capsys):
+    from data_layer import gaps, market_calendar
+    market_calendar.save([], lake_dir, now=datetime(2026, 11, 12, 3, 0))
+    monkeypatch.setattr(bf, "ist_today", lambda: date(2026, 11, 14))                    # a Saturday: the open days are 12 and 13 Nov whatever the clock says
+    keys = {"NSE_EQ|INE002A01018": "RELIANCE.NS", "NSE_EQ|INE467B01029": "TCS.NS"}
+    monkeypatch.setattr(bf, "build_key_map", lambda: (keys, []))
+    monkeypatch.setattr(bf, "INDEX_KEYS", {})
+    from data_layer import tick_store
+    from data_layer.ticks import Bar
+    for sym in keys.values():                                                          # both instruments had rows on the 11th (the earlier backfill)
+        tick_store.write_bars([Bar(datetime(2026, 11, 11, 4, 0), sym, "IN", 1, 2, 0.5, 1.5, 10, None, None, None, None, None, None, "rest")], "1m", lake_dir)
+    days = {"NSE_EQ%7CINE002A01018": ["2026-11-12", "2026-11-13"], "NSE_EQ%7CINE467B01029": ["2026-11-12", "2026-11-13"]}
+    limited = FakeUpstox(candle_days=days, fail={"INE467B01029": err(429, "UDAPI10005", "slow down")})
+    args = ["recent", "--days", "3", "--budget-30min", "400"]
+    assert bf.main(args, rest=rest_for(limited)) == 0
+    out = capsys.readouterr().out
+    assert "6 bars stored" in out and "1 errors" in out and "asked for again next run" in out
+    assert gaps.india_holes(lake_dir, ["RELIANCE.NS", "TCS.NS"], date(2026, 11, 14), span=3) == {"TCS.NS": {date(2026, 11, 12), date(2026, 11, 13)}}
+    assert "IN" in gaps.days_with_rows(lake_dir, "1m", date(2026, 11, 12), date(2026, 11, 12))[date(2026, 11, 12)]      # present: only the failure list asks again
+    again = FakeUpstox(candle_days=days)
+    assert bf.main(args, rest=rest_for(again)) == 0
+    out = capsys.readouterr().out
+    assert len(again.calls) == 1 and "6 bars stored" in out and "again next run" not in out                            # only the failed instrument, one call
+    df = Lake(lake_dir).sql("SELECT symbol, count(*) n FROM bars_1m GROUP BY 1 ORDER BY 1")
+    assert dict(zip(df.symbol, df.n)) == {"RELIANCE.NS": 7, "TCS.NS": 7}            # 6 fetched plus the bar seeded on the 11th
+    assert bf.main(args, rest=rest_for(FakeUpstox())) == 0 and "nothing to fetch" in capsys.readouterr().out
