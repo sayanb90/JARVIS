@@ -96,3 +96,19 @@ def test_shard_ports():
     from data_layer import live_book
     assert live_book.port_for("fo", {}, shard=2) == 8782
     assert live_book.port_for("fo", {"JARVIS_BOOK_PORT_FO": "0"}, shard=2) == 0
+
+
+# ---------------------------------------------------------------------------------- SENSEX on BSE behind a switch (SCRUM-195)
+def test_bse_is_off_by_default_and_parsed_when_on():
+    from data_layer.tick_store import is_index
+    from data_layer.upstox import fo_instruments as fo
+    assert fo.fo_exchanges({}) == ["NSE"] and fo.fo_segments({}) == {"NSE_FO"}
+    assert fo.fo_segments({"JARVIS_FO_EXCHANGES": "NSE,BSE"}) == {"NSE_FO", "BSE_FO"}
+    recs = [{"segment": "BSE_FO", "instrument_type": "CE", "instrument_key": "BSE_FO|1", "expiry": "2026-11-19", "underlying_symbol": "SENSEX",
+             "strike_price": 80000, "trading_symbol": "SENSEX 80000 CE 19 NOV 26", "lot_size": 20},
+            {"segment": "NSE_FO", "instrument_type": "FUT", "instrument_key": "NSE_FO|2", "expiry": "2026-11-24", "underlying_symbol": "NIFTY",
+             "trading_symbol": "NIFTY FUT 24 NOV 26", "lot_size": 65}]
+    assert list(fo.parse_master(recs, {"NSE_FO"}).underlying) == ["NIFTY"]
+    both = fo.parse_master(recs, {"NSE_FO", "BSE_FO"})
+    assert set(both.underlying) == {"NIFTY", "SENSEX"} and "SENSEX_80000_CE_19_NOV_26" in set(both.symbol)
+    assert is_index("BSE_INDEX:SENSEX") and is_index("NSE_INDEX:India VIX") and not is_index("RELIANCE.NS")

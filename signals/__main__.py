@@ -221,7 +221,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         r = sub.add_parser(name)
         r.add_argument("--lake", type=Path, required=True)
         r.add_argument("--root", type=Path, required=True)
-        r.add_argument("--underlying", choices=("NIFTY", "BANKNIFTY"), required=True)
+        r.add_argument("--underlying", choices=("NIFTY", "BANKNIFTY", "SENSEX"), required=True)
         r.add_argument("--from", dest="d0", type=date.fromisoformat, required=True)
         r.add_argument("--to", dest="d1", type=date.fromisoformat, required=True)
         if name == "run":

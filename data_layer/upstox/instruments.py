@@ -61,6 +61,9 @@ def index_keys_enabled(env=None) -> bool:
     return (os.environ if env is None else env).get("JARVIS_INDEX_KEYS", "").lower() in ("1", "true", "yes", "on")
 
 
+BSE_INDEX_KEYS: dict[str, str] = {"BSE_INDEX|SENSEX": "BSE_INDEX:SENSEX"}      # SCRUM-195: streamed when JARVIS_FO_EXCHANGES includes BSE
+
+
 def segment_key_map(segment: str = "eq", fo_file: Path | str | None = None) -> dict[str, str]:
     """{instrument_key: symbol} for the collectors: the equity universe ("eq", plus the index keys when JARVIS_INDEX_KEYS is on) or the
     selected contracts ("fo")."""
@@ -68,4 +71,7 @@ def segment_key_map(segment: str = "eq", fo_file: Path | str | None = None) -> d
         from .fo_instruments import fo_key_map
         return fo_key_map(Path(fo_file) if fo_file else None)
     keys = build_key_map()[0]
-    return {**keys, **INDEX_KEYS} if index_keys_enabled() else keys
+    if not index_keys_enabled():
+        return keys
+    from .fo_instruments import fo_exchanges
+    return {**keys, **INDEX_KEYS, **(BSE_INDEX_KEYS if "BSE" in fo_exchanges() else {})}

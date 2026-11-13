@@ -611,7 +611,7 @@ class Lake:
         """
         files = self._tick_files(day, "eq" if equities_only else None)         # only the stocks' file: the options are not even opened
         if interval == "1s" and files:
-            where = (f"NOT regexp_matches(symbol, '{FO_REGEX}') AND symbol NOT LIKE '{tick_store.INDEX_PREFIX}%'") if equities_only else None
+            where = (f"NOT regexp_matches(symbol, '{FO_REGEX}') AND symbol NOT LIKE 'NSE_INDEX:%' AND symbol NOT LIKE 'BSE_INDEX:%'") if equities_only else None
             raw_cte = f"raw AS {self._ticks_bars_sql(files, where=where)}"
         else:
             folder = self.dir / "bars" / f"interval={interval}" / f"date={day}"

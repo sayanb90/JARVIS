@@ -40,7 +40,8 @@ MIN_T_IV7 = 1.0 / 365                            # expiries closer than a day ar
 CM_DAYS = 7
 SMILE_POINTS = {"m2": 0.98, "m1": 0.99, "p1": 1.01, "p2": 1.02}
 HARD_BREAKS = (("2024-11-20", "one weekly per exchange"), ("2025-09-01", "NSE expiries on Tuesday"))
-INDEX_SYMBOL = {"NIFTY": "NSE_INDEX:Nifty 50", "BANKNIFTY": "NSE_INDEX:Nifty Bank", "FINNIFTY": "NSE_INDEX:Nifty Fin Service"}
+INDEX_SYMBOL = {"NIFTY": "NSE_INDEX:Nifty 50", "BANKNIFTY": "NSE_INDEX:Nifty Bank", "FINNIFTY": "NSE_INDEX:Nifty Fin Service",
+                "SENSEX": "BSE_INDEX:SENSEX"}
 VIX_SYMBOL = "NSE_INDEX:India VIX"
 
 

@@ -57,10 +57,11 @@ ZERO_IS_EMPTY = ("delta", "gamma", "oi")        # the feed sends 0.0 for these o
 
 
 INDEX_PREFIX = "NSE_INDEX:"                     # lake symbols of indices (India VIX included): stored with the stocks, shown apart from them
+INDEX_PREFIXES = (INDEX_PREFIX, "BSE_INDEX:")   # SENSEX (SCRUM-195)
 
 
 def is_index(symbol: str) -> bool:
-    return symbol.startswith(INDEX_PREFIX)
+    return symbol.startswith(INDEX_PREFIXES)
 
 
 def segment_of(symbol: str) -> str:

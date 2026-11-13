@@ -132,7 +132,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         df = q.bar_symbols(date, interval)
         if df.empty:
             raise HTTPException(404, f"no bars for {date}")
-        df = df[~df["symbol"].isin(q.fo_symbols()) & ~df["symbol"].str.startswith(tick_store.INDEX_PREFIX)]   # stocks only; F&O has its own tab
+        df = df[~df["symbol"].isin(q.fo_symbols()) & ~df["symbol"].map(tick_store.is_index)]   # stocks only; F&O has its own tab
         if df.empty:
             raise HTTPException(404, f"no equity bars for {date}")
         return df.to_dict("records")
@@ -185,7 +185,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         info = cached("universe-info", 600, mkt.universe_info)
         rows = []
         for s, r in sorted(have.items()):
-            if s in skip or s.startswith(tick_store.INDEX_PREFIX):
+            if s in skip or tick_store.is_index(s):
                 continue
             u = info.get(s) or {}
             market = u.get("market") or mkt.market_of(s)

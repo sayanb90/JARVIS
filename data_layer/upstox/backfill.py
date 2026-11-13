@@ -64,7 +64,8 @@ from .rest import Resp, UpstoxRest
 log = logging.getLogger(__name__)
 
 MINUTE_HISTORY_START = date(2022, 1, 1)         # Upstox: minute candles are available from January 2022
-UNDERLYING_KEYS = {"NIFTY": "NSE_INDEX|Nifty 50", "BANKNIFTY": "NSE_INDEX|Nifty Bank"}
+UNDERLYING_KEYS = {"NIFTY": "NSE_INDEX|Nifty 50", "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+                   "SENSEX": "BSE_INDEX|SENSEX"}                  # SENSEX (SCRUM-195): whether the expired API serves BSE is unverified
 OK, EMPTY, ERROR = "ok", "empty", "error"
 FLUSH_BARS = 250_000                            # bars held in memory before they are written and the touched days compacted
 MIN_FREE_GB = 15.0                              # stop before the disk the live feed writes to runs low
@@ -511,7 +512,7 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
     sp.add_argument("--anonymous", action="store_true", help="send no token (the candle endpoints answered without one on 2026-11-11); "
                                                              "also used when no token is configured")
     ex = sub.add_parser("expired", parents=[common], help="1-minute candles of expired index options and futures (Upstox Plus)")
-    ex.add_argument("--underlying", nargs="+", default=list(UNDERLYING_KEYS), choices=list(UNDERLYING_KEYS))
+    ex.add_argument("--underlying", nargs="+", default=["NIFTY", "BANKNIFTY"], choices=list(UNDERLYING_KEYS))
     ex.add_argument("--strikes", type=int, default=int(os.environ.get("JARVIS_EXPIRED_STRIKES", "5")),
                     help="strikes kept on each side of the money (default 5, or JARVIS_EXPIRED_STRIKES).  Raising it later is incremental: "
                          "contracts already stored are skipped, only the wider strikes are fetched")
