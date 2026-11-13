@@ -71,3 +71,13 @@ def test_store_and_trial_log(tmp_path):
     rec = log_trial(tmp_path, spec, "NIFTY", "2026-01-01", "2026-01-02", 2)
     assert rec["params_hash"] == spec.params_hash
     assert read_trials(tmp_path)[-1]["signal"] == "vix_regime"
+
+
+def test_every_documented_signal_is_computed_and_every_output_is_documented():
+    """Audit (13 Nov 2026): the Notion catalogues map to registered outputs, and nothing registered is undocumented."""
+    from signals.coverage_map import DOCUMENTED, NOT_FEASIBLE
+    missing = {doc: sid for doc, sids in DOCUMENTED.items() for sid in sids if sid not in REGISTRY}
+    assert not missing, missing
+    documented = {sid for sids in DOCUMENTED.values() for sid in sids}
+    assert not set(REGISTRY) - documented, sorted(set(REGISTRY) - documented)
+    assert all(NOT_FEASIBLE.values())
