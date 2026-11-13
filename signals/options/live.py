@@ -282,7 +282,7 @@ def _live_gamma_chain(ctx: Context) -> pd.DataFrame:
 
 @register(_spec("pcr_full", "B2 full chain: put/call OI and volume ratios over all strikes, front expiry.", inputs=("ticks_fo",), grid="snap"))
 def pcr_full(ctx: Context, p: dict) -> pd.DataFrame:
-    return pcr_table(ctx.get("chain_live"), np.inf)
+    return pcr_table(ctx.get("chain_live"), np.inf, ctx.snaps, ctx.bucket_td)
 
 
 @register(_spec("gex_full", "B5 full chain: gamma exposure over all strikes and both expiries with Upstox gamma (our gamma where it is "
@@ -291,7 +291,7 @@ def gex_full(ctx: Context, p: dict) -> pd.DataFrame:
     ch = _live_gamma_chain(ctx)
     if not len(ch):
         return ch
-    return gex_table(ch, ctx.raw.get("participant"), np.inf, ctx.r, gamma_col="gamma_use")
+    return gex_table(ch, ctx.raw.get("participant"), np.inf, ctx.r, gamma_col="gamma_use", snaps=ctx.snaps, bucket=ctx.bucket_td)
 
 
 @register(_spec("pin_full", "B1 full chain: on expiry day, the strike with the most OI (calls + puts) over all strikes, and the forward's "
@@ -317,7 +317,7 @@ def rr25(ctx: Context, p: dict) -> pd.DataFrame:
     ch = ctx.get("chain_live")
     if ch is None or not len(ch) or "delta_vendor" not in ch.columns:
         return pd.DataFrame()
-    s = _at_snaps(ch.dropna(subset=["delta_vendor", "iv_vendor"]))
+    s = _at_snaps(ch.dropna(subset=["delta_vendor", "iv_vendor"]), ctx.snaps, ctx.bucket_td)
     rows = []
     for (d, sn, ka, e), g in s.groupby(["date", "snap", "known_at", "expiry"]):
         c = g[g["cp"] == "C"].sort_values("delta_vendor")

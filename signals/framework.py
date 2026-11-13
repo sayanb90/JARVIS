@@ -190,10 +190,11 @@ def cut_raw(raw: dict[str, pd.DataFrame], cut: pd.Timestamp) -> dict[str, pd.Dat
 
 
 def check_prefix_invariance(sid: str, underlying: str, raw: dict[str, pd.DataFrame], cut: pd.Timestamp, rtol: float = 1e-9,
-                            atol: float = 1e-9) -> tuple[bool, str]:
-    """Compute `sid` on all of `raw` and on `raw` cut at `cut`; every row known by `cut` must be identical."""
-    full = Context(underlying, raw).compute(sid)
-    part = Context(underlying, cut_raw(raw, cut), cut=cut).compute(sid)
+                            atol: float = 1e-9, **ctx_kw) -> tuple[bool, str]:
+    """Compute `sid` on all of `raw` and on `raw` cut at `cut`; every row known by `cut` must be identical.  `ctx_kw` (bucket, snaps)
+    goes to both contexts."""
+    full = Context(underlying, raw, **ctx_kw).compute(sid)
+    part = Context(underlying, cut_raw(raw, cut), cut=cut, **ctx_kw).compute(sid)
     full = full[pd.to_datetime(full["known_at"]) <= cut].reset_index(drop=True)
     part = part[pd.to_datetime(part["known_at"]) <= cut].reset_index(drop=True)
     if len(full) != len(part):

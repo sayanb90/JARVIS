@@ -37,24 +37,32 @@ def _front(ch: pd.DataFrame) -> pd.DataFrame:
     return ch[ch["expiry"] == first]
 
 
-def _at_snaps(ch: pd.DataFrame) -> pd.DataFrame:
+def _at_snaps(ch: pd.DataFrame, snaps: str = "fixed", bucket: pd.Timedelta = pd.Timedelta(minutes=1)) -> pd.DataFrame:
+    """Rows of the chain at the snapshots: the bars ending at 09:20, 12:00 and 15:15 IST ("fixed"), or every bar ("all", SCRUM-198).
+    Adds date, snap (IST time the bar ends) and known_at (the bar's end)."""
+    if snaps == "all":
+        c = ch.copy()
+        c["known_at"] = c["ts"] + bucket
+        c["date"] = c["ts"].dt.date
+        c["snap"] = (c["known_at"] + pd.Timedelta(hours=5, minutes=30)).dt.strftime("%H:%M:%S" if bucket < pd.Timedelta(minutes=1) else "%H:%M")
+        return c
     days = sorted(ch["ts"].dt.date.unique())
-    want = {snap_utc(d, s) - pd.Timedelta(minutes=1): (d, s) for d in days for s in SNAP_TIMES_IST}
+    want = {snap_utc(d, s) - bucket: (d, s) for d in days for s in SNAP_TIMES_IST}
     c = ch[ch["ts"].isin(want.keys())].copy()
     c["date"] = c["ts"].map(lambda t: want[t][0])
     c["snap"] = c["ts"].map(lambda t: want[t][1])
-    c["known_at"] = c["ts"] + pd.Timedelta(minutes=1)
+    c["known_at"] = c["ts"] + bucket
     return c
 
 
-def pcr_table(ch: pd.DataFrame, max_k: float) -> pd.DataFrame:
+def pcr_table(ch: pd.DataFrame, max_k: float, snaps: str = "fixed", bucket: pd.Timedelta = pd.Timedelta(minutes=1)) -> pd.DataFrame:
     """Put/call OI and session-volume ratios at the snapshots, front expiry, |k| <= max_k (np.inf for the full chain)."""
     if ch is None or not len(ch):
         return pd.DataFrame()
     c = ch.copy()
     c["day"] = c["ts"].dt.date
     c["cumvol"] = c.sort_values("ts").groupby(["day", "expiry", "strike", "cp"])["volume"].cumsum()
-    s = _at_snaps(_front(c))
+    s = _at_snaps(_front(c), snaps, bucket)
     s = s[s["k"].abs() <= max_k]
     if s.empty:
         return pd.DataFrame()
@@ -68,7 +76,7 @@ def pcr_table(ch: pd.DataFrame, max_k: float) -> pd.DataFrame:
 @register(Spec(id="pcr_near", version=1, family="positioning", grid="snap", inputs=("chain",), params={"max_k": 0.03}, tickets=("SCRUM-148",),
                doc="B2: put/call OI and volume ratios within 3 % of the forward, front expiry (near-money only)."))
 def pcr_near(ctx: Context, p: dict) -> pd.DataFrame:
-    return pcr_table(ctx.get("chain"), p["max_k"])
+    return pcr_table(ctx.get("chain"), p["max_k"], ctx.snaps)
 
 
 def _close_rows(ch: pd.DataFrame) -> pd.DataFrame:
@@ -136,12 +144,13 @@ def vol_demand_proxy(ctx: Context, p: dict) -> pd.DataFrame:
     return out
 
 
-def gex_table(ch: pd.DataFrame, participant: pd.DataFrame | None, max_k: float, r: float, gamma_col: str = "gamma") -> pd.DataFrame:
+def gex_table(ch: pd.DataFrame, participant: pd.DataFrame | None, max_k: float, r: float, gamma_col: str = "gamma", snaps: str = "fixed",
+              bucket: pd.Timedelta = pd.Timedelta(minutes=1)) -> pd.DataFrame:
     """Gamma exposure at the snapshots over strikes with |k| <= max_k (all expiries present): US convention and, when participant data
     is given, the Indian convention; and the gamma flip level for the US convention."""
     if ch is None or not len(ch):
         return pd.DataFrame()
-    s = _at_snaps(ch)
+    s = _at_snaps(ch, snaps, bucket)
     s = s[(s["k"].abs() <= max_k) & s[gamma_col].notna() & s["oi"].notna()]
     if s.empty:
         return pd.DataFrame()
@@ -165,12 +174,12 @@ def gex_table(ch: pd.DataFrame, participant: pd.DataFrame | None, max_k: float, 
     for (d, sn), g in s.groupby(["date", "snap"]):
         f0 = float(g["fwd"].iloc[0])
         grid = f0 * np.linspace(0.97, 1.03, 49)
-        tot = []
-        for f in grid:
-            gk = black76.greeks((g["cp"] == "C").to_numpy(), f, g["strike"].to_numpy(), g["t"].to_numpy(), g["iv"].to_numpy(), r)["gamma"]
-            u = np.nan_to_num(gk) * g["oi"].to_numpy() * g["lot"].fillna(1).to_numpy() * f ** 2 * 0.01
-            tot.append(float(np.where(g["cp"] == "C", u, -u).sum()))
-        tot = np.array(tot)
+        is_c = (g["cp"] == "C").to_numpy()
+        f2 = grid[:, None]                                            # every grid forward at once: (49, contracts)
+        gk = black76.greeks(np.broadcast_to(is_c, (len(grid), len(g))), f2, g["strike"].to_numpy()[None, :], g["t"].to_numpy()[None, :],
+                            g["iv"].to_numpy()[None, :], r)["gamma"]
+        u = np.nan_to_num(gk) * (g["oi"].to_numpy() * g["lot"].fillna(1).to_numpy())[None, :] * f2 ** 2 * 0.01
+        tot = np.where(is_c[None, :], u, -u).sum(axis=1)
         sgn = np.sign(tot)
         ch_idx = np.where(np.diff(sgn) != 0)[0]
         flip = np.nan
@@ -189,7 +198,7 @@ def gex(ctx: Context, p: dict) -> pd.DataFrame:
     ch = ctx.get("chain")
     if ch is None or not len(ch):
         return pd.DataFrame()
-    return gex_table(ch, ctx.raw.get("participant"), p["max_k"], ctx.r)
+    return gex_table(ch, ctx.raw.get("participant"), p["max_k"], ctx.r, snaps=ctx.snaps)
 
 
 @register(Spec(id="participant_positioning", version=1, family="positioning", grid="daily", inputs=("participant",), params={"window": 250},

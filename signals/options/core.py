@@ -376,6 +376,10 @@ def atm_snaps(ctx: Context) -> pd.DataFrame:
         return pd.DataFrame()
     a = a.copy()
     a["date"] = pd.to_datetime(a["ts"]).dt.date
+    if ctx.snaps == "all":                     # every bar (SCRUM-198): snap is the IST time the bar ends, known at that time
+        a["known_at"] = pd.to_datetime(a["ts"]) + pd.Timedelta(minutes=1)
+        a["snap"] = (a["known_at"] + pd.Timedelta(hours=5, minutes=30)).dt.strftime("%H:%M")
+        return a.reset_index(drop=True)
     rows = []
     for d, g in a.groupby("date"):
         for s in SNAP_TIMES_IST:
