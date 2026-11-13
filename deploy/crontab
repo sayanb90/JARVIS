@@ -13,6 +13,10 @@ JARVIS=/home/jarvis/JARVIS
 # (NYSE closes 21:00 UTC in winter).  It runs an hour after the 1-minute bars job below because both take the scheduler lock: with about
 # two thousand tickers the bars job can take 20 to 30 minutes, and a second scheduler that finds the lock held exits.
 0 23 * * 1-5   cd $JARVIS && python scheduler.py --job ohlc-daily  >> logs/scheduler.log 2>&1
+# NSE index members and weights (SCRUM-183): member lists of NIFTY 50, BANK, FIN, NEXT 50, MIDCAP SELECT, the monthly factsheets' top ten
+# and approximate weights from the Yahoo shares and the day's close, so after the daily OHLC job above.  A snapshot is stored only when
+# something changed; about 10 requests.
+50 23 * * 1-5  cd $JARVIS && python -m data_layer.index_weights refresh >> logs/index-weights.log 2>&1
 # Intraday 1-minute bars for every market but India (US, UK, EU, JP, KR, TW, SG, CN, HK) from Yahoo, once after the last close.  Each run re-fetches the last 5 days
 # (idempotent) and also looks for weekdays in the last 28 with no rows for a market (see data_layer/gaps.py): those are fetched back to the oldest one, since
 # Yahoo keeps only 30 days of 1-minute bars.  A weekday still empty after two nights is taken to be a holiday.  India has its own job above.

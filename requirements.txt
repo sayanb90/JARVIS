@@ -1,5 +1,6 @@
 requests>=2.31.0
 pandas>=2.0.0
+pypdf>=4.0.0           # NSE Indices' factsheet PDFs: the official top-ten weights (data_layer/index_weights.py)
 xlrd>=2.0.1            # NSE's FII derivative statistics are Excel 97 .xls files (data_layer/fii_derivatives.py)
 python-dotenv>=1.0.0
 yfinance>=0.2.40

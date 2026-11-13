@@ -103,6 +103,8 @@ CATALOG = [
           "file", "yf_fundamentals/profile.parquet", vendor="Yahoo"),
     Table("reference", "corporate_actions", "Dividends and splits", "Corporate actions per symbol and date: kind (dividend or split) and value.",
           "file", "yf_fundamentals/actions.parquet", vendor="Yahoo"),
+    Table("reference", "index_weights", "Index weights", "Members of the NSE option indices and their weights, as dated snapshots: official top ten and an approximate full list.",
+          "file", "reference/index_weights.parquet", "date", vendor="NSE"),
     Table("reference", "fx_rates", "FX rates", "Daily closes of the currency pairs, as US dollars per unit of each currency, used to convert statements into the price's currency.",
           "file", "fx/rates.parquet", vendor="Yahoo"),
     Table("market", "ticks", "Ticks", "Every update from the live feed: last price, cumulative volume, best bid/ask and sizes, open interest.", "days", "ticks", "ts", vendor="Upstox"),
