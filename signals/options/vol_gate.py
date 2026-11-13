@@ -18,6 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from analytics import realised
 from analytics.realised import SESSIONS_PER_YEAR
 from signals.framework import Context, Spec, register, trailing_pct
 from signals.options.core import OPEN_UTC
@@ -61,6 +62,47 @@ def vrp(ctx: Context, p: dict) -> pd.DataFrame:
              [c for c in ("vix", "vix_vrp_diff") if c in s.columns]]
 
 
+@register(Spec(id="vrp_intraday", version=1, family="vol_gate", grid="snap", inputs=("atm_snaps", "daily", "tod", "spot"),
+               tickets=("SCRUM-198",), params={"horizon": 5, "frac_window": 20}, warmup_days=0,
+               doc="A1 intraday: the daily HAR forecast as the anchor, revised during the session by what has been realised so far "
+                   "against what the time-of-day profile says should have been by now.  rv_so_far_ratio > 1 means the day is running "
+                   "hot; rv_fc_upd is the 5-session forecast with today's revision spread over its 5 sessions; vrp_intraday = iv7 - "
+                   "rv_fc_upd."))
+def vrp_intraday(ctx: Context, p: dict) -> pd.DataFrame:
+    s = _with_forecast(ctx, ctx.get("atm_snaps"), p["horizon"])
+    d, prof, sp = ctx.get("daily"), ctx.get("tod"), ctx.get("spot")
+    if not len(s) or d is None or not len(d) or prof is None or not len(prof) or not len(sp):
+        return pd.DataFrame()
+    # the 1-session forecast of total variance and the within-day share of it (trailing mean of rv / tv over earlier sessions)
+    f = d[["known_at", "har_1", "rv", "tv"]].copy()
+    f["in_frac"] = (f["rv"] / f["tv"]).clip(0.05, 1.0).rolling(p["frac_window"], min_periods=5).mean()
+    f = f.dropna(subset=["har_1", "in_frac"]).rename(columns={"known_at": "fc1_at"})[["fc1_at", "har_1", "in_frac"]].sort_values("fc1_at")
+    s["_q"] = pd.to_datetime(s["known_at"]) - pd.Timedelta(seconds=1)
+    s = pd.merge_asof(s.sort_values("_q"), f, left_on="_q", right_on="fc1_at", direction="backward", allow_exact_matches=False)
+    # realised variance so far today, from the index minutes that ended by the bucket's end
+    r = realised.minute_returns(sp)
+    r["date"] = r["day"].dt.date
+    r["end"] = r["ts"] + pd.Timedelta(minutes=1)
+    r = r.sort_values("end")
+    r["rv_cum"] = (r["r"] ** 2).groupby(r["date"]).cumsum()
+    s = pd.merge_asof(s.sort_values("known_at"), r[["end", "date", "rv_cum", "minute"]].rename(columns={"date": "_d"}),
+                      left_on="known_at", right_on="end", direction="backward")
+    s.loc[s["_d"] != s["date"], ["rv_cum", "minute"]] = np.nan          # nothing realised yet today
+    s["rv_cum"] = s["rv_cum"].fillna(0.0)
+    s["minute"] = s["minute"].fillna(-1).astype(int)
+    rem = prof[["date", "minute", "remaining"]]
+    s = s.merge(rem, on=["date", "minute"], how="left")
+    s.loc[s["minute"] < 0, "remaining"] = 1.0
+    exp_in = s["har_1"] * s["in_frac"]                                # expected within-day variance today
+    s["rv_so_far_ratio"] = s["rv_cum"] / (exp_in * (1 - s["remaining"])).where(s["remaining"] < 1)
+    day_var = s["rv_cum"] + s["remaining"] * exp_in + s["har_1"] * (1 - s["in_frac"])     # so far + rest of today + overnight share
+    s["rv_day_exp"] = np.sqrt(day_var * SESSIONS_PER_YEAR)
+    s["rv_fc_upd"] = np.sqrt((s["rv_fc"] ** 2 + (day_var - s["har_1"]) * SESSIONS_PER_YEAR / p["horizon"]).clip(lower=0))
+    s["vrp_intraday"] = s["iv7"] - s["rv_fc_upd"]
+    return s[["date", "snap", "known_at", "iv7", "rv_fc", "rv_cum", "remaining", "rv_so_far_ratio", "rv_day_exp", "rv_fc_upd",
+              "vrp_intraday"]].sort_values("known_at").reset_index(drop=True)
+
+
 @register(Spec(id="rv_over_iv", version=1, family="vol_gate", grid="snap", inputs=("vrp",), params={"margin": 0.01}, tickets=("SCRUM-177",),
                doc="A2: buy trigger when the realised-volatility forecast exceeds iv7 by `margin` (1 volatility point)."))
 def rv_over_iv(ctx: Context, p: dict) -> pd.DataFrame:
@@ -92,18 +134,23 @@ def implied_move(ctx: Context, p: dict) -> pd.DataFrame:
     s["implied_move"] = s["straddle"] / s["fwd"]
     s["implied_vol_from_move"] = s["implied_move"] / (MU1 * np.sqrt(s["t"]))
     d = d.sort_values("date").reset_index(drop=True)
-    logc = np.log(d["close"])
-    rows = []
-    for _, r in s.iterrows():
-        past = d[pd.to_datetime(d["known_at"]) < pd.to_datetime(r["known_at"])]
-        n = max(p["min_days"], int(round(r["t"] * SESSIONS_PER_YEAR)))
-        if len(past) < n * 4 + 1:
-            rows.append(np.nan)
-            continue
-        lc = logc.iloc[past.index]
-        moves = (lc.diff(n).abs()).dropna().iloc[-20:]
-        rows.append(float(moves.mean()) / (MU1 * np.sqrt(n / SESSIONS_PER_YEAR)) if len(moves) else np.nan)
-    s["realised_vol_from_move"] = rows
+    logc = np.log(d["close"]).to_numpy()
+    ka = pd.to_datetime(d["known_at"]).to_numpy()
+    n_past = np.searchsorted(ka, pd.to_datetime(s["known_at"]).to_numpy(), side="left")   # sessions known strictly before the snapshot
+    horizon = np.maximum(p["min_days"], np.round(s["t"].to_numpy() * SESSIONS_PER_YEAR).astype(int))
+    memo: dict[tuple[int, int], float] = {}                 # every minute of a session shares its past: compute each (past, n) once
+
+    def rv_move(m: int, n: int) -> float:
+        if (m, n) not in memo:
+            if m < n * 4 + 1:
+                memo[(m, n)] = np.nan
+            else:
+                lc = logc[:m]
+                moves = np.abs(lc[n:] - lc[:-n])[-20:]
+                memo[(m, n)] = float(moves.mean()) / (MU1 * np.sqrt(n / SESSIONS_PER_YEAR)) if len(moves) else np.nan
+        return memo[(m, n)]
+
+    s["realised_vol_from_move"] = [rv_move(int(m), int(n)) for m, n in zip(n_past, horizon)]
     s["move_ratio"] = s["implied_vol_from_move"] / s["realised_vol_from_move"]
     return s[["date", "snap", "known_at", "expiry", "t", "straddle", "fwd", "implied_move", "implied_vol_from_move", "realised_vol_from_move", "move_ratio"]]
 

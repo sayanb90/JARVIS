@@ -291,7 +291,8 @@ def gex_full(ctx: Context, p: dict) -> pd.DataFrame:
     ch = _live_gamma_chain(ctx)
     if not len(ch):
         return ch
-    return gex_table(ch, ctx.raw.get("participant"), np.inf, ctx.r, gamma_col="gamma_use", snaps=ctx.snaps, bucket=ctx.bucket_td)
+    return gex_table(ch, ctx.raw.get("participant"), np.inf, ctx.r, gamma_col="gamma_use", snaps=ctx.snaps, bucket=ctx.bucket_td,
+                     since=ctx.since)
 
 
 @register(_spec("pin_full", "B1 full chain: on expiry day, the strike with the most OI (calls + puts) over all strikes, and the forward's "

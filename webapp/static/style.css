@@ -217,3 +217,8 @@ input[type=text],input[list]{font:inherit;font-size:13.5px;color:var(--fg);backg
 input[type=text]:hover,input[list]:hover,input[type=text]:focus-visible,input[list]:focus-visible{border-color:var(--accent);outline:none}
 input::placeholder{color:var(--muted)}
 .field.wide input{min-width:220px}
+
+/* Signals tab sparklines (SCRUM-199) */
+.spark{display:block}
+.spark polyline{fill:none;stroke:var(--accent);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
+td.wrap{white-space:normal;min-width:220px}

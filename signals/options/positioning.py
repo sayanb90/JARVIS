@@ -22,6 +22,8 @@ near-money measure; full-chain versions come from the live feed (signals.options
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
@@ -145,7 +147,7 @@ def vol_demand_proxy(ctx: Context, p: dict) -> pd.DataFrame:
 
 
 def gex_table(ch: pd.DataFrame, participant: pd.DataFrame | None, max_k: float, r: float, gamma_col: str = "gamma", snaps: str = "fixed",
-              bucket: pd.Timedelta = pd.Timedelta(minutes=1)) -> pd.DataFrame:
+              bucket: pd.Timedelta = pd.Timedelta(minutes=1), since: Optional[pd.Timestamp] = None) -> pd.DataFrame:
     """Gamma exposure at the snapshots over strikes with |k| <= max_k (all expiries present): US convention and, when participant data
     is given, the Indian convention; and the gamma flip level for the US convention."""
     if ch is None or not len(ch):
@@ -171,6 +173,8 @@ def gex_table(ch: pd.DataFrame, participant: pd.DataFrame | None, max_k: float, 
         out = pd.merge_asof(out.sort_values("known_at"), pt, left_on="known_at", right_on="pt_at", direction="backward")
         out["gex_participant"] = -np.sign(out["client_net_calls"]) * out["gex_calls"] - np.sign(out["client_net_puts"]) * out["gex_puts"]
     flips = []
+    if since is not None:                        # live: the flip search only for the rows that will be written (Context.since)
+        s = s[s["known_at"] > since]
     for (d, sn), g in s.groupby(["date", "snap"]):
         f0 = float(g["fwd"].iloc[0])
         grid = f0 * np.linspace(0.97, 1.03, 49)
@@ -187,7 +191,7 @@ def gex_table(ch: pd.DataFrame, participant: pd.DataFrame | None, max_k: float, 
             i = ch_idx[np.argmin(np.abs(grid[ch_idx] - f0))]
             flip = float(grid[i] - tot[i] * (grid[i + 1] - grid[i]) / (tot[i + 1] - tot[i]))
         flips.append({"date": d, "snap": sn, "gamma_flip": flip})
-    out = out.merge(pd.DataFrame(flips), on=["date", "snap"], how="left")
+    out = out.merge(pd.DataFrame(flips, columns=["date", "snap", "gamma_flip"]), on=["date", "snap"], how="left")
     out["flip_dist"] = (out["fwd"] - out["gamma_flip"]) / out["fwd"]
     return out
 
@@ -198,7 +202,7 @@ def gex(ctx: Context, p: dict) -> pd.DataFrame:
     ch = ctx.get("chain")
     if ch is None or not len(ch):
         return pd.DataFrame()
-    return gex_table(ch, ctx.raw.get("participant"), p["max_k"], ctx.r, snaps=ctx.snaps)
+    return gex_table(ch, ctx.raw.get("participant"), p["max_k"], ctx.r, snaps=ctx.snaps, since=ctx.since)
 
 
 @register(Spec(id="participant_positioning", version=1, family="positioning", grid="daily", inputs=("participant",), params={"window": 250},

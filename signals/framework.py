@@ -95,7 +95,8 @@ class Context:
     daily frames have `date` and `known_at`.  `cut` (optional) is the moment the data was cut at, used by the prefix test."""
 
     def __init__(self, underlying: str, raw: dict[str, pd.DataFrame], cut: Optional[pd.Timestamp] = None, r: float = 0.065,
-                 cache: Optional[dict] = None, signals: Optional[dict] = None, bucket: str = "1min", snaps: str = "fixed"):
+                 cache: Optional[dict] = None, signals: Optional[dict] = None, bucket: str = "1min", snaps: str = "fixed",
+                 since: Optional[pd.Timestamp] = None):
         """`cache` pre-sets providers (e.g. the ATM table read back from the store) and `signals` pre-sets signal outputs, so a long
         history can be computed in two passes without rebuilding the option chain.
 
@@ -110,6 +111,7 @@ class Context:
         if snaps not in ("fixed", "all"):
             raise ValueError(f"snaps must be 'fixed' or 'all', not {snaps!r}")
         self.snaps = snaps
+        self.since = since
         self._cache: dict[str, object] = dict(cache or {})
         self._signals: dict[str, pd.DataFrame] = dict(signals or {})
         self._stack: list[str] = []
@@ -215,19 +217,22 @@ def check_prefix_invariance(sid: str, underlying: str, raw: dict[str, pd.DataFra
 
 
 # ---------------------------------------------------------------------------------------------- store and trial log
-def output_dir(root: Path, spec: Spec, underlying: str, day: date) -> Path:
-    return Path(root) / "signals" / spec.id / f"v{spec.version}" / f"underlying={underlying}" / f"date={day}"
+def output_dir(root: Path, spec: Spec, underlying: str, day: date, layer: Optional[str] = None) -> Path:
+    base = Path(root) / "signals" / spec.id / f"v{spec.version}"
+    if layer:                                    # e.g. intraday/bucket=1m: the per-bucket history from the live runner (SCRUM-197)
+        base = base / layer
+    return base / f"underlying={underlying}" / f"date={day}"
 
 
-def write_output(root: Path, spec: Spec, df: pd.DataFrame) -> int:
+def write_output(root: Path, spec: Spec, df: pd.DataFrame, layer: Optional[str] = None) -> int:
     """Write one output, one folder per (underlying, day), replacing what was there for those days.  Returns rows written."""
     if df is None or not len(df):
         return 0
-    key = "ts" if spec.grid == "1m" else "date"
+    key = "ts" if (spec.grid == "1m" or layer) and "ts" in df.columns else "date"
     days = pd.to_datetime(df[key]).dt.date
     n = 0
     for (u, d), part in df.groupby([df["underlying"], days]):
-        folder = output_dir(root, spec, u, d)
+        folder = output_dir(root, spec, u, d, layer)
         folder.mkdir(parents=True, exist_ok=True)
         tmp = folder / "part.parquet.tmp"
         part.to_parquet(tmp, index=False)

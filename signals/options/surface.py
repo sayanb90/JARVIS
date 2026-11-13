@@ -155,8 +155,11 @@ def vol_of_vol(ctx: Context, p: dict) -> pd.DataFrame:
     return out
 
 
-@register(Spec(id="skew", version=1, family="surface", grid="snap", inputs=("atm_snaps",), tickets=("SCRUM-148",),
-               doc="A11: IV 2 % below the forward minus IV 2 % above (and at 1 %), front expiry, and the change since the previous session."))
+@register(Spec(id="skew", version=2, family="surface", grid="snap", inputs=("atm_snaps",), tickets=("SCRUM-148", "SCRUM-198"),
+               params={"halflife_min": 5},
+               doc="A11: IV 2 % below the forward minus IV 2 % above (and at 1 %), front expiry, and the change since the previous session.  "
+                   "v2 adds skew1_s and skew2_s: an exponential average over the session (half-life 5 minutes, on event time, gaps carried) "
+                   "so one wing strike that was stale and prints again does not make the skew jump."))
 def skew(ctx: Context, p: dict) -> pd.DataFrame:
     s = _snaps(ctx)
     if not len(s):
@@ -167,7 +170,15 @@ def skew(ctx: Context, p: dict) -> pd.DataFrame:
     s = s.sort_values(["snap", "date"])
     s["d_skew1"] = s.groupby("snap")["skew1"].diff()
     s["d_skew2"] = s.groupby("snap")["skew2"].diff()
-    return s[["date", "snap", "known_at", "expiry", "skew1", "skew2", "d_skew1", "d_skew2"]]
+    s = s.sort_values("known_at")
+    hl = pd.Timedelta(minutes=p["halflife_min"])
+    for c in ("skew1", "skew2"):
+        s[f"{c}_s"] = np.nan
+        if ctx.snaps != "all":                  # a per-bar average: not defined on three snapshots a day
+            continue
+        for _, g in s.groupby(["date", "expiry"], sort=False):
+            s.loc[g.index, f"{c}_s"] = g[c].ewm(halflife=hl, times=pd.to_datetime(g["known_at"]), ignore_na=True).mean().to_numpy()
+    return s[["date", "snap", "known_at", "expiry", "skew1", "skew2", "d_skew1", "d_skew2", "skew1_s", "skew2_s"]].sort_values(["snap", "date"])
 
 
 @register(Spec(id="curvature", version=1, family="surface", grid="snap", inputs=("atm_snaps",), tickets=("SCRUM-148",),

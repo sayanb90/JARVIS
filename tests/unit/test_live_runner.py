@@ -50,10 +50,31 @@ def day():
     return split_day(make_raw())
 
 
+def trim(hist: dict, days: int = 3) -> dict:
+    """Option and future minutes of the last `days` sessions only, as history_for loads them (index minutes stay whole)."""
+    out = dict(hist)
+    for k in ("opt_1m", "fut_1m"):
+        df = hist.get(k)
+        if df is not None and len(df):
+            d = pd.to_datetime(df["ts"]).dt.normalize()
+            out[k] = df[d >= sorted(d.unique())[-days]]
+    return out
+
+
 @pytest.fixture(scope="module")
 def replayed(day):
     hist, ticks, _ = day
-    return replay("NIFTY", hist, ticks, step="5min")
+    return replay("NIFTY", trim(hist), ticks, step="5min")
+
+
+@pytest.fixture(scope="module")
+def batch(day):
+    """The batch for the day: every live signal, all the day's ticks at once."""
+    hist, ticks, _ = day
+    r = LiveRunner("NIFTY", hist, tick_window=pd.Timedelta(days=1), option_sessions=100, index_sessions=1000)   # nothing trimmed
+    r.ingest(ticks)
+    r.watermark = r.watermark.floor("1min") + pd.Timedelta("1min")
+    return r.cycle()
 
 
 def _same(a: pd.DataFrame, b: pd.DataFrame, sid: str):
@@ -69,14 +90,14 @@ def _same(a: pd.DataFrame, b: pd.DataFrame, sid: str):
 
 
 @pytest.mark.parametrize("sid", live_signal_ids())
-def test_replay_equals_batch(day, replayed, sid):
-    hist, ticks, _ = day
-    ref = batch_reference(hist, ticks, sid)
+def test_replay_equals_batch(replayed, batch, sid):
+    """Bucket by bucket with three sessions of option history (as live loads it) against the whole day at once with the full history."""
+    ref = batch[batch["signal"] == sid] if len(batch) else batch
     got = replayed[replayed["signal"] == sid] if len(replayed) else replayed
     if ref.empty:
         assert got.empty, f"{sid}: replay wrote rows the batch does not have"
         pytest.skip(f"{sid}: no rows on the synthetic day")
-    _same(got, ref[ref["signal"] == sid], sid)
+    _same(got, ref, sid)
 
 
 def test_only_closed_buckets_are_written(day):

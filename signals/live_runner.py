@@ -17,8 +17,9 @@ prefix-invariant (tests), so the value written for a bucket is the value the bat
 after-close job calls replay() on the same day's ticks, so history for the live era is computed by exactly this code.
 
 Guardrails: each cycle's wall time is measured; when 10 s cycles overrun the cadence three times in a row the runner falls back to 1 m
-for the rest of the session and logs it.  The process runs at low priority and, as a systemd service, under a memory cap
-(deploy/jarvis-signals-live.service).  Cycle time, rows and memory go to logs/signals-live.log.
+for the rest of the session and logs it.  The process runs at low priority (nice, from cron) and caps its own address space
+(JARVIS_SIGNAL_LIVE_MAX_MB, default 2048): a cycle that hits the cap fails with MemoryError, is logged and skipped, and the collectors
+are never starved.  Cycle time, rows and peak memory go to logs/signals-live.log.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 from signals import catalogue  # noqa: F401  (registers every signal)
+from signals import normalise
 from signals.framework import REGISTRY, Context, specs
 from signals.options.core import INDEX_SYMBOL, STALE_MAX, VIX_SYMBOL, build_chain, rate_table
 
@@ -97,6 +99,41 @@ def bar_volume(bars: pd.DataFrame) -> pd.Series:
     return v.clip(lower=0).fillna(0).reindex(bars.index)
 
 
+def _last_sessions(df: Optional[pd.DataFrame], n: int) -> Optional[pd.DataFrame]:
+    if df is None or not len(df):
+        return df
+    d = pd.to_datetime(df["ts"]).dt.normalize()
+    days = sorted(d.unique())[-n:]
+    return df[d.isin(days)]
+
+
+def daily_dependencies(ids: Iterable[str]) -> list[str]:
+    """Daily signals that the live signals read through ctx.signal (their `inputs`), transitively."""
+    seen, todo = set(), list(ids)
+    while todo:
+        sid = todo.pop()
+        for name in REGISTRY[sid][0].inputs if sid in REGISTRY else ():
+            if name in REGISTRY and name not in seen:
+                seen.add(name)
+                todo.append(name)
+    return sorted(x for x in seen if REGISTRY[x][0].grid == "daily")
+
+
+def daily_inputs(underlying: str, history: dict, ids: Iterable[str], store: Optional[Path] = None) -> dict:
+    """The daily signals the live ones need, known at the last close: from the nightly store when given, else computed once on the
+    history (tests, or a store not filled yet)."""
+    from signals.framework import read_output
+    out = {}
+    ctx = None
+    for sid in daily_dependencies(ids):
+        df = read_output(store, sid, underlying) if store is not None else pd.DataFrame()
+        if df is None or not len(df):
+            ctx = ctx or Context(underlying, history)
+            df = ctx.compute(sid)
+        out[sid] = df
+    return out
+
+
 # ---------------------------------------------------------------------------------------------- the runner
 @dataclass
 class CycleStats:
@@ -122,6 +159,11 @@ class LiveRunner:
     emitted_to: Optional[pd.Timestamp] = None        # rows with known_at up to here have been written
     overruns: int = 0
     stats: list = field(default_factory=list)
+    baselines: dict = field(default_factory=dict)    # signal -> time-of-day baseline from earlier sessions (signals.normalise)
+    fixed: Optional[dict] = None                     # providers that only depend on earlier sessions, computed once a session
+    daily_signals: Optional[dict] = None             # daily signals the live ones read (e.g. spot_vol_beta), from the nightly store
+    index_sessions: int = 30                         # index and VIX history per cycle (noise_band looks back 14 sessions)
+    option_sessions: int = 1                         # option and future history per cycle (day-over-day changes)
 
     def __post_init__(self):
         self.ids = self.ids or live_signal_ids()
@@ -175,9 +217,20 @@ class LiveRunner:
 
         def cat(name, today):
             prev = h.get(name)
-            today = today.reindex(columns=cols) if len(today) else pd.DataFrame(columns=cols)
-            return pd.concat([prev, today], ignore_index=True) if prev is not None and len(prev) else today
+            if not len(today):
+                return prev if prev is not None else pd.DataFrame(columns=cols)
+            today = today.reindex(columns=cols)
+            out = pd.concat([prev, today], ignore_index=True) if prev is not None and len(prev) else today.reset_index(drop=True)
+            for c in ("open", "high", "low", "close", "volume", "oi"):
+                out[c] = pd.to_numeric(out[c], errors="coerce").astype(float)
+            out["ts"] = pd.to_datetime(out["ts"])
+            return out
 
+        raw = dict(h)
+        for name, keep in (("index_1m", self.index_sessions), ("vix_1m", self.index_sessions), ("opt_1m", self.option_sessions),
+                           ("fut_1m", self.option_sessions)):
+            raw[name] = _last_sessions(h.get(name), keep)
+        h = raw
         raw = dict(h)
         raw["index_1m"] = cat("index_1m", b[sym == self.index_symbol])
         raw["vix_1m"] = cat("vix_1m", b[sym == VIX_SYMBOL])
@@ -203,6 +256,21 @@ class LiveRunner:
             self.chain = pd.concat([self.chain, new], ignore_index=True) if len(self.chain) else new.reset_index(drop=True)
         return self.chain
 
+    def _fixed_providers(self, day: pd.Timestamp) -> dict:
+        """The daily realised measures with the HAR forecast, and the time-of-day variance profile, depend only on sessions before
+        today (every row a signal reads from them was known at the last close), so they are computed once at the start instead of
+        every cycle.  Today's profile row is built from earlier sessions; a two-minute placeholder makes today a session to profile."""
+        h = dict(self.history)
+        stub = pd.DataFrame({"ts": [day + pd.Timedelta(hours=3, minutes=45), day + pd.Timedelta(hours=3, minutes=46)],
+                             "symbol": self.index_symbol, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 0, "oi": np.nan})
+        idx = h.get("index_1m")
+        h["index_1m"] = pd.concat([idx, stub], ignore_index=True) if idx is not None and len(idx) else stub
+        c = Context(self.underlying, h)
+        daily = c.get("daily")
+        daily = daily[pd.to_datetime(daily["known_at"]) < day] if daily is not None and len(daily) else daily
+        tod = c.get("tod")
+        return {"daily": daily, "tod": tod}
+
     def cycle(self, now: Optional[datetime] = None) -> pd.DataFrame:
         """Compute every live signal for the buckets closed since the last cycle.  Returns the new rows (signal, ts, known_at, ...)."""
         t0 = _time.perf_counter()
@@ -210,13 +278,21 @@ class LiveRunner:
         if upto is None or (self.emitted_to is not None and upto <= self.emitted_to):
             return pd.DataFrame()
         raw, opt_today = self._today_raw(upto)
-        ctx = Context(self.underlying, raw, bucket="1min", snaps="all")
+        if self.fixed is None:
+            self.fixed = self._fixed_providers(upto.normalize())
+        ctx = Context(self.underlying, raw, bucket="1min", snaps="all", cache=dict(self.fixed))
         if self.hist_chain is None:
-            self.hist_chain = Context(self.underlying, self.history).get("chain") if self.history.get("opt_1m") is not None and len(self.history["opt_1m"]) else pd.DataFrame()
+            hist_opt = _last_sessions(self.history.get("opt_1m"), self.option_sessions)
+            self.hist_chain = (Context(self.underlying, dict(self.history, opt_1m=hist_opt)).get("chain")
+                               if hist_opt is not None and len(hist_opt) else pd.DataFrame())
+            if self.daily_signals is None:
+                self.daily_signals = daily_inputs(self.underlying, self.history, self.ids)
         chain = self._extend_chain(ctx, opt_today, upto)
-        ctx = Context(self.underlying, raw, bucket="1min", snaps="all",
-                      cache={"chain": pd.concat([self.hist_chain, chain], ignore_index=True) if len(self.hist_chain) else chain})
-        tick_ctx = Context(self.underlying, raw, bucket=self.bucket, snaps="all") if self.bucket != "1min" else ctx
+        since = self.emitted_to
+        ctx = Context(self.underlying, raw, bucket="1min", snaps="all", since=since, signals=dict(self.daily_signals),
+                      cache=dict(self.fixed, chain=pd.concat([self.hist_chain, chain], ignore_index=True) if len(self.hist_chain) else chain))
+        tick_ctx = (Context(self.underlying, raw, bucket=self.bucket, snaps="all", since=since, cache=dict(self.fixed),
+                            signals=dict(self.daily_signals)) if self.bucket != "1min" else ctx)
         out = []
         lo = self.emitted_to
         for sid in self.ids:
@@ -236,6 +312,9 @@ class LiveRunner:
                 if "signal" in part.columns:                       # a signal's own column of that name (noise_band) keeps its value
                     part = part.rename(columns={"signal": "signal_value"})
                 part.insert(0, "signal", sid)
+                base = self.baselines.get(sid)
+                if base is not None and len(base) and normalise.one_row_per_bucket(part):
+                    part = normalise.apply_tod_z(part, base, normalise.numeric_cols(part))
                 part["bucket"] = c.bucket
                 part["underlying"] = self.underlying
                 out.append(part)
@@ -253,10 +332,10 @@ class LiveRunner:
 
 
 def replay(underlying: str, history: dict, ticks: pd.DataFrame, bucket: str = "1min", step: Optional[str] = None,
-           ids: Optional[list[str]] = None) -> pd.DataFrame:
+           ids: Optional[list[str]] = None, baselines: Optional[dict] = None) -> pd.DataFrame:
     """Run the live runner over a day's recorded ticks, `step` at a time (default: one bucket), and return every row it would have
     written.  The after-close job uses this for the live era; the tests compare it with the batch."""
-    r = LiveRunner(underlying, history, bucket=bucket, ids=ids)
+    r = LiveRunner(underlying, history, bucket=bucket, ids=ids, baselines=baselines or {})
     t = ticks.copy()
     t["fts"] = pd.to_datetime(t["fts"] if "fts" in t.columns else t["ts"])
     t = t.sort_values("fts", kind="stable")
@@ -274,3 +353,138 @@ def replay(underlying: str, history: dict, ticks: pd.DataFrame, bucket: str = "1
         if len(rows):
             out.append(rows)
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------------------------- reading the day's tick files
+class TickFiles:
+    """New tick files of one day: the F&O segment (options, futures) and the equity segment (index, VIX).  Each file is read once; a
+    file still being written is skipped until it is complete (the feed writes a temporary name and renames it)."""
+
+    def __init__(self, lake: Path, day: date):
+        from data_layer import tick_store
+        self.folders = [tick_store.segment_folder(Path(lake), day, "fo"), tick_store.segment_folder(Path(lake), day, "eq"),
+                        tick_store.legacy_folder(Path(lake), day)]
+        self.seen: set[str] = set()
+
+    def new(self) -> pd.DataFrame:
+        parts = []
+        for f in self.folders:
+            if not f.is_dir():
+                continue
+            for p in sorted(f.glob("*.parquet")):
+                if p.name in self.seen or p.name == "ticks.parquet":       # the compacted day file is written after the session
+                    continue
+                try:
+                    parts.append(pd.read_parquet(p))
+                except Exception:                                          # noqa: BLE001 -- half-written: try again next cycle
+                    continue
+                self.seen.add(p.name)
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def load_baselines(store: Path, underlying: str, day: date, ids: Iterable[str], bucket: str = "1min",
+                   window: int = normalise.WINDOW) -> dict:
+    """Time-of-day baselines per signal from the per-bucket history in the store (the last `window` sessions before `day`)."""
+    out = {}
+    layer = f"intraday/bucket={'10s' if bucket == '10s' else '1m'}"
+    for sid in ids:
+        spec = REGISTRY[sid][0]
+        base = Path(store) / "signals" / sid / f"v{spec.version}" / layer / f"underlying={underlying}"
+        files = sorted(f for f in base.glob("date=*/part.parquet") if f.parent.name.split("=", 1)[1] < str(day))[-window:]
+        if len(files) < normalise.MIN_SESSIONS:
+            continue
+        h = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+        if normalise.one_row_per_bucket(h[pd.to_datetime(h["ts"]).dt.normalize() == pd.to_datetime(h["ts"]).dt.normalize().max()]):
+            out[sid] = normalise.baseline(h, normalise.numeric_cols(h), window)
+    return out
+
+
+def history_for(lake: Path, underlying: str, day: date) -> dict:
+    """Everything before `day` the live signals look back at: index and VIX minutes for 400 days (realised-vol forecast, VIX regime),
+    the last 5 sessions of option and future minutes (day-over-day changes), contracts, participant file, events, rates."""
+    from signals.lakeio import load_raw
+    raw = load_raw(lake, underlying, day - timedelta(days=400), day - timedelta(days=1), option_from=day - timedelta(days=40), ticks=False)
+    return raw
+
+
+MAX_MB_DEFAULT = 2048
+
+
+def cap_memory(env=None) -> int:
+    """Limit this process's address space to JARVIS_SIGNAL_LIVE_MAX_MB (default 2048 MB); returns the cap in MB."""
+    mb = int((os.environ if env is None else env).get("JARVIS_SIGNAL_LIVE_MAX_MB", MAX_MB_DEFAULT))
+    resource.setrlimit(resource.RLIMIT_AS, (mb * 1024 * 1024, resource.getrlimit(resource.RLIMIT_AS)[1]))
+    return mb
+
+
+def run_session(lake: Path, store: Path, underlyings: Iterable[str], bucket: str, until_utc: str = "10:02", clock=datetime.utcnow,
+                sleep=_time.sleep, files=None) -> dict:
+    """The session loop: every `bucket` read new tick files, compute the closed buckets, append rows to <store>/live/date=D/.  Falls back
+    from 10 s to 1 m after OVERRUNS_BEFORE_FALLBACK slow cycles in a row.  Returns a summary."""
+    from signals.options.stream import write_rows
+    day = clock().date()
+    runners = {}
+    for u in underlyings:
+        r = LiveRunner(u, history_for(lake, u, day), bucket=bucket)
+        r.baselines = load_baselines(store, u, day, r.ids, bucket)
+        r.daily_signals = daily_inputs(u, r.history, r.ids, store)
+        runners[u] = r
+    files = files or TickFiles(lake, day)
+    stop = datetime.combine(day, datetime.strptime(until_utc, "%H:%M").time())
+    cad = pd.Timedelta(bucket).total_seconds()
+    summary = {"cycles": 0, "rows": 0, "fallback": None, "max_cycle_s": 0.0}
+    while clock() < stop:
+        t0 = _time.perf_counter()
+        new = files.new()
+        for u, r in runners.items():
+            try:
+                r.ingest(new)
+                rows = r.cycle()
+            except MemoryError:
+                log.error("%s: cycle hit the memory cap and was skipped", u)
+                summary["memory_errors"] = summary.get("memory_errors", 0) + 1
+                continue
+            if len(rows):
+                summary["rows"] += write_rows(rows.to_dict("records"), store, prefix=f"chain-{u}")
+        secs = _time.perf_counter() - t0
+        summary["cycles"] += 1
+        summary["max_cycle_s"] = max(summary["max_cycle_s"], secs)
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        log.info("cycle %.2fs bucket=%s ticks_new=%d rows_total=%d peak_rss=%.0fMB", secs, bucket, len(new), summary["rows"], rss)
+        if bucket != "1min" and any(r.check_budget(secs, cad) for r in runners.values()):
+            log.warning("cycles over %.0fs %d times in a row: falling back to 1-minute buckets for the rest of the session", cad,
+                        OVERRUNS_BEFORE_FALLBACK)
+            summary["fallback"] = clock().isoformat(timespec="seconds")
+            bucket, cad = "1min", 60.0
+            for r in runners.values():
+                r.bucket, r.td, r.overruns = "1min", pd.Timedelta("1min"), 0
+        sleep(max(0.0, cad - (_time.perf_counter() - t0)))
+    return summary
+
+
+def replay_day(lake: Path, store: Path, underlying: str, day: date, bucket: str = "1min") -> int:
+    """After the close: replay the day's recorded ticks through the runner and write the per-bucket rows to the signal store, so the
+    history of the live era is exactly what the runner computed (or would have).  Returns rows written."""
+    from signals.framework import write_output
+    files = TickFiles(lake, day)
+    files.folders = [f.parent / f"date={day}" for f in files.folders]                  # all files, including the compacted day file
+    parts = []
+    for f in files.folders:
+        if f.is_dir():
+            parts += [pd.read_parquet(p) for p in sorted(f.glob("*.parquet"))]
+    if not parts:
+        return 0
+    ticks = pd.concat(parts, ignore_index=True)
+    ids = live_signal_ids()
+    rows = replay(underlying, history_for(lake, underlying, day), ticks, bucket=bucket, step="5min", ids=ids,
+                  baselines=load_baselines(store, underlying, day, ids, bucket))
+    if rows.empty:
+        return 0
+    n = 0
+    for sid, g in rows.groupby("signal"):
+        spec = REGISTRY[sid][0]
+        g = g.drop(columns=["signal"]).assign(underlying=underlying)
+        if "ts" not in g.columns and "date" in g.columns:
+            g["ts"] = pd.to_datetime(g["known_at"]) - pd.Timedelta(bucket)
+        n += write_output(store, spec, g, layer=f"intraday/bucket={'10s' if bucket == '10s' else '1m'}")
+    return n

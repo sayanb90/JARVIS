@@ -64,6 +64,9 @@ JARVIS=/home/jarvis/JARVIS
 # Signals (SCRUM-189, SCRUM-190).  11:40 UTC: every signal input present for today (index and VIX minutes, futures, option ticks with
 # Greeks and quotes, extended fields, contracts, participant and bhavcopy files); exit 1 on a failure.  12:15 UTC: every signal for the
 # newest closed session, from the latest research snapshot (11:45) into the research store, at low priority.
+# Live signals (SCRUM-197): every live signal each bucket during the session (JARVIS_SIGNAL_CADENCE: 1m, or 10s), from the tick files
+# into <store>/live/date=D/; stops at 10:02 before the 10:05 compaction.  Low priority and a memory cap (JARVIS_SIGNAL_LIVE_MAX_MB).
+44 3 * * 1-5   cd $JARVIS && nice -n 10 python -m signals live >> logs/signals-live.log 2>&1
 40 11 * * 1-5  cd $JARVIS && python -m signals health >> logs/signals-health.log 2>&1
 15 12 * * 1-5  cd $JARVIS && nice -n 19 ionice -c3 python -m signals nightly >> logs/signals-nightly.log 2>&1
 # Weekly per-signal coverage report (SCRUM-190): rows, first and last day, missing days and sample per era, to <store>/reports/.

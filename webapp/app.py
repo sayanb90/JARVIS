@@ -18,6 +18,7 @@ API (JSON):
   GET /api/history/instruments                     instruments with daily candles or 1-minute bars (History tab)
   GET /api/history/bars?symbol=&tf=&span=|start=&end=  candles and volume for one instrument (tf 1d, 1m, 5m, 15m, 60m)
   GET /api/history/volume?market=&date=&sort=&n=   the most traded tickers on a day
+  GET /api/signals/live?underlying=&date=          latest bucket of every live signal, today's series, the daily signals (Signals tab)
 
 Admin (data browser, read-only SQL, subscription list) is at /admin when ADMIN_USER and ADMIN_PASSWORD are set;
 see webapp/admin.py.  The app never writes to the lake.  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
@@ -276,6 +277,21 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         if book is None:
             raise HTTPException(503, "no live book: the feed is not running, or this instrument is not subscribed")
         return JSONResponse(_json_safe(book))
+
+    @app.get("/api/signals/live")
+    def signals_live(underlying: str = "NIFTY", date: str | None = None):
+        """The live signal table of a day (signals/live_runner.py and the feed's order-book signals), read only."""
+        from . import signals_view
+        if not re.fullmatch(r"[A-Z]{2,20}", underlying):
+            raise HTTPException(400, "bad underlying")
+        day = None
+        if date:
+            try:
+                day = pd.Timestamp(date).date()
+            except ValueError:
+                raise HTTPException(400, "bad date")
+        store = Path(os.getenv("JARVIS_SIGNAL_STORE") or "/srv/jarvis-research/store")
+        return JSONResponse(_json_safe(signals_view.summary(store, underlying, day)))
 
     cov_cache: dict[str, tuple[float, object]] = {}
 

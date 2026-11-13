@@ -8,7 +8,8 @@
 #   0. git pull (fast-forward only)                          stops if it fails
 #   1. pip install -r requirements.txt (adds xlrd, pypdf)    stops if it fails
 #   2. the full test suite                                   stops if any test fails: nothing on the server has changed yet
-#   3. .env: JARVIS_DEPTH5 (default fo: the 5-level book on the F&O feed) and JARVIS_EXPIRED_STRIKES (default 10).  A backup is made
+#   3. .env: JARVIS_DEPTH5 (default fo: the 5-level book on the F&O feed), JARVIS_EXPIRED_STRIKES (default 10), JARVIS_LIVE_SIGNALS=1
+#      (order-book signals in the feed) and JARVIS_SIGNAL_CADENCE (default 1m; CADENCE=10s for 10-second buckets).  A backup is made
 #      first.  DEPTH5=off leaves the depth switch out; STRIKES=15 widens further.
 #   4. crontab: the current one is saved to logs/crontab-backup-<time>.txt, then deploy/crontab is installed.  It adds the second F&O
 #      feed connection, the daily NSE/RBI collectors, and the signals health check (11:40 UTC) and nightly run (12:15 UTC).
@@ -38,6 +39,7 @@ if [ "${FORCE:-0}" != "1" ] && [ "$dow" -le 5 ] && [ "$hhmm" -ge 335 ] && [ "$hh
 fi
 [ -x "$PY" ] || stop "$PY not found: run this from the repository with its virtual environment"
 echo "release started $(date -u '+%F %H:%M:%S') UTC"
+echo "server: $(nproc) CPUs, $(free -m | awk '/^Mem:/{print $2" MB RAM, "$7" MB available"}')"
 
 step "0. update the code"
 git pull --ff-only || stop "git pull failed"
@@ -50,7 +52,7 @@ step "2. tests"
 $PY -m pytest -q -p no:cacheprovider || stop "tests failed: nothing was changed on the server"
 
 step "3. settings in .env"
-pairs="JARVIS_EXPIRED_STRIKES=${STRIKES}"
+pairs="JARVIS_EXPIRED_STRIKES=${STRIKES} JARVIS_LIVE_SIGNALS=1 JARVIS_SIGNAL_CADENCE=${CADENCE:-1m}"
 [ "$DEPTH5" != "off" ] && pairs="$pairs JARVIS_DEPTH5=${DEPTH5}"
 # shellcheck disable=SC2086
 $PY -m data_layer.envfile set $pairs || stop "could not update .env"

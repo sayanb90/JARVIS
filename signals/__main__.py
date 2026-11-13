@@ -154,11 +154,17 @@ def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDE
     if (Path(lake) / "manifest.json").exists():
         from research.access import provenance_of
         prov = provenance_of(Path(lake))
-    out = {}
+    out, intraday = {}, {}
+    from signals.live_runner import cadence, replay_day
     for u in underlyings:
         st = run(lake, root, u, day, day, provenance=prov, log=log)
         out[u] = sum(st.values())
-    return {"day": str(day), "rows": out}
+        try:                                    # the live era: the per-bucket history, computed by the live runner's own code
+            intraday[u] = replay_day(lake, root, u, day, bucket=cadence())
+        except Exception as exc:                # noqa: BLE001 -- the daily signals above are already written
+            log(f"intraday replay {u} {day} failed: {exc!r}")
+            intraday[u] = -1
+    return {"day": str(day), "rows": out, "intraday_rows": intraday}
 
 
 def coverage(root: Path, underlyings=UNDERLYINGS) -> pd.DataFrame:
@@ -239,6 +245,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     nt.add_argument("--lake", type=Path, default=None, help="default: the latest research snapshot, else the lake")
     nt.add_argument("--root", type=Path, default=None, help="default: $JARVIS_SIGNAL_STORE or <research root>/store")
     nt.add_argument("--date", type=date.fromisoformat)
+    lv = sub.add_parser("live", help="compute the live signals during the session (cron, 03:44 UTC)")
+    lv.add_argument("--lake", type=Path, default=None, help="default: the production lake (live ticks are not in snapshots)")
+    lv.add_argument("--root", type=Path, default=None)
+    lv.add_argument("--underlying", default="NIFTY,BANKNIFTY")
+    lv.add_argument("--cadence", choices=["1m", "10s"], default=None, help="default: JARVIS_SIGNAL_CADENCE, else 1m")
+    lv.add_argument("--until", default="10:02", help="UTC time to stop (before the 10:05 compaction)")
     cv = sub.add_parser("coverage")
     cv.add_argument("--root", type=Path, default=None)
     hl = sub.add_parser("health", add_help=False)
@@ -250,6 +262,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     a = ap.parse_args(argv)
     if a.cmd == "nightly":
         res = nightly(a.lake or default_lake(), a.root or default_store(), a.date)
+        print(json.dumps(res))
+        return 0
+    if a.cmd == "live":
+        import logging
+        from data_layer.lake import LAKE_DIR
+        from signals.live_runner import CADENCES, cadence, cap_memory, run_session
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+        mb = cap_memory()
+        bucket = CADENCES[a.cadence] if a.cadence else cadence()
+        logging.getLogger("signals.live").info("live signals: bucket %s, memory cap %d MB", bucket, mb)
+        res = run_session(a.lake or LAKE_DIR, a.root or default_store(), a.underlying.split(","), bucket, a.until)
         print(json.dumps(res))
         return 0
     if a.cmd == "coverage":
