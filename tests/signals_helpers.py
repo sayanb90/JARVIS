@@ -9,7 +9,7 @@ from signals.synthetic import make_raw
 
 def write_fake_lake(lake: Path, **kw) -> dict:
     raw = make_raw(**kw)
-    bars = pd.concat([raw["index_1m"], raw["vix_1m"], raw["fut_1m"], raw["opt_1m"]], ignore_index=True)
+    bars = pd.concat([raw["index_1m"], raw["vix_1m"], raw["fut_1m"], raw["opt_1m"], raw["stocks_1m"]], ignore_index=True)
     bars["market"] = "IN"
     for c in ("volume", "oi"):
         if c not in bars.columns:
@@ -30,4 +30,7 @@ def write_fake_lake(lake: Path, **kw) -> dict:
     c.to_parquet(lake / "instruments" / "fo_expired.parquet", index=False)
     (lake / "positioning").mkdir(parents=True, exist_ok=True)
     raw["participant"].drop(columns=["known_at"]).to_parquet(lake / "positioning" / "participant_oi.parquet", index=False)
+    (lake / "reference").mkdir(parents=True, exist_ok=True)
+    w = raw["weights"].drop(columns=["known_at"]).assign(index="NIFTY 50", weight_pct=lambda x: x["weight"] * 100).drop(columns=["weight"])
+    w.to_parquet(lake / "reference" / "index_weights.parquet", index=False)
     return raw

@@ -11,6 +11,7 @@ make_raw() returns the raw inputs a Context expects for one underlying:
   ticks_fo   level-1 ticks (bid, ask, sizes, last price, cumulative volume, open interest, vendor IV and Greeks) for the last `tick_days`
   participant  daily participant positions (Client, DII, FII, Pro)
   events     a few events
+  weights, stocks_1m  n_stocks constituents that track the index (small idiosyncratic noise) and their weights
 Everything is deterministic for a given seed.
 """
 
@@ -55,14 +56,22 @@ def _sym(u, k, cp, e):
 
 def make_raw(underlying: str = "NIFTY", end: str = "2026-03-31", index_days: int = 300, option_days: int = 12, tick_days: int = 3,
              sigma: float = 0.13, skew: float = 0.6, r: float = 0.065, s0: float = 24000.0, step: float = 100.0, n_strikes: int = 4,
-             lot: int = 65, seed: int = 7) -> dict[str, pd.DataFrame]:
+             lot: int = 65, seed: int = 7, plant_pattern: bool = False, n_stocks: int = 5) -> dict[str, pd.DataFrame]:
+    """`plant_pattern` plants the expiry-day pattern of SEBI's 2025 order on the last Tuesday (an expiry) of the option days: the index
+    and its constituents pushed up 0.9 % over the first three hours on heavy constituent buying, put OI built in the morning, then sold
+    down 1.3 % into the close."""
     rng = np.random.default_rng(seed)
     days = list(pd.bdate_range(end=end, periods=index_days))
     mins = pd.to_timedelta(np.arange(SESSION), unit="min")
+    tuesdays = [d for d in days[-option_days:] if d.weekday() == 1]
+    plant_day = tuesdays[-1] if (plant_pattern and tuesdays) else None
+    push = np.where(np.arange(SESSION) < 180, 0.009 / 180, -0.013 / (SESSION - 180))
     idx_rows, px = [], s0
     for d in days:
         px *= np.exp(rng.normal(-0.5 * sigma ** 2 * 0.2 / 252, sigma * np.sqrt(0.2 / 252)))
         r_m = rng.normal(0, sigma * np.sqrt(0.8 / 252 / SESSION), SESSION)
+        if plant_day is not None and d == plant_day:
+            r_m = r_m + push
         c = px * np.exp(np.cumsum(r_m))
         o = np.r_[px, c[:-1]]
         idx_rows.append(pd.DataFrame({"ts": d + OPEN + mins, "open": o, "high": np.maximum(o, c) * (1 + 1e-5), "low": np.minimum(o, c) * (1 - 1e-5), "close": c}))
@@ -113,6 +122,8 @@ def make_raw(underlying: str = "NIFTY", end: str = "2026-03-31", index_days: int
                     traded = rng.random(SESSION) > min(0.6, 0.08 * away)
                     oi0 = oi_state.get(sym, int(200_000 / (1 + away)))
                     oi = oi0 + rng.integers(-500, 600, SESSION).cumsum()
+                    if plant_day is not None and d == plant_day and cp == "P":
+                        oi = oi + np.where(np.arange(SESSION) < 180, 3000, 0).cumsum()
                     oi_state[sym] = int(oi[-1])
                     vol_n = rng.poisson(2000 / (1 + away), SESSION)
                     opt_rows.append(pd.DataFrame({"ts": s_day.index[traded], "symbol": sym, "open": p[traded], "high": p[traded], "low": p[traded],
@@ -124,6 +135,28 @@ def make_raw(underlying: str = "NIFTY", end: str = "2026-03-31", index_days: int
                 contracts.append({"symbol": _sym(underlying, k, cp, e), "underlying": underlying, "instrument_type": cp, "strike": float(k),
                                   "expiry": e, "lot_size": lot})
     contracts = pd.DataFrame(contracts)
+
+    stock_rows, weight_rows = [], []
+    wts = np.array([0.30, 0.25, 0.20, 0.15, 0.10])[:n_stocks]
+    wts = wts / wts.sum() if len(wts) else wts
+    base = index_1m.set_index("ts")["close"]
+    for i in range(len(wts)):
+        sym = f"S{i + 1}.NS"
+        p0 = 500.0 * (i + 2)
+        noise = np.cumsum(rng.normal(0, 2e-5, len(base)))
+        c = p0 * base.to_numpy() / base.iloc[0] * np.exp(noise)
+        o = np.r_[c[0], c[:-1]]
+        vol = rng.poisson(5000, len(base)).astype(float)
+        if plant_day is not None:
+            on = (base.index.normalize() == plant_day) & ((base.index - plant_day - OPEN) < pd.Timedelta(minutes=180))
+            vol[on] *= 5
+        stock_rows.append(pd.DataFrame({"ts": base.index, "symbol": sym, "open": o, "high": np.maximum(o, c), "low": np.minimum(o, c),
+                                        "close": c, "volume": vol.astype("int64")}))
+        weight_rows.append({"date": days[0].date(), "symbol": sym, "weight": float(wts[i])})
+    stocks_1m = pd.concat(stock_rows, ignore_index=True) if stock_rows else pd.DataFrame()
+    weights = pd.DataFrame(weight_rows)
+    if len(weights):
+        weights["known_at"] = pd.to_datetime(weights["date"]) + pd.Timedelta(hours=10)
 
     tick_rows = []
     o_last = opt_1m[opt_1m["ts"].dt.normalize().isin(opt_days[-tick_days:])]
@@ -142,12 +175,14 @@ def make_raw(underlying: str = "NIFTY", end: str = "2026-03-31", index_days: int
         tick_rows.append(pd.DataFrame({"ts": ts, "fts": ts, "symbol": sym, "ltp": ltp, "vol_today": g.groupby(g["ts"].dt.normalize())["volume"].cumsum().to_numpy(),
                                        "bid": g["close"].to_numpy() - half, "ask": g["close"].to_numpy() + half,
                                        "bid_qty": rng.integers(65, 6500, len(g)), "ask_qty": rng.integers(65, 6500, len(g)), "oi": g["oi"].to_numpy(),
+                                       "ltq": lot * rng.integers(1, 40, len(g)),
                                        "iv": np.round(vol_true, 4), "delta": np.round(gk["delta"], 4), "gamma": np.round(gk["gamma"], 4)}))
     f_last = fut_1m[fut_1m["ts"].dt.normalize().isin(opt_days[-tick_days:])] if len(fut_1m) else pd.DataFrame()
     if len(f_last):
         for sym, g in f_last.groupby("symbol"):
             ts = g["ts"] + pd.Timedelta(seconds=30)
             tick_rows.append(pd.DataFrame({"ts": ts, "fts": ts, "symbol": sym, "ltp": g["close"].to_numpy(), "vol_today": g["volume"].cumsum().to_numpy(),
+                                           "ltq": lot * rng.integers(1, 10, len(g)),
                                            "bid": g["close"].to_numpy() - 0.05, "ask": g["close"].to_numpy() + 0.05,
                                            "bid_qty": rng.integers(65, 3000, len(g)), "ask_qty": rng.integers(65, 3000, len(g)), "oi": g["oi"].to_numpy(),
                                            "iv": np.nan, "delta": np.nan, "gamma": np.nan}))
@@ -168,4 +203,4 @@ def make_raw(underlying: str = "NIFTY", end: str = "2026-03-31", index_days: int
     events = pd.DataFrame([{"date": opt_days[-3].date(), "kind": "rbi_mpc", "time_ist": "10:00", "description": "synthetic MPC"},
                            {"date": days[-60].date(), "kind": "budget", "time_ist": "11:00", "description": "synthetic budget"}])
     return {"index_1m": index_1m, "vix_1m": vix, "fut_1m": fut_1m, "opt_1m": opt_1m, "contracts": contracts, "ticks_fo": ticks_fo,
-            "participant": participant, "events": events}
+            "participant": participant, "events": events, "weights": weights, "stocks_1m": stocks_1m}

@@ -68,7 +68,7 @@ def test_atm_and_constant_maturity(ctx):
 
 
 def test_every_signal_computes(ctx):
-    empty_ok = {"cost_log", "volume_burst"}
+    empty_ok = {"cost_log", "volume_burst", "block_prints"}          # no fills, bursts or block-size prints in the synthetic market
     for s in specs():
         out = ctx.compute(s.id)
         if s.id not in empty_ok:

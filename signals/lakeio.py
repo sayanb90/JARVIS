@@ -10,6 +10,8 @@ Read the raw inputs of a Context from a lake directory or a research snapshot (s
   ticks_fo          lake/ticks/segment=fo/date=*    option and future ticks of U (live, from 2026-11-03)
   participant       lake/positioning/participant_oi.parquet, known the evening it is published (PARTICIPANT_KNOWN_UTC)
   events            data/reference/market_events.csv
+  weights           lake/reference/index_weights.parquet (SCRUM-183): dated constituent weights of U
+  stocks_1m         lake/bars/interval=1m           the TOP_N_STOCKS heaviest constituents of U, for the basket signals (SCRUM-191)
 Only the day folders in range are opened.  Minute bars keep ts (naive UTC bar start), symbol, open, high, low, close, volume, oi.
 """
 
@@ -25,7 +27,9 @@ import pandas as pd
 from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
 
 PARTICIPANT_KNOWN_UTC = pd.Timedelta(hours=15)            # 20:30 IST: NSE posts the file in the evening; used from the next session
-TICK_COLUMNS = ("ts", "fts", "symbol", "ltp", "vol_today", "bid", "ask", "bid_qty", "ask_qty", "oi", "iv", "delta", "gamma")
+TICK_COLUMNS = ("ts", "fts", "symbol", "ltp", "vol_today", "ltq", "bid", "ask", "bid_qty", "ask_qty", "oi", "iv", "delta", "gamma")
+INDEX_NAMES = {"NIFTY": ("NIFTY50", "NIFTY"), "BANKNIFTY": ("NIFTYBANK", "BANKNIFTY"), "FINNIFTY": ("NIFTYFINANCIALSERVICES", "FINNIFTY")}
+TOP_N_STOCKS = 15                                        # constituents by weight whose minutes are loaded for the basket signals
 
 
 def _day_files(base: Path, d0: date, d1: date) -> list[str]:
@@ -96,6 +100,27 @@ def read_participant(lake_dir: Path) -> pd.DataFrame:
     return df
 
 
+def norm_index(name: str) -> str:
+    return "".join(ch for ch in str(name).upper() if ch.isalnum())
+
+
+def read_weights(lake_dir: Path, underlying: str) -> pd.DataFrame:
+    """Dated index weights of `underlying` (lake/reference/index_weights.parquet, SCRUM-183): date, symbol (lake symbol, e.g. HDFCBANK.NS),
+    weight (fraction), known_at (that day's close).  Empty when the collector has not run."""
+    p = Path(lake_dir) / "reference" / "index_weights.parquet"
+    if not p.exists():
+        return pd.DataFrame(columns=["date", "symbol", "weight", "known_at"])
+    w = pd.read_parquet(p)
+    names = set(INDEX_NAMES.get(underlying, (underlying,)))
+    w = w[w["index"].map(norm_index).isin(names)].copy()
+    col = "weight_pct" if "weight_pct" in w.columns else "weight"
+    w["weight"] = pd.to_numeric(w[col], errors="coerce") / (100.0 if col == "weight_pct" else 1.0)
+    w["symbol"] = w["symbol"].astype(str).map(lambda x: x if "." in x else f"{x}.NS")
+    w["date"] = pd.to_datetime(w["date"]).dt.date
+    w["known_at"] = pd.to_datetime(w["date"]) + pd.Timedelta(hours=10)
+    return w[["date", "symbol", "weight", "known_at"]]
+
+
 def read_events() -> pd.DataFrame:
     try:
         from data_layer import market_events
@@ -113,8 +138,14 @@ def load_raw(lake_dir: Path, underlying: str, d0: date, d1: date, option_from: O
     vix_1m = read_bars(lake_dir, d0, d1, "symbol = ?", [VIX_SYMBOL], con)
     fut_1m = read_bars(lake_dir, d0, d1, "regexp_matches(symbol, ?)", [f"^{underlying}_FUT_"], con)
     opt_1m = read_bars(lake_dir, option_from or d0, d1, "regexp_matches(symbol, ?)", [f"^{underlying}_[0-9.]+_(CE|PE)_"], con)
+    weights = read_weights(lake_dir, underlying)
+    stocks_1m = pd.DataFrame(columns=["ts", "symbol", "open", "high", "low", "close", "volume"])
+    if len(weights):
+        top = weights.sort_values("weight", ascending=False).groupby("date").head(TOP_N_STOCKS)
+        syms = sorted(set(top["symbol"]))
+        stocks_1m = read_bars(lake_dir, d0, d1, "list_contains(?, symbol)", [syms], con)
     raw = {"index_1m": index_1m, "vix_1m": vix_1m, "fut_1m": fut_1m, "opt_1m": opt_1m, "contracts": read_contracts(lake_dir, underlying),
-           "participant": read_participant(lake_dir), "events": read_events()}
+           "participant": read_participant(lake_dir), "events": read_events(), "weights": weights, "stocks_1m": stocks_1m}
     if ticks:
         t = read_ticks(lake_dir, option_from or d0, d1, "regexp_matches(symbol, ?)", [f"^{underlying}_([0-9.]+_(CE|PE)|FUT)_"], con)
         for c in ("ts", "fts"):
@@ -123,6 +154,6 @@ def load_raw(lake_dir: Path, underlying: str, d0: date, d1: date, option_from: O
         if len(t) and t["fts"].isna().all():
             t["fts"] = t["ts"]
         raw["ticks_fo"] = t
-    for k in ("index_1m", "vix_1m", "fut_1m", "opt_1m"):
+    for k in ("index_1m", "vix_1m", "fut_1m", "opt_1m", "stocks_1m"):
         raw[k]["ts"] = pd.to_datetime(raw[k]["ts"])
     return raw
