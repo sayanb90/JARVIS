@@ -41,6 +41,11 @@ JARVIS=/home/jarvis/JARVIS
 # Needs the research root on the lake's filesystem: run deploy/research/setup.sh (it prints what it would do first).  Pruning removes only
 # old snapshot links, never lake files; each kept snapshot costs only the files that were rewritten since (about 50 MB).
 45 11 * * *    cd $JARVIS && nice -n 19 ionice -c3 python -m research.snapshot create --keep 45 >> logs/research-snapshot.log 2>&1
+# Signals (SCRUM-189, SCRUM-190).  11:40 UTC: every signal input present for today (index and VIX minutes, futures, option ticks with
+# Greeks and quotes, extended fields, contracts, participant and bhavcopy files); exit 1 on a failure.  12:15 UTC: every signal for the
+# newest closed session, from the latest research snapshot (11:45) into the research store, at low priority.
+40 11 * * 1-5  cd $JARVIS && python -m signals health >> logs/signals-health.log 2>&1
+15 12 * * 1-5  cd $JARVIS && nice -n 19 ionice -c3 python -m signals nightly >> logs/signals-nightly.log 2>&1
 # Market calendar: Upstox's holiday list, so every check knows whether a day should have produced data (before the 03:15 health report)
 0 3 * * *      cd $JARVIS && python -m data_layer.market_calendar refresh >> logs/market-calendar.log 2>&1
 # Morning health report, before the session; mail or read logs/health.log

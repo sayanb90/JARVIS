@@ -7,6 +7,9 @@ Signal runner (SCRUM-146).
   python -m signals validate-iv --lake LAKE --root STORE --underlying NIFTY --from 2026-11-03 --to 2026-11-10
   python -m signals report day-night --root STORE --underlying NIFTY
   python -m signals smoke [--root STORE]           # the whole catalogue on the synthetic market (no lake needed)
+  python -m signals nightly [--lake L] [--root STORE] [--date D]   # cron: every signal for the newest closed session
+  python -m signals coverage [--root STORE]        # per signal: rows, days, missing days, days per era
+  python -m signals health [--lake L] [--date D]   # inputs of every signal present for the day (exit 1 on a failure)
 
 `run` works in two passes so four years of option minutes never sit in memory at once:
   pass 1, month by month: the option chain (with CHAIN_WARMUP days before the month for signals that look back over sessions), the
@@ -35,6 +38,8 @@ PASS1_INPUTS = {"chain", "ticks_fo", "fills"}
 CHAIN_WARMUP = {"option_volume": 35, "spread_gate": 35, "oi_quadrant": 5, "day_night_returns": 5, "pin_test": 1, "volume_burst": 1}
 DEFAULT_WARMUP = 3
 INDEX_HISTORY_FROM = date(2022, 1, 3)
+PASS2_LOOKBACK_DAYS = 400       # ATM history read back for pass 2, so trailing windows (z-scores, vol-of-vol) are full on a one-day run
+UNDERLYINGS = ("NIFTY", "BANKNIFTY")
 
 
 def is_pass1(sid: str) -> bool:
@@ -104,7 +109,7 @@ def run(lake: Path, root: Path, underlying: str, d0: date, d1: date, ids: Option
             stats[sid] = stats.get(sid, 0) + n
         log(f"pass 1 {underlying} {a}..{b}: {sum(stats.values()):,} rows so far")
     raw = load_raw(lake, underlying, min(d0, INDEX_HISTORY_FROM), d1, option_from=d1 + timedelta(days=1), ticks=False)
-    atm = _read_derived(root, "atm", underlying, d0, d1)
+    atm = _read_derived(root, "atm", underlying, d0 - timedelta(days=PASS2_LOOKBACK_DAYS), d1)
     injected = {s.id: read_output(root, s.id, underlying) for s in specs() if is_pass1(s.id)}
     ctx = Context(underlying, raw, cache={"atm": atm} if len(atm) else {"atm": pd.DataFrame()}, signals={k: v for k, v in injected.items() if len(v)})
     for sid in p2:
@@ -116,6 +121,69 @@ def run(lake: Path, root: Path, underlying: str, d0: date, d1: date, ids: Option
         log_trial(root, REGISTRY[sid][0], underlying, d0, d1, stats.get(sid, 0), provenance)
     log(f"pass 2 {underlying}: {len(p2)} signals; total {sum(stats.values()):,} rows")
     return stats
+
+
+def default_lake() -> Path:
+    """The latest research snapshot when one exists (read-only, closed files only), else the production lake."""
+    from data_layer.lake import LAKE_DIR
+    try:
+        from research.snapshot import DEFAULT_ROOT
+        latest = DEFAULT_ROOT / "snapshots" / "latest"
+        if (latest / "manifest.json").exists():
+            return latest.resolve()
+    except Exception:                                                       # noqa: BLE001
+        pass
+    return Path(LAKE_DIR)
+
+
+def default_store() -> Path:
+    import os
+    if os.environ.get("JARVIS_SIGNAL_STORE"):
+        return Path(os.environ["JARVIS_SIGNAL_STORE"])
+    from research.snapshot import DEFAULT_ROOT
+    return DEFAULT_ROOT / "store"
+
+
+def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDERLYINGS, log=print) -> dict:
+    """Compute every signal for the newest closed session (or `day`) for each underlying.  Idempotent: a rerun rewrites that day."""
+    from signals.health import latest_day
+    day = day or latest_day(lake)
+    if day is None:
+        raise SystemExit("no 1-minute bars in the lake")
+    prov = {}
+    if (Path(lake) / "manifest.json").exists():
+        from research.access import provenance_of
+        prov = provenance_of(Path(lake))
+    out = {}
+    for u in underlyings:
+        st = run(lake, root, u, day, day, provenance=prov, log=log)
+        out[u] = sum(st.values())
+    return {"day": str(day), "rows": out}
+
+
+def coverage(root: Path, underlyings=UNDERLYINGS) -> pd.DataFrame:
+    """Per signal and underlying: rows, first and last day, days present, trading days missing between them (against the sessions
+    of `expiry_last_hour`, which has one row per session), and days per era."""
+    from signals.options.core import era_of
+    rows = []
+    for u in underlyings:
+        sessions = read_output(root, "expiry_last_hour", u)
+        cal = sorted(set(pd.to_datetime(sessions["date"]).dt.date)) if len(sessions) else []
+        for s in specs():
+            df = read_output(root, s.id, u)
+            key = "ts" if s.grid == "1m" else "date"
+            if not len(df):
+                rows.append({"underlying": u, "signal": s.id, "family": s.family, "kind": s.kind, "live_only": s.live_only, "rows": 0})
+                continue
+            days = sorted(set(pd.to_datetime(df[key]).dt.date))
+            span = [d for d in cal if days[0] <= d <= days[-1]]
+            missing = [d for d in span if d not in set(days)]
+            eras = pd.Series([era_of(d) for d in days]).value_counts().to_dict()
+            rows.append({"underlying": u, "signal": s.id, "family": s.family, "kind": s.kind, "live_only": s.live_only, "rows": len(df),
+                         "first": days[0], "last": days[-1], "days": len(days), "missing_days": len(missing),
+                         "min_sample": s.min_sample, "below_min_sample": s.live_only and len(days) < s.min_sample,
+                         **{f"days_{k}": v for k, v in eras.items()}})
+    return pd.DataFrame(rows)
 
 
 def validate_iv(lake: Path, root: Path, underlying: str, d0: date, d1: date) -> dict:
@@ -167,7 +235,32 @@ def main(argv: Optional[list[str]] = None) -> int:
     rp.add_argument("--underlying", required=True)
     sm = sub.add_parser("smoke")
     sm.add_argument("--root", type=Path)
+    nt = sub.add_parser("nightly", help="every signal for the newest closed session (cron)")
+    nt.add_argument("--lake", type=Path, default=None, help="default: the latest research snapshot, else the lake")
+    nt.add_argument("--root", type=Path, default=None, help="default: $JARVIS_SIGNAL_STORE or <research root>/store")
+    nt.add_argument("--date", type=date.fromisoformat)
+    cv = sub.add_parser("coverage")
+    cv.add_argument("--root", type=Path, default=None)
+    hl = sub.add_parser("health", add_help=False)
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "health":
+        from signals.health import main as health_main
+        return health_main(argv[1:])
     a = ap.parse_args(argv)
+    if a.cmd == "nightly":
+        res = nightly(a.lake or default_lake(), a.root or default_store(), a.date)
+        print(json.dumps(res))
+        return 0
+    if a.cmd == "coverage":
+        root = a.root or default_store()
+        cov = coverage(root)
+        out = Path(root) / "reports" / f"coverage_{date.today()}.csv"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cov.to_csv(out, index=False)
+        print(cov.to_string(index=False))
+        print(f"written {out}")
+        return 0
     if a.cmd == "list":
         for s in specs(family=a.family):
             flags = ",".join(x for x in (s.kind if s.kind != "signal" else "", "live" if s.live_only else "") if x)
