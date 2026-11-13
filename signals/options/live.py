@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from signals.framework import Context, Spec, provider, register
-from signals.options.core import build_chain, minute_of_session
+from signals.options.core import build_chain, minute_of_session, rate_table
 from signals.options.positioning import gex_table, pcr_table
 
 MIN_SAMPLE = 40
@@ -75,7 +75,7 @@ def chain_live(ctx: Context) -> pd.DataFrame:
                                               delta_vendor=("delta", "last"), gamma_vendor=("gamma", "last")).reset_index().rename(columns={"minute": "ts"})
     agg["close"] = agg["close"].fillna((agg["bid"] + agg["ask"]) / 2)
     agg["src"] = "tick"
-    return build_chain(agg, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r)
+    return build_chain(agg, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rate_table(ctx.raw.get("rates")))
 
 
 def _spec(sid, doc, inputs=("ticks_fo",), grid="1m", kind="signal", params=None):

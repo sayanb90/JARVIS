@@ -172,3 +172,22 @@ def test_era_labels():
     assert core.era_of("2024-11-19") == "pre_2024-11-20"
     assert core.era_of("2024-11-20") == "from_2024-11-20"
     assert core.era_of("2025-09-01") == "from_2025-09-01"
+
+
+def test_chain_uses_the_dated_rate_from_the_next_session():
+    """SCRUM-186: MIBOR where imported (else repo), applied from the day after it is fixed; the flat default before any value."""
+    import numpy as np
+    from signals.framework import Context
+    from signals.options.core import rate_by_row, rate_table
+    from signals.synthetic import make_raw
+    rates = pd.DataFrame({"date": [pd.Timestamp("2026-01-01").date()] * 2 + [pd.Timestamp("2026-01-10").date()],
+                          "series": ["repo", "mibor_overnight", "mibor_overnight"], "value_pct": [5.5, 5.6, 5.9]})
+    tab = rate_table(rates)
+    assert np.allclose(tab["r"], [0.056, 0.059])                                      # MIBOR wins over repo
+    ts = pd.Series(pd.to_datetime(["2025-12-31 05:00", "2026-01-02 05:00", "2026-01-10 05:00", "2026-01-11 05:00"]))
+    assert np.allclose(rate_by_row(ts, tab, 0.065), [0.065, 0.056, 0.056, 0.059])  # a day never sees its own fixing
+    raw = make_raw()
+    d0 = pd.to_datetime(raw["opt_1m"]["ts"]).dt.date.min()
+    ch = Context("NIFTY", {**raw, "rates": pd.DataFrame({"date": [d0 - pd.Timedelta(days=1)], "series": ["repo"], "value_pct": [3.0]})}).get("chain")
+    assert np.allclose(ch["r"], 0.03)
+    assert np.allclose(Context("NIFTY", raw).get("chain")["r"], 0.065)

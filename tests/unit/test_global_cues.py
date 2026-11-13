@@ -23,8 +23,9 @@ def test_global_is_a_market_of_the_daily_and_1m_jobs_but_not_of_fundamentals():
     assert not any(s in yf_fundamentals.universe_symbols() for s in CUES)
 
 
-def test_daily_ohlc_and_1m_bars_ask_yahoo_for_the_cues(monkeypatch):
+def test_daily_ohlc_and_1m_bars_ask_yahoo_for_the_cues(monkeypatch, tmp_path):
     asked = {}
+    monkeypatch.setattr(yf_client, "BARS_DIR", tmp_path / "bars")          # run_bars writes its (empty) file here, not in the repo
     monkeypatch.setattr(yf_client, "fetch_ohlc_daily", lambda tickers, market, days: asked.setdefault(("daily", market), tickers) and [])
     monkeypatch.setattr(yf_client, "_require_rows", lambda *a: None)
     monkeypatch.setattr(yf_client, "write_ohlc_daily", lambda rows, market: None)

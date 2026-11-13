@@ -178,22 +178,51 @@ def _grid_fill(o: pd.DataFrame, minutes: pd.DataFrame, stale_max: int) -> pd.Dat
     return out.drop(columns=["day"], errors="ignore")
 
 
+def rate_table(rates: pd.DataFrame | None) -> pd.DataFrame:
+    """Daily rate for the chain (SCRUM-186): overnight MIBOR where imported, else the RBI repo rate, as a fraction.  Each value is used
+    from the next session on (a day's rate is fetched during that day), so a session never sees its own fixing.  Columns date, r."""
+    if rates is None or not len(rates):
+        return pd.DataFrame(columns=["date", "r"])
+    x = rates.copy()
+    x["date"] = pd.to_datetime(x["date"]).dt.date
+    for series in ("mibor_overnight", "repo"):
+        s = x[x["series"] == series]
+        if len(s):
+            s = s.sort_values("date")
+            return pd.DataFrame({"date": s["date"].to_numpy(), "r": s["value_pct"].astype(float).to_numpy() / 100.0})
+    return pd.DataFrame(columns=["date", "r"])
+
+
+def rate_by_row(ts: pd.Series, table: pd.DataFrame, default: float) -> np.ndarray:
+    """The rate in force at each timestamp: the last table value dated before that day, else `default`."""
+    if table is None or not len(table):
+        return np.full(len(ts), float(default))
+    days = pd.to_datetime(pd.to_datetime(ts).dt.date).astype("datetime64[ns]")
+    tab = pd.DataFrame({"d": (pd.to_datetime(table["date"]) + pd.Timedelta(days=1)).astype("datetime64[ns]"),
+                        "r": table["r"].astype(float)}).sort_values("d")
+    left = pd.DataFrame({"d": days.to_numpy(), "i": np.arange(len(ts))}).sort_values("d")
+    m = pd.merge_asof(left, tab, on="d", direction="backward").sort_values("i")
+    return m["r"].fillna(float(default)).to_numpy()
+
+
 def parity_forward(ch: pd.DataFrame, r: float, max_age: float = PARITY_AGE, pairs: int = PARITY_PAIRS) -> pd.DataFrame:
     """Per (ts, expiry): the forward from put-call parity on the freshest, most at-the-money pairs.  Columns ts, expiry, fwd_parity."""
-    c = ch[(ch["cp"] == "C") & (ch["age"] <= max_age)][["ts", "expiry", "strike", "close", "t"]]
+    c = ch[(ch["cp"] == "C") & (ch["age"] <= max_age)][["ts", "expiry", "strike", "close", "t"] + (["r"] if "r" in ch.columns else [])]
     p = ch[(ch["cp"] == "P") & (ch["age"] <= max_age)][["ts", "expiry", "strike", "close"]]
     m = c.merge(p, on=["ts", "expiry", "strike"], suffixes=("_c", "_p"))
     if m.empty:
         return pd.DataFrame(columns=["ts", "expiry", "fwd_parity"])
     m["diff"] = (m["close_c"] - m["close_p"]).abs()
-    m["f"] = m["strike"] + np.exp(r * m["t"]) * (m["close_c"] - m["close_p"])
+    rr = m["r"] if "r" in m.columns else r
+    m["f"] = m["strike"] + np.exp(rr * m["t"]) * (m["close_c"] - m["close_p"])
     m = m.sort_values(["ts", "expiry", "diff"])
     m = m.groupby(["ts", "expiry"]).head(pairs)
     return m.groupby(["ts", "expiry"], as_index=False)["f"].median().rename(columns={"f": "fwd_parity"})
 
 
 def build_chain(opt: pd.DataFrame, contracts: pd.DataFrame, spot_m: pd.DataFrame, fut: pd.DataFrame, r: float,
-                stale_max: int = STALE_MAX, iv_age: int = IV_AGE) -> pd.DataFrame:
+                stale_max: int = STALE_MAX, iv_age: int = IV_AGE, rates: pd.DataFrame | None = None) -> pd.DataFrame:
+    """`r` is the flat rate used where `rates` (from rate_table) has no value yet."""
     if opt is None or not len(opt):
         return pd.DataFrame()
     o = opt.copy()
@@ -209,7 +238,9 @@ def build_chain(opt: pd.DataFrame, contracts: pd.DataFrame, spot_m: pd.DataFrame
     g["cp"] = np.where(g["instrument_type"] == "CE", "C", "P")
     g["lot"] = g["lot_size"]
     g["t"] = _years(g["expiry"], g["ts"])
-    g = g[g["t"] > 0]
+    g = g[g["t"] > 0].copy()
+    g["r"] = rate_by_row(g["ts"], rates, r)
+    r = g["r"].to_numpy()
     pf = parity_forward(g, r)
     g = g.merge(pf, on=["ts", "expiry"], how="left")
     g["fwd_parity"] = pd.to_numeric(g["fwd_parity"], errors="coerce").astype(float)
@@ -235,14 +266,15 @@ def build_chain(opt: pd.DataFrame, contracts: pd.DataFrame, spot_m: pd.DataFrame
     gk = black76.greeks(is_call, g["fwd"].to_numpy(dtype=float), g["strike"].to_numpy(dtype=float), g["t"].to_numpy(dtype=float),
                         g["iv"].to_numpy(dtype=float), r)
     g["delta"], g["gamma"], g["vega"] = gk["delta"], gk["gamma"], gk["vega"]
-    keep = ["ts", "expiry", "strike", "cp", "close", "volume", "oi", "age", "lot", "t", "fwd", "fwd_src", "k", "iv", "delta", "gamma", "vega"]
+    keep = ["ts", "expiry", "strike", "cp", "close", "volume", "oi", "age", "lot", "t", "r", "fwd", "fwd_src", "k", "iv", "delta", "gamma", "vega"]
     keep += [c for c in ("bid", "ask", "bid_qty", "ask_qty", "iv_vendor", "delta_vendor", "gamma_vendor", "src") if c in g.columns]
     return g[keep].sort_values(["ts", "expiry", "strike", "cp"]).reset_index(drop=True)
 
 
 @provider("chain")
 def chain(ctx: Context) -> pd.DataFrame:
-    return build_chain(ctx.raw.get("opt_1m"), ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r)
+    return build_chain(ctx.raw.get("opt_1m"), ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r,
+                       rates=rate_table(ctx.raw.get("rates")))
 
 
 # ---------------------------------------------------------------------------------------------- ATM and smile summaries

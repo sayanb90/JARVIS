@@ -81,3 +81,13 @@ def test_block_prints_found():
 def test_implied_corr_proxy(clean):
     c = clean.compute("implied_corr_proxy")
     assert len(c) and c["implied_corr"].notna().all() and (c["basket_vol"] > 0).all()
+
+
+def test_weights_blend_official_top_ten_with_approximate_rest():
+    from signals.lakeio import blend_weights
+    d = pd.Timestamp("2026-11-13").date()
+    w = pd.DataFrame({"date": [d] * 5, "source": ["factsheet_top10", "approx_mcap", "approx_mcap", "approx_mcap", "members"],
+                      "symbol": ["A.NS", "A.NS", "B.NS", "C.NS", "A.NS"], "weight": [0.5, 0.6, 0.3, 0.1, None]})
+    b = blend_weights(w).set_index("symbol")["weight"]
+    assert b["A.NS"] == 0.5                                   # the official weight wins
+    assert abs(b.sum() - 1.0) < 1e-12 and abs(b["B.NS"] / b["C.NS"] - 3.0) < 1e-12   # the rest keeps its proportions
