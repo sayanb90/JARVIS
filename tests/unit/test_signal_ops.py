@@ -66,3 +66,16 @@ def test_nightly_and_coverage(lake, tmp_path):
     row = cov[cov["signal"] == "vrp"].iloc[0]
     assert row["rows"] == len(v) and row["days"] == 1
     assert not any(Path(lake).rglob("signals"))                        # nothing written under the lake
+
+
+def test_release_and_backfill_scripts():
+    """deploy/release.sh and deploy/data-backfill.sh parse; the backfill's dry run gates the signal history on the IV check."""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    for s in ("deploy/release.sh", "deploy/data-backfill.sh"):
+        assert subprocess.run(["bash", "-n", s], cwd=root).returncode == 0
+    rel = (root / "deploy/release.sh").read_text()
+    assert "crontab deploy/crontab" in rel and "JARVIS_DEPTH5" in rel and "pytest" in rel
+    out = subprocess.run(["bash", "deploy/data-backfill.sh"], cwd=root, capture_output=True, text=True).stdout
+    assert out.index("validate-iv") < out.index("signals run") and "--only expired" in out

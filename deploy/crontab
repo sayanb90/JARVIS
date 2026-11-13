@@ -66,6 +66,8 @@ JARVIS=/home/jarvis/JARVIS
 # newest closed session, from the latest research snapshot (11:45) into the research store, at low priority.
 40 11 * * 1-5  cd $JARVIS && python -m signals health >> logs/signals-health.log 2>&1
 15 12 * * 1-5  cd $JARVIS && nice -n 19 ionice -c3 python -m signals nightly >> logs/signals-nightly.log 2>&1
+# Weekly per-signal coverage report (SCRUM-190): rows, first and last day, missing days and sample per era, to <store>/reports/.
+20 12 * * 6    cd $JARVIS && nice -n 19 python -m signals coverage >> logs/signals-coverage.log 2>&1
 # Market calendar: Upstox's holiday list, so every check knows whether a day should have produced data (before the 03:15 health report)
 0 3 * * *      cd $JARVIS && python -m data_layer.market_calendar refresh >> logs/market-calendar.log 2>&1
 # Morning health report, before the session; mail or read logs/health.log
