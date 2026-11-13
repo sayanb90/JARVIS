@@ -17,6 +17,8 @@ from webapp.app import create_app
     ("VOLV-B.ST", "EU", "Stockholm", "SEK", 510), ("7203.T", "JP", "Tokyo", "JPY", 330), ("2330.TW", "TW", "Taipei", "TWD", 270),
     ("5274.TWO", "TW", "Taipei", "TWD", 270), ("0700.HK", "HK", "Hong Kong", "HKD", 330), ("600519.SS", "CN", "Shanghai / Shenzhen", "CNY", 240),
     ("D05.SI", "SG", "Singapore", "SGD", 480), ("005930.KS", "KR", "Seoul", "KRW", 390),
+    ("ES=F", "GLOBAL", "CME · CBOE · FX", "USD", 1439), ("INR=X", "GLOBAL", "CME · CBOE · FX", "USD", 1439),
+    ("^VIX", "GLOBAL", "CME · CBOE · FX", "USD", 1439),                     # a global cue listed in data/global_cues.csv
 ])
 def test_each_symbol_gets_its_exchange_currency_and_session_length(symbol, market, exchange, currency, minutes):
     info = markets.exchange_for(symbol)
