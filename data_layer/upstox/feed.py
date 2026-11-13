@@ -57,6 +57,13 @@ START_EARLY = timedelta(minutes=5)
 STOP_LATE = timedelta(minutes=5)
 
 
+def depth5_enabled(flag: bool | None = None, env=None) -> bool:
+    """Store order book levels 2 to 5: the --depth5 flag, else JARVIS_DEPTH5 (off unless set to 1/true/yes/on)."""
+    if flag:
+        return True
+    return (os.environ if env is None else env).get("JARVIS_DEPTH5", "").lower() in ("1", "true", "yes", "on")
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -65,9 +72,10 @@ class FeedProcessor:
     """Synchronous core: frame bytes in, raw ticks out.  The async runner only moves data."""
 
     def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None,
-                 books: BookStore | None = None, ext: bool = False, segment: str | None = None) -> None:
+                 books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False) -> None:
         self.key_map = key_map
         self.ext = ext                                   # extended fields and session events (off in production for now)
+        self.depth = depth                               # order book levels 2 to 5 (SCRUM-193; JARVIS_DEPTH5=1, off by default)
         self.events: list[dict] = []
         self._event_state: dict[tuple, str] = {}
         self.books = books if books is not None else BookStore()   # live five-level books, memory only
@@ -100,7 +108,7 @@ class FeedProcessor:
             self._index_seen.update(self._index_keys.intersection(resp.feeds.keys()))
         for sym, ts, ltp, bids, asks in decode.books_from_response(resp, self.key_map):
             self.books.update(sym, ts, ltp, bids, asks)
-        for t in decode.ticks_from_response(resp, self.key_map, ext=self.ext):
+        for t in decode.ticks_from_response(resp, self.key_map, ext=self.ext, depth=self.depth):
             t.rts = now                                  # when this process received the message (exact arrival order)
             if t.ts.date() != now.date():                # last trade from an earlier day: no trade yet today
                 if t.fts is not None and t.fts.date() == now.date():
@@ -136,14 +144,14 @@ class UpstoxFeed:
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None,
                  token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None,
-                 books: BookStore | None = None, ext: bool = False, segment: str | None = None) -> None:
+                 books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
         # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
         self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
-        self.proc = FeedProcessor(key_map, policy, books, ext=ext)
+        self.proc = FeedProcessor(key_map, policy, books, ext=ext, depth=depth)
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.segment = segment                            # 'eq' or 'fo': the folder this feed owns and compacts at the end of the session (SCRUM-133)
         self.clock = clock
@@ -471,6 +479,8 @@ def main() -> None:
     ap.add_argument("--ext-fields", action="store_true", default=None,
                     help="also store trade size, average price, book totals, previous close, auction fields and session "
                          "events (default off; or JARVIS_EXT_FIELDS=1)")
+    ap.add_argument("--depth5", action="store_true", default=None,
+                    help="also store order book levels 2 to 5 (full mode; default off; or JARVIS_DEPTH5=1; SCRUM-193)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv(ENV_FILE)
@@ -479,7 +489,7 @@ def main() -> None:
     def new_policy() -> TickPolicy:
         return TickPolicy(**{**{"mode": base.mode, "min_interval_s": base.min_interval_s, "greeks": base.greeks,
                                 "decimals": base.decimals}, **{k: v for k, v in policy_args.items() if v is not None}})
-    log.info("tick storage: %s", new_policy().describe())
+    log.info("tick storage: %s; order book levels 2-5: %s", new_policy().describe(), "on" if depth5_enabled(a.depth5) else "off")
     token = current_token()
     if not token and a.once:
         raise SystemExit("no token: set UPSTOX_ACCESS_TOKEN (see python -m data_layer.upstox.auth)")
@@ -512,7 +522,7 @@ def main() -> None:
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
                           token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books,
                           ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"),
-                          segment=a.segment)
+                          segment=a.segment, depth=depth5_enabled(a.depth5))
     books = BookStore()
 
     async def runner() -> None:

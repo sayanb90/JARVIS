@@ -27,7 +27,8 @@ import pandas as pd
 from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
 
 PARTICIPANT_KNOWN_UTC = pd.Timedelta(hours=15)            # 20:30 IST: NSE posts the file in the evening; used from the next session
-TICK_COLUMNS = ("ts", "fts", "symbol", "ltp", "vol_today", "ltq", "bid", "ask", "bid_qty", "ask_qty", "oi", "iv", "delta", "gamma")
+TICK_COLUMNS = ("ts", "fts", "symbol", "ltp", "vol_today", "ltq", "bid", "ask", "bid_qty", "ask_qty", "oi", "iv", "delta", "gamma",
+                *(f"{s}{i}{q}" for s in ("bid", "ask") for i in range(2, 6) for q in ("", "_qty")))
 INDEX_NAMES = {"NIFTY": ("NIFTY50", "NIFTY"), "BANKNIFTY": ("NIFTYBANK", "BANKNIFTY"), "FINNIFTY": ("NIFTYFINANCIALSERVICES", "FINNIFTY")}
 TOP_N_STOCKS = 15                                        # constituents by weight whose minutes are loaded for the basket signals
 

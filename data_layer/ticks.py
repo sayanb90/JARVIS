@@ -50,6 +50,24 @@ class Tick:
     iiq_market: Optional[int] = None    # imbalance from market orders
     ref_price: Optional[float] = None   # reference price for price bands
     cas_eligible: Optional[bool] = None
+    # order book levels 2 to 5 (SCRUM-193): filled only when the feed runs with JARVIS_DEPTH5=1 (full mode carries five levels; level 1
+    # is bid/ask above); a column that is empty in a batch is not written, so output is unchanged while the switch is off
+    bid2: Optional[float] = None
+    bid2_qty: Optional[int] = None
+    bid3: Optional[float] = None
+    bid3_qty: Optional[int] = None
+    bid4: Optional[float] = None
+    bid4_qty: Optional[int] = None
+    bid5: Optional[float] = None
+    bid5_qty: Optional[int] = None
+    ask2: Optional[float] = None
+    ask2_qty: Optional[int] = None
+    ask3: Optional[float] = None
+    ask3_qty: Optional[int] = None
+    ask4: Optional[float] = None
+    ask4_qty: Optional[int] = None
+    ask5: Optional[float] = None
+    ask5_qty: Optional[int] = None
     # event time (SCRUM-116): `ts` is the time of the last trade, so quote, Greek and open-interest updates between trades all carry
     # the time of the earlier trade.  fts is when Upstox generated the message (FeedResponse.currentTs); rts is when this process
     # received it, which orders messages exactly even if the two clocks disagree.  Both naive UTC; a column that is empty in a

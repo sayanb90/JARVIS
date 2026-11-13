@@ -187,6 +187,13 @@ def make_raw(underlying: str = "NIFTY", end: str = "2026-03-31", index_days: int
                                            "bid_qty": rng.integers(65, 3000, len(g)), "ask_qty": rng.integers(65, 3000, len(g)), "oi": g["oi"].to_numpy(),
                                            "iv": np.nan, "delta": np.nan, "gamma": np.nan}))
     ticks_fo = pd.concat(tick_rows, ignore_index=True) if tick_rows else pd.DataFrame()
+    if len(ticks_fo):                                         # order book levels 2 to 5 (as stored with JARVIS_DEPTH5=1)
+        step_px = (ticks_fo["ask"] - ticks_fo["bid"]).clip(lower=0.05) / 2
+        for i in range(2, 6):
+            ticks_fo[f"bid{i}"] = ticks_fo["bid"] - step_px * (i - 1)
+            ticks_fo[f"ask{i}"] = ticks_fo["ask"] + step_px * (i - 1)
+            ticks_fo[f"bid{i}_qty"] = rng.integers(65, 6500, len(ticks_fo))
+            ticks_fo[f"ask{i}_qty"] = rng.integers(65, 6500, len(ticks_fo))
 
     part_rows = []
     for d in days:

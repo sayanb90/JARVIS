@@ -75,9 +75,22 @@ def _tick(symbol: str, ltpc, vtt: Optional[int], quote, oi: Optional[float], gre
                 int(oi) if oi else None, **(greeks or {}), **(extra or {}), fts=fts)
 
 
-def ticks_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str], ext: bool = False
+def _depth(quotes) -> dict:
+    """Levels 2 to 5 of a full-mode book (SCRUM-193); a missing or empty level is None."""
+    out = {}
+    for i in range(2, 6):
+        q = quotes[i - 1] if len(quotes) >= i else None
+        out[f"bid{i}"] = (q.bidP or None) if q is not None else None
+        out[f"bid{i}_qty"] = (int(q.bidQ) or None) if q is not None else None
+        out[f"ask{i}"] = (q.askP or None) if q is not None else None
+        out[f"ask{i}_qty"] = (int(q.askQ) or None) if q is not None else None
+    return out
+
+
+def ticks_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str], ext: bool = False, depth: bool = False
                         ) -> Iterator[Tick]:
-    """Yield one Tick per known instrument in a feed frame; unknown keys are ignored.  `ext` adds the extended fields.  Every tick
+    """Yield one Tick per known instrument in a feed frame; unknown keys are ignored.  `ext` adds the extended fields, `depth` order book
+    levels 2 to 5 (full mode only).  Every tick
     carries the message time (`fts`, FeedResponse.currentTs) as its event time next to the last-trade time `ts`."""
     fts = _ts(resp.currentTs) if resp.currentTs else None
     for key, feed in resp.feeds.items():
@@ -90,7 +103,10 @@ def ticks_from_response(resp: "pb.FeedResponse", key_to_symbol: dict[str, str], 
             if ff.HasField("marketFF"):
                 m = ff.marketFF
                 q = m.marketLevel.bidAskQuote[0] if m.marketLevel.bidAskQuote else None
-                t = _tick(sym, m.ltpc, m.vtt, q, m.oi, _greeks(m), {**_ext_ltpc(m.ltpc), **_ext_full(m)} if ext else None, fts)
+                extra = {**_ext_ltpc(m.ltpc), **_ext_full(m)} if ext else {}
+                if depth:
+                    extra.update(_depth(m.marketLevel.bidAskQuote))
+                t = _tick(sym, m.ltpc, m.vtt, q, m.oi, _greeks(m), extra or None, fts)
             elif ff.HasField("indexFF"):
                 t = _tick(sym, ff.indexFF.ltpc, None, None, None, None, _ext_ltpc(ff.indexFF.ltpc) if ext else None, fts)
         elif feed.HasField("firstLevelWithGreeks"):

@@ -310,3 +310,81 @@ def rr25(ctx: Context, p: dict) -> pd.DataFrame:
 
 def minute_index(ts: pd.Series) -> pd.Series:
     return minute_of_session(ts)
+
+
+# ---------------------------------------------------------------------------------------------- order book levels 2 to 5 (SCRUM-193)
+LEVELS = 5
+
+
+def _book_cols(t: pd.DataFrame) -> bool:
+    return all(c in t.columns for c in ("bid2", "ask2", "bid2_qty", "ask2_qty")) and t["bid2"].notna().any()
+
+
+def _level(t: pd.DataFrame, side: str, i: int, what: str) -> pd.Series:
+    if i == 1:
+        col = side if what == "px" else f"{side}_qty"
+    else:
+        col = f"{side}{i}" if what == "px" else f"{side}{i}_qty"
+    return t[col] if col in t.columns else pd.Series(np.nan, index=t.index)
+
+
+@register(Spec(id="depth_features", version=1, family="live", grid="1m", inputs=("ticks_fo",), live_only=True, min_sample=MIN_SAMPLE,
+               params={"levels": LEVELS, "withdraw_window": 15}, tickets=("SCRUM-193",),
+               doc="Per contract-minute from the 5-level book: depth imbalance over 5 levels, book slope (quantity per unit of price "
+                   "away from the mid), total depth and its change against the previous 15 minutes (liquidity withdrawal), and "
+                   "quote refills after trades at the touch (an iceberg proxy).  Empty until JARVIS_DEPTH5 is on."))
+def depth_features(ctx: Context, p: dict) -> pd.DataFrame:
+    t = ctx.get("ticks_meta")
+    if t is None or not len(t) or not _book_cols(t):
+        return pd.DataFrame()
+    t = t.sort_values("t_evt").copy()
+    bq = sum(_level(t, "bid", i, "qty").fillna(0) for i in range(1, p["levels"] + 1))
+    aq = sum(_level(t, "ask", i, "qty").fillna(0) for i in range(1, p["levels"] + 1))
+    t["depth_imb"] = (bq - aq) / (bq + aq).replace(0, np.nan)
+    t["depth"] = bq + aq
+    far_b = _level(t, "bid", p["levels"], "px")
+    far_a = _level(t, "ask", p["levels"], "px")
+    span = ((far_a - far_b) / t["mid"]).replace(0, np.nan)
+    t["slope"] = (bq + aq) / span                                  # quantity per relative price distance across the visible book
+    g = t.groupby("symbol")
+    prev_bid_q = g["bid_qty"].shift(1)
+    prev_bid = g["bid"].shift(1)
+    sold_at_bid = (t["ltp"] <= prev_bid) & (g["vol_today"].diff() > 0) if "vol_today" in t.columns else pd.Series(False, index=t.index)
+    t["refill"] = (sold_at_bid & (t["bid"] == prev_bid) & (t["bid_qty"] >= prev_bid_q)).astype(int)
+    m = t.groupby(["minute", "symbol"]).agg(depth_imb=("depth_imb", "mean"), slope=("slope", "median"), depth=("depth", "mean"),
+                                             refills=("refill", "sum"), cp=("instrument_type", "first"), strike=("strike", "first"),
+                                             expiry=("expiry", "first")).reset_index()
+    m = m.sort_values("minute")
+    base = m.groupby("symbol")["depth"].transform(lambda x: x.shift(1).rolling(p["withdraw_window"], min_periods=5).median())
+    m["depth_change"] = m["depth"] / base - 1
+    m["known_at"] = m["minute"] + pd.Timedelta(minutes=1)
+    return m.rename(columns={"minute": "ts"})
+
+
+@register(Spec(id="mlofi_future", version=1, family="live", grid="1m", inputs=("ticks_fo",), live_only=True, min_sample=MIN_SAMPLE,
+               params={"levels": LEVELS}, tickets=("SCRUM-193",),
+               doc="Multi-level order flow imbalance of the front future per minute (Xu, Gould, Howison; Cont et al.): the best-level OFI "
+                   "computed at each of 5 levels, each normalised by mean depth.  Empty until JARVIS_DEPTH5 is on."))
+def mlofi_future(ctx: Context, p: dict) -> pd.DataFrame:
+    t = ctx.get("ticks_meta")
+    if t is None or not len(t) or not _book_cols(t):
+        return pd.DataFrame()
+    f = t[t["instrument_type"] == "FUT"].copy()
+    if f.empty:
+        return pd.DataFrame()
+    f = f[f["expiry"] == f.groupby(f["minute"].dt.normalize())["expiry"].transform("min")].sort_values("t_evt")
+    out = None
+    for i in range(1, p["levels"] + 1):
+        b, a = _level(f, "bid", i, "px"), _level(f, "ask", i, "px")
+        qb, qa = _level(f, "bid", i, "qty"), _level(f, "ask", i, "qty")
+        pb, pa, pqb, pqa = b.shift(1), a.shift(1), qb.shift(1), qa.shift(1)
+        e = (np.where(b >= pb, qb, 0) - np.where(b <= pb, pqb, 0) - np.where(a <= pa, qa, 0) + np.where(a >= pa, pqa, 0))
+        f[f"e{i}"] = np.where(pb.isna(), 0, np.nan_to_num(e))
+        f[f"d{i}"] = (qb + qa) / 2
+        agg = f.groupby("minute").agg(**{f"ofi{i}": (f"e{i}", "sum"), f"depth{i}": (f"d{i}", "mean")})
+        agg[f"ofi{i}_norm"] = agg[f"ofi{i}"] / agg[f"depth{i}"].replace(0, np.nan)
+        out = agg if out is None else out.join(agg)
+    out = out.reset_index().rename(columns={"minute": "ts"})
+    out["mlofi"] = out[[f"ofi{i}_norm" for i in range(1, p["levels"] + 1)]].mean(axis=1)
+    out["known_at"] = out["ts"] + pd.Timedelta(minutes=1)
+    return out
