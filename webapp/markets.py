@@ -31,6 +31,8 @@ MARKETS: dict[str, dict] = {
     "SG": dict(name="Singapore", exchange="Singapore", tz="Asia/Singapore", open="09:00", close="17:00", lunch=None, currency="SGD"),
     "CN": dict(name="China", exchange="Shanghai / Shenzhen", tz="Asia/Shanghai", open="09:30", close="15:00", lunch=("11:30", "13:00"), currency="CNY"),
     "HK": dict(name="Hong Kong", exchange="Hong Kong", tz="Asia/Hong_Kong", open="09:30", close="16:00", lunch=("12:00", "13:00"), currency="HKD"),
+    # the global cues (data/global_cues.csv): futures and FX trade nearly round the clock, so the whole UTC day is the session
+    "GLOBAL": dict(name="Global cues", exchange="CME · CBOE · FX", tz="UTC", open="00:00", close="23:59", lunch=None, currency="USD"),
 }
 
 # Yahoo suffix -> (market, exchange label, time zone, open, close, currency); the European exchanges differ in hours and currency
@@ -57,11 +59,29 @@ SUFFIXES: dict[str, tuple] = {
 }
 
 
+_CUES: dict = {}
+
+
+def _cues() -> set[str]:
+    """Symbols of data/global_cues.csv, re-read only when the file changes (market_of runs once per symbol of the universe)."""
+    try:
+        from data_layer import universe_files as uf
+        path = uf.global_cues_csv()
+        key = (str(path), path.stat().st_mtime_ns if path.exists() else 0)
+        if _CUES.get("key") != key:
+            _CUES.update(key=key, symbols={c.upper() for c in uf.cue_symbols()})
+        return _CUES["symbols"]
+    except Exception:                                                     # noqa: BLE001 -- no file: no cues
+        return set()
+
+
 def market_of(symbol: str) -> str:
     """The market a symbol belongs to, from its Yahoo suffix; a symbol without one is a US listing."""
     s = (symbol or "").upper()
     if s.startswith("NSE_INDEX:"):
         return "IN"
+    if s.endswith(("=F", "=X")) or s in _cues():
+        return "GLOBAL"
     for suffix, (market, _) in SUFFIXES.items():
         if s.endswith(suffix):
             return market
