@@ -45,6 +45,9 @@ JARVIS=/home/jarvis/JARVIS
 45 16 * * 1-5  cd $JARVIS && python -m data_layer.nse_daily_files daily --days 10 >> logs/nse-daily-files.log 2>&1
 # Daily FX rates from Yahoo (for comparing earnings in one currency with prices in another); after the Asian and European closes
 30 0 * * *     cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1
+# Money-market rates (SCRUM-186): one request to the RBI home page for the repo rate and corridor, call money range and T-bill cut-offs.
+# History builds forward; overnight MIBOR (FBIL publishes it only inside its web app) is loaded by hand:  python -m data_layer.rates import FILE
+40 12 * * 1-5  cd $JARVIS && python -m data_layer.rates daily >> logs/rates.log 2>&1
 # Fundamentals from Yahoo (decision SCRUM-138): a daily slice, never-fetched and failed symbols first, then symbols
 # with a missing year (retried weekly), then the oldest.  What is due comes from what is stored, so a day the job did not run is caught up
 # by the next one (--catch-up).  Then the pillar inputs (ROIC, debt, FCF in the price's currency) and the four-year completeness check.

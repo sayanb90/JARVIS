@@ -105,6 +105,8 @@ CATALOG = [
           "file", "yf_fundamentals/actions.parquet", vendor="Yahoo"),
     Table("reference", "index_weights", "Index weights", "Members of the NSE option indices and their weights, as dated snapshots: official top ten and an approximate full list.",
           "file", "reference/index_weights.parquet", "date", vendor="NSE"),
+    Table("reference", "rates", "Money-market rates", "Policy repo rate and corridor, call money range and T-bill cut-offs each day; overnight MIBOR when loaded from a file.",
+          "file", "reference/rates.parquet", "date", vendor="RBI · FBIL"),
     Table("reference", "fx_rates", "FX rates", "Daily closes of the currency pairs, as US dollars per unit of each currency, used to convert statements into the price's currency.",
           "file", "fx/rates.parquet", vendor="Yahoo"),
     Table("market", "ticks", "Ticks", "Every update from the live feed: last price, cumulative volume, best bid/ask and sizes, open interest.", "days", "ticks", "ts", vendor="Upstox"),
