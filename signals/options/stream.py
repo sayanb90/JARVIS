@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Any, Iterable, Optional
 
@@ -33,7 +33,20 @@ import pandas as pd
 
 LEVELS = 5
 WITHDRAW_MINUTES = 15
+WITHDRAW_NS = WITHDRAW_MINUTES * 60 * 10**9
+DAY_NS = 86_400 * 10**9
 NAN = float("nan")
+_EPOCH = datetime(1970, 1, 1)
+_US = timedelta(microseconds=1)
+
+
+def _ns(ts) -> int:
+    """Nanoseconds since the epoch of a naive UTC time (pandas Timestamp, datetime or numpy datetime64)."""
+    if isinstance(ts, pd.Timestamp):
+        return ts.value
+    if isinstance(ts, datetime):
+        return ((ts.replace(tzinfo=None) - _EPOCH) // _US) * 1000
+    return pd.Timestamp(ts).value
 
 
 def _f(x) -> float:
@@ -93,6 +106,7 @@ class _Future:
 class BookAccumulator:
     def __init__(self, buckets: Iterable[str] = ("10s", "1min"), levels: int = LEVELS, front: Optional[dict[str, Any]] = None):
         self.widths = {b: pd.Timedelta(b) for b in buckets}
+        self.width_ns = {b: td.value for b, td in self.widths.items()}
         self.levels = levels
         self.fixed_front = {u: pd.Timestamp(e).date() for u, e in (front or {}).items()}   # underlying -> front expiry, from the contracts
         self.front: dict[str, date] = dict(self.fixed_front)                               # else the nearest expiry seen today
@@ -106,11 +120,12 @@ class BookAccumulator:
         ts = _get(t, "fts") or _get(t, "ts")
         if ts is None:
             return []
-        ts = pd.Timestamp(ts)
+        ns = _ns(ts)                                     # integer nanoseconds: flooring a Timestamp per width cost most of a tick
+        day = ns // DAY_NS
         sym = _get(t, "symbol")
         und = _get(t, "underlying") or str(sym).split("_FUT_")[0]
-        if self.today != ts.date():
-            self.today = ts.date()
+        if self.today != day:
+            self.today = day
             self.front = dict(self.fixed_front)
         fut = self.futures.get(sym)
         if fut is None:
@@ -120,13 +135,13 @@ class BookAccumulator:
         if fut.expiry is not None and und not in self.fixed_front and (und not in self.front or fut.expiry < self.front[und]):
             self.front[und] = fut.expiry
         out: list[dict] = []
-        if fut.day != ts.date():                                   # a new session: close what is open, forget yesterday's book
+        if fut.day != day:                                         # a new session: close what is open, forget yesterday's book
             out += self._close_all(fut)
-            fut.day, fut.prev = ts.date(), None
+            fut.day, fut.prev = day, None
             for d in fut.depth_hist.values():
                 d.clear()
-        for w, td in self.widths.items():
-            start = ts.floor(td)
+        for w, wns in self.width_ns.items():
+            start = ns - ns % wns
             b = fut.open.get(w)
             if b is not None and start < b.start:
                 self.late += 1
@@ -135,10 +150,10 @@ class BookAccumulator:
                 out += self._close(fut, w)
         self.ticks += 1
         book = self._book(t)
-        for w in self.widths:
+        for w, wns in self.width_ns.items():
             b = fut.open.get(w)
             if b is None:
-                b = fut.open[w] = _Bucket(ts.floor(self.widths[w]), self.levels)
+                b = fut.open[w] = _Bucket(ns - ns % wns, self.levels)
             self._add(fut, b, book)
         fut.prev = book
         return out
@@ -217,7 +232,8 @@ class BookAccumulator:
     def _close(self, fut: _Future, w: str) -> list[dict]:
         b = fut.open.pop(w)
         td = self.widths[w]
-        base = {"bucket": w, "underlying": fut.underlying, "symbol": fut.symbol, "ts": b.start, "known_at": b.start + td}
+        start = pd.Timestamp(b.start)
+        base = {"bucket": w, "underlying": fut.underlying, "symbol": fut.symbol, "ts": start, "known_at": start + td}
         rows = [dict(base, signal="book_pressure", micro_rel=(b.micro - b.mid) / b.mid if b.mid else NAN, qi=b.qi)]
         is_front = getattr(fut, "expiry", None) is not None and self.front.get(fut.underlying) == fut.expiry
         depth = b.depth_sum / b.depth_n if b.depth_n else NAN
@@ -226,7 +242,7 @@ class BookAccumulator:
         if b.dn:
             hist = fut.depth_hist[w]
             dmean = b.dsum / b.dn
-            lo = b.start - pd.Timedelta(minutes=WITHDRAW_MINUTES)      # the batch's rolling("15min", closed="left"): [start-15m, start)
+            lo = b.start - WITHDRAW_NS                                 # the batch's rolling("15min", closed="left"): [start-15m, start)
             while hist and hist[0][0] < lo:
                 hist.popleft()
             vals = [d for _, d in hist]

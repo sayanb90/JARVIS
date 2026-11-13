@@ -106,12 +106,14 @@ def test_cost_per_tick(ticks, contracts):
     exp = contracts.set_index("symbol")["expiry"]
     for r in t:
         r["expiry"], r["underlying"] = exp[r["symbol"]], "NIFTY"
-    acc = BookAccumulator(buckets=("10s", "1min"), front={"NIFTY": exp[FRONT]})
-    t0 = time.perf_counter()
-    for r in t:
-        acc.update(r)
-    per_tick = (time.perf_counter() - t0) / len(t)
-    assert per_tick < 50e-6, f"{per_tick * 1e6:.1f} us per tick"
+    per_tick = []
+    for _ in range(3):                                       # best of three: a shared CI runner's noise is not the accumulator's cost
+        acc = BookAccumulator(buckets=("10s", "1min"), front={"NIFTY": exp[FRONT]})
+        t0 = time.perf_counter()
+        for r in t:
+            acc.update(r)
+        per_tick.append((time.perf_counter() - t0) / len(t))
+    assert min(per_tick) < 50e-6, f"{min(per_tick) * 1e6:.1f} us per tick"
 
 
 # ---------------------------------------------------------------------------------------------- inside the feed
