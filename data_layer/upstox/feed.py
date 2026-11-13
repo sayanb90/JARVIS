@@ -88,6 +88,18 @@ def depth5_enabled(flag: bool | None = None, env=None, segment: str | None = Non
     return bool(segment) and segment in {x.strip() for x in v.split(",") if x.strip()}
 
 
+def live_signals_enabled(env=None) -> bool:
+    """Compute the futures order-book signals inside the feed (SCRUM-196): JARVIS_LIVE_SIGNALS=1.  Off when unset."""
+    return (os.environ if env is None else env).get("JARVIS_LIVE_SIGNALS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def write_interval(env=None) -> float:
+    """Seconds between tick writes: 15, or 5 when the live signals run at 10-second buckets (JARVIS_SIGNAL_CADENCE=10s), so the runner
+    reading the tick files is at most one bucket behind."""
+    cad = (os.environ if env is None else env).get("JARVIS_SIGNAL_CADENCE", "1m").strip().lower()
+    return 5.0 if cad in ("10s", "10sec") else 15.0
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -96,8 +108,12 @@ class FeedProcessor:
     """Synchronous core: frame bytes in, raw ticks out.  The async runner only moves data."""
 
     def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None,
-                 books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False) -> None:
+                 books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False,
+                 book_signals=None) -> None:
         self.key_map = key_map
+        self.book_signals = book_signals                 # signals.options.stream.BookAccumulator, or None (SCRUM-196)
+        self.signal_rows: list[dict] = []
+        self.signal_errors = 0
         self.ext = ext                                   # extended fields and session events (off in production for now)
         self.depth = depth                               # order book levels 2 to 5 (SCRUM-193; JARVIS_DEPTH5=1, off by default)
         self.events: list[dict] = []
@@ -148,13 +164,34 @@ class FeedProcessor:
                                 "(is ltt really epoch ms?)", t.ts, now)
                 continue
             self.ticks += 1
+            if self.book_signals is not None and "_FUT_" in t.symbol:
+                self._book_signal(t)
             kept = self.policy.apply(t)
             if kept is not None:
                 self._ticks.append(kept)
 
+    def _book_signal(self, t: Tick) -> None:
+        """Feed one futures tick to the order-book accumulator; a failure there is counted and never stops the tick capture."""
+        from signals.options.stream import fut_meta
+        try:
+            meta = fut_meta(t.symbol)
+            row = {f: getattr(t, f) for f in t.__slots__}
+            row.update(underlying=meta[0] if meta else None, expiry=meta[1] if meta else None)
+            self.signal_rows += self.book_signals.update(row)
+        except Exception:                                  # noqa: BLE001
+            self.signal_errors += 1
+            if self.signal_errors in (1, 100, 10_000):
+                log.exception("order-book signal update failed (%d so far); ticks are unaffected", self.signal_errors)
+
     def drain(self) -> list[Tick]:
         ticks, self._ticks = self._ticks, []
         return ticks
+
+    def drain_signals(self, final: bool = False) -> list[dict]:
+        if final and self.book_signals is not None:
+            self.signal_rows += self.book_signals.flush()
+        rows, self.signal_rows = self.signal_rows, []
+        return rows
 
     def drain_events(self) -> list[dict]:
         ev, self.events = self.events, []
@@ -168,14 +205,16 @@ class UpstoxFeed:
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None,
                  token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None,
-                 books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False) -> None:
+                 books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False,
+                 book_signals=None, signal_store: Path | None = None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
         # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
         self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
-        self.proc = FeedProcessor(key_map, policy, books, ext=ext, depth=depth)
+        self.proc = FeedProcessor(key_map, policy, books, ext=ext, depth=depth, book_signals=book_signals)
+        self.signal_store = signal_store
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.segment = segment                            # 'eq' or 'fo': the folder this feed owns and compacts at the end of the session (SCRUM-133)
         self.clock = clock
@@ -201,6 +240,14 @@ class UpstoxFeed:
             except Exception:
                 self.proc.events[:0] = events
                 raise
+        if self.proc.book_signals is not None:
+            rows = self.proc.drain_signals(final=final)
+            try:
+                from signals.options.stream import write_rows
+                write_rows(rows, self.signal_store)
+            except Exception:                              # noqa: BLE001 -- signals are best effort; ticks are what must not be lost
+                self.proc.signal_rows[:0] = rows
+                log.exception("could not write %d live signal rows; kept for the next write", len(rows))
         return n
 
     BISECT_BUDGET = 256               # write attempts one flush may spend isolating bad ticks
@@ -555,10 +602,15 @@ def main() -> None:
         if fresh and fresh != key_map:
             log.info("subscription list changed: %d -> %d instruments", len(key_map), len(fresh))
             key_map = fresh
+        acc = None
+        if a.segment == "fo" and live_signals_enabled():
+            from signals.options.stream import BookAccumulator, front_expiries
+            acc = BookAccumulator(buckets=("10s", "1min"), front=front_expiries(key_map.values(), utcnow().date()))
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
                           token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books,
                           ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"),
-                          segment=a.segment, depth=depth5_enabled(a.depth5, segment=a.segment))
+                          segment=a.segment, depth=depth5_enabled(a.depth5, segment=a.segment), book_signals=acc,
+                          write_s=write_interval())
     books = BookStore()
 
     async def runner() -> None:

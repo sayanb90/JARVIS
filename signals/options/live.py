@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from signals.framework import Context, Spec, provider, register
-from signals.options.core import build_chain, minute_of_session, rate_table
+from signals.options.core import STALE_MAX, _years, build_chain, minute_of_session, rate_table
 from signals.options.positioning import gex_table, pcr_table
 
 MIN_SAMPLE = 40
@@ -41,7 +41,7 @@ def _ticks(ctx: Context) -> pd.DataFrame:
         return pd.DataFrame()
     t = t.copy()
     t["t_evt"] = pd.to_datetime(t["fts"] if "fts" in t.columns else t["ts"])
-    return t.sort_values("t_evt")
+    return t.sort_values("t_evt", kind="stable")                 # stable: ticks with the same event time keep their arrival order
 
 
 @provider("ticks_meta")
@@ -58,7 +58,7 @@ def ticks_meta(ctx: Context) -> pd.DataFrame:
     tot = (t["bid_qty"] + t["ask_qty"]).replace(0, np.nan)
     t["microprice"] = (t["bid"] * t["ask_qty"] + t["ask"] * t["bid_qty"]) / tot
     t["qi"] = (t["bid_qty"] - t["ask_qty"]) / tot
-    t["minute"] = t["t_evt"].dt.floor("min")
+    t["minute"] = t["t_evt"].dt.floor(ctx.bucket)          # the bucket start: a minute, or 10 s (Context.bucket)
     return t
 
 
@@ -75,7 +75,26 @@ def chain_live(ctx: Context) -> pd.DataFrame:
                                               delta_vendor=("delta", "last"), gamma_vendor=("gamma", "last")).reset_index().rename(columns={"minute": "ts"})
     agg["close"] = agg["close"].fillna((agg["bid"] + agg["ask"]) / 2)
     agg["src"] = "tick"
-    return build_chain(agg, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rate_table(ctx.raw.get("rates")))
+    rates = rate_table(ctx.raw.get("rates"))
+    if ctx.bucket_td >= pd.Timedelta(minutes=1):
+        return build_chain(agg, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rates)
+    # Sub-minute buckets (10 s): the index and future minute bars are too coarse, so the grid is the option buckets themselves and the
+    # forward falls back to the front future's bucket mid from its own ticks.  Staleness is still counted in minutes.
+    steps = int(pd.Timedelta(minutes=STALE_MAX) / ctx.bucket_td)
+    return build_chain(agg, ctx.get("contract_table"), pd.DataFrame(columns=["ts", "close"]), _fut_buckets(t), ctx.r, stale_max=steps,
+                       rates=rates)
+
+
+def _fut_buckets(t: pd.DataFrame) -> pd.DataFrame:
+    """The front future per bucket from its ticks (last mid, else last trade), shaped like fut_front."""
+    f = t[t["instrument_type"] == "FUT"]
+    if f.empty:
+        return pd.DataFrame(columns=["ts", "close", "t_fut"])
+    f = f[f["expiry"] == f.groupby(f["minute"].dt.normalize())["expiry"].transform("min")]
+    g = f.groupby("minute").agg(close=("mid", "last"), ltp=("ltp", "last"), expiry=("expiry", "first")).reset_index().rename(columns={"minute": "ts"})
+    g["close"] = g["close"].fillna(g["ltp"])
+    g["t_fut"] = _years(g["expiry"], g["ts"])
+    return g[["ts", "close", "t_fut"]]
 
 
 def _spec(sid, doc, inputs=("ticks_fo",), grid="1m", kind="signal", params=None):
@@ -110,7 +129,7 @@ def spread_gate(ctx: Context, p: dict) -> pd.DataFrame:
     daily["base_std"] = daily.groupby(["slot", "band"])["mean"].transform(lambda s: s.shift(1).rolling(p["window"], min_periods=3).std())
     m = m.merge(daily[["day", "slot", "band", "base_mean", "base_std"]], on=["day", "slot", "band"], how="left")
     m["z"] = (m["rel_spread"] - m["base_mean"]) / m["base_std"].replace(0, np.nan)
-    m["known_at"] = m["minute"] + pd.Timedelta(minutes=1)
+    m["known_at"] = m["minute"] + ctx.bucket_td
     return m.rename(columns={"minute": "ts"})[["ts", "known_at", "symbol", "expiry", "strike", "cp", "k", "rel_spread", "z"]]
 
 
@@ -134,7 +153,7 @@ def fair_value_gap(ctx: Context, p: dict) -> pd.DataFrame:
     m["fair"] = g["mid"].shift(1) + m["delta"] * (m["fut_mp"] - g["fut_mp"].shift(1))
     m["buy_edge"] = (m["fair"] - m["ask"]) / m["mid"]
     m["sell_edge"] = (m["bid"] - m["fair"]) / m["mid"]
-    m["known_at"] = m["minute"] + pd.Timedelta(minutes=1)
+    m["known_at"] = m["minute"] + ctx.bucket_td
     return m.rename(columns={"minute": "ts"})[["ts", "known_at", "symbol", "expiry", "strike", "cp", "fair", "buy_edge", "sell_edge"]].dropna(subset=["fair"])
 
 
@@ -145,7 +164,7 @@ def book_pressure(ctx: Context, p: dict) -> pd.DataFrame:
         return pd.DataFrame()
     m = _per_minute(t, opts_only=False)
     m["micro_rel"] = (m["microprice"] - m["mid"]) / m["mid"]
-    m["known_at"] = m["minute"] + pd.Timedelta(minutes=1)
+    m["known_at"] = m["minute"] + ctx.bucket_td
     return m.rename(columns={"minute": "ts"})[["ts", "known_at", "symbol", "expiry", "strike", "cp", "micro_rel", "qi"]]
 
 
@@ -157,15 +176,16 @@ def fut_ofi(ctx: Context, p: dict) -> pd.DataFrame:
     f = t[t["instrument_type"] == "FUT"].copy()
     if f.empty:
         return pd.DataFrame()
-    f = f[f["expiry"] == f.groupby(f["minute"].dt.normalize())["expiry"].transform("min")].sort_values("t_evt")
+    f = f[f["expiry"] == f.groupby(f["minute"].dt.normalize())["expiry"].transform("min")].sort_values("t_evt", kind="stable")
     b, a, qb, qa = f["bid"], f["ask"], f["bid_qty"], f["ask_qty"]
-    pb, pa, pqb, pqa = b.shift(1), a.shift(1), qb.shift(1), qa.shift(1)
+    day = f["t_evt"].dt.normalize()                                  # each session starts afresh: no difference across the night
+    pb, pa, pqb, pqa = (x.groupby(day).shift(1) for x in (b, a, qb, qa))
     e = (np.where(b >= pb, qb, 0) - np.where(b <= pb, pqb, 0) - np.where(a <= pa, qa, 0) + np.where(a >= pa, pqa, 0))
     f["e"] = np.where(pb.isna(), 0, e)
     f["depth"] = (qb + qa) / 2
     g = f.groupby("minute").agg(ofi=("e", "sum"), depth=("depth", "mean"), mid=("mid", "last")).reset_index()
     g["ofi_norm"] = g["ofi"] / g["depth"].replace(0, np.nan)
-    g["known_at"] = g["minute"] + pd.Timedelta(minutes=1)
+    g["known_at"] = g["minute"] + ctx.bucket_td
     return g.rename(columns={"minute": "ts"})
 
 
@@ -198,7 +218,7 @@ def illiquidity(ctx: Context, p: dict) -> pd.DataFrame:
     m = _per_minute(t)
     touch_lots = np.minimum(m["bid_qty"], m["ask_qty"]) / m["lot"].replace(0, np.nan)
     m["illiq"] = m["rel_spread"] * np.maximum(1.0, p["touch_ref"] / touch_lots.replace(0, np.nan))
-    m["known_at"] = m["minute"] + pd.Timedelta(minutes=1)
+    m["known_at"] = m["minute"] + ctx.bucket_td
     return m.rename(columns={"minute": "ts"})[["ts", "known_at", "symbol", "expiry", "strike", "cp", "rel_spread", "illiq"]]
 
 
@@ -247,7 +267,7 @@ def signed_flow(ctx: Context, p: dict) -> pd.DataFrame:
     m["delta_flow"] = m["signed"] * m["delta"].fillna(0) * m["lot"].fillna(1)
     m["vega_flow"] = m["signed"] * m["vega"].fillna(0) * m["lot"].fillna(1) / 100.0
     out = m.groupby("minute").agg(signed_volume=("signed", "sum"), delta_flow=("delta_flow", "sum"), vega_flow=("vega_flow", "sum")).reset_index()
-    out["known_at"] = out["minute"] + pd.Timedelta(minutes=1)
+    out["known_at"] = out["minute"] + ctx.bucket_td
     return out.rename(columns={"minute": "ts"})
 
 
@@ -287,7 +307,7 @@ def pin_full(ctx: Context, p: dict) -> pd.DataFrame:
     s = c.groupby(["ts", "strike"], as_index=False).agg(oi=("oi", "sum"), fwd=("fwd", "first"))
     top = s.loc[s.groupby("ts")["oi"].idxmax()].rename(columns={"strike": "pin_oi"})
     top["dist_oi"] = (top["fwd"] - top["pin_oi"]) / top["fwd"]
-    top["known_at"] = top["ts"] + pd.Timedelta(minutes=1)
+    top["known_at"] = top["ts"] + ctx.bucket_td
     return top[["ts", "known_at", "pin_oi", "fwd", "dist_oi"]]
 
 
@@ -337,7 +357,7 @@ def depth_features(ctx: Context, p: dict) -> pd.DataFrame:
     t = ctx.get("ticks_meta")
     if t is None or not len(t) or not _book_cols(t):
         return pd.DataFrame()
-    t = t.sort_values("t_evt").copy()
+    t = t.sort_values("t_evt", kind="stable").copy()
     bq = sum(_level(t, "bid", i, "qty").fillna(0) for i in range(1, p["levels"] + 1))
     aq = sum(_level(t, "ask", i, "qty").fillna(0) for i in range(1, p["levels"] + 1))
     t["depth_imb"] = (bq - aq) / (bq + aq).replace(0, np.nan)
@@ -346,7 +366,7 @@ def depth_features(ctx: Context, p: dict) -> pd.DataFrame:
     far_a = _level(t, "ask", p["levels"], "px")
     span = ((far_a - far_b) / t["mid"]).replace(0, np.nan)
     t["slope"] = (bq + aq) / span                                  # quantity per relative price distance across the visible book
-    g = t.groupby("symbol")
+    g = t.groupby(["symbol", t["t_evt"].dt.normalize()])
     prev_bid_q = g["bid_qty"].shift(1)
     prev_bid = g["bid"].shift(1)
     sold_at_bid = (t["ltp"] <= prev_bid) & (g["vol_today"].diff() > 0) if "vol_today" in t.columns else pd.Series(False, index=t.index)
@@ -355,9 +375,10 @@ def depth_features(ctx: Context, p: dict) -> pd.DataFrame:
                                              refills=("refill", "sum"), cp=("instrument_type", "first"), strike=("strike", "first"),
                                              expiry=("expiry", "first")).reset_index()
     m = m.sort_values("minute")
-    base = m.groupby("symbol")["depth"].transform(lambda x: x.shift(1).rolling(p["withdraw_window"], min_periods=5).median())
+    n = max(1, int(pd.Timedelta(minutes=p["withdraw_window"]) / ctx.bucket_td))          # the window is in minutes whatever the bucket
+    base = m.groupby(["symbol", m["minute"].dt.normalize()])["depth"].transform(lambda x: x.shift(1).rolling(n, min_periods=min(5, n)).median())
     m["depth_change"] = m["depth"] / base - 1
-    m["known_at"] = m["minute"] + pd.Timedelta(minutes=1)
+    m["known_at"] = m["minute"] + ctx.bucket_td
     return m.rename(columns={"minute": "ts"})
 
 
@@ -372,12 +393,13 @@ def mlofi_future(ctx: Context, p: dict) -> pd.DataFrame:
     f = t[t["instrument_type"] == "FUT"].copy()
     if f.empty:
         return pd.DataFrame()
-    f = f[f["expiry"] == f.groupby(f["minute"].dt.normalize())["expiry"].transform("min")].sort_values("t_evt")
+    f = f[f["expiry"] == f.groupby(f["minute"].dt.normalize())["expiry"].transform("min")].sort_values("t_evt", kind="stable")
+    day = f["t_evt"].dt.normalize()
     out = None
     for i in range(1, p["levels"] + 1):
         b, a = _level(f, "bid", i, "px"), _level(f, "ask", i, "px")
         qb, qa = _level(f, "bid", i, "qty"), _level(f, "ask", i, "qty")
-        pb, pa, pqb, pqa = b.shift(1), a.shift(1), qb.shift(1), qa.shift(1)
+        pb, pa, pqb, pqa = (x.groupby(day).shift(1) for x in (b, a, qb, qa))
         e = (np.where(b >= pb, qb, 0) - np.where(b <= pb, pqb, 0) - np.where(a <= pa, qa, 0) + np.where(a >= pa, pqa, 0))
         f[f"e{i}"] = np.where(pb.isna(), 0, np.nan_to_num(e))
         f[f"d{i}"] = (qb + qa) / 2
@@ -386,5 +408,5 @@ def mlofi_future(ctx: Context, p: dict) -> pd.DataFrame:
         out = agg if out is None else out.join(agg)
     out = out.reset_index().rename(columns={"minute": "ts"})
     out["mlofi"] = out[[f"ofi{i}_norm" for i in range(1, p["levels"] + 1)]].mean(axis=1)
-    out["known_at"] = out["ts"] + pd.Timedelta(minutes=1)
+    out["known_at"] = out["ts"] + ctx.bucket_td
     return out

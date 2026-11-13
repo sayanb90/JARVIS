@@ -95,13 +95,21 @@ class Context:
     daily frames have `date` and `known_at`.  `cut` (optional) is the moment the data was cut at, used by the prefix test."""
 
     def __init__(self, underlying: str, raw: dict[str, pd.DataFrame], cut: Optional[pd.Timestamp] = None, r: float = 0.065,
-                 cache: Optional[dict] = None, signals: Optional[dict] = None):
+                 cache: Optional[dict] = None, signals: Optional[dict] = None, bucket: str = "1min", snaps: str = "fixed"):
         """`cache` pre-sets providers (e.g. the ATM table read back from the store) and `signals` pre-sets signal outputs, so a long
-        history can be computed in two passes without rebuilding the option chain."""
+        history can be computed in two passes without rebuilding the option chain.
+
+        `bucket` is the width tick-based signals are bucketed at ("1min" or "10s", SCRUM-196/197).  `snaps` chooses when the snapshot
+        signals are taken: "fixed" (09:20, 12:00, 15:15 IST) or "all" (every minute of the session, SCRUM-198)."""
         self.underlying = underlying
         self.raw = raw
         self.cut = cut
         self.r = r
+        self.bucket = bucket
+        self.bucket_td = pd.Timedelta(bucket)
+        if snaps not in ("fixed", "all"):
+            raise ValueError(f"snaps must be 'fixed' or 'all', not {snaps!r}")
+        self.snaps = snaps
         self._cache: dict[str, object] = dict(cache or {})
         self._signals: dict[str, pd.DataFrame] = dict(signals or {})
         self._stack: list[str] = []
