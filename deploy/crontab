@@ -65,7 +65,11 @@ JARVIS=/home/jarvis/JARVIS
 # Run one full fo session (same 03:40 UTC start as the equity service). --once exits once that day's
 # session closes and is compacted, so cron runs it fresh every weekday -- this is how the roll above
 # takes effect, since a long-lived process would keep the contract list it started with (section 17.6).
-40 3 * * 1-5   cd $JARVIS && python -m data_layer.upstox.feed --once --segment fo >> logs/fo-feed.log 2>&1
+# The F&O list is split over two connections (SCRUM-194; Upstox allows 2,000 instruments per connection in full mode and 5 connections
+# on Plus): each process takes half of data/fo_universe.csv (round-robin by symbol), writes to the same fo folder and compacts it
+# under the folder lock at the close.  Live order books on ports 8772 and 8782.
+40 3 * * 1-5   cd $JARVIS && python -m data_layer.upstox.feed --once --segment fo --shard 1/2 >> logs/fo-feed.log 2>&1
+40 3 * * 1-5   cd $JARVIS && python -m data_layer.upstox.feed --once --segment fo --shard 2/2 >> logs/fo-feed-2.log 2>&1
 
 # Upstox company fundamentals (SCRUM-103).  Key ratios are today's value only, so a daily snapshot builds their history.
 # Statements, shareholding, corporate actions, profile and peers: a weekly pass (Sunday 13:00 UTC, outside the feed window) that skips companies fetched in the last

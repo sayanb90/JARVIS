@@ -512,8 +512,11 @@ def main(argv: list[str] | None = None, rest: UpstoxRest | None = None) -> int:
                                                              "also used when no token is configured")
     ex = sub.add_parser("expired", parents=[common], help="1-minute candles of expired index options and futures (Upstox Plus)")
     ex.add_argument("--underlying", nargs="+", default=list(UNDERLYING_KEYS), choices=list(UNDERLYING_KEYS))
-    ex.add_argument("--strikes", type=int, default=5, help="strikes kept on each side of the money (default 5)")
-    ex.add_argument("--window-days", type=int, default=21, help="calendar days before expiry pulled for each option (default 21)")
+    ex.add_argument("--strikes", type=int, default=int(os.environ.get("JARVIS_EXPIRED_STRIKES", "5")),
+                    help="strikes kept on each side of the money (default 5, or JARVIS_EXPIRED_STRIKES).  Raising it later is incremental: "
+                         "contracts already stored are skipped, only the wider strikes are fetched")
+    ex.add_argument("--window-days", type=int, default=int(os.environ.get("JARVIS_EXPIRED_WINDOW_DAYS", "21")),
+                    help="calendar days before expiry pulled for each option (default 21, or JARVIS_EXPIRED_WINDOW_DAYS)")
     ex.add_argument("--future-window-days", type=int, default=95, help="calendar days before expiry pulled for each future (default 95)")
     rc = sub.add_parser("recent", parents=[common], help="nightly: the 1-minute candles of any recent day NSE was open with no India rows stored")
     rc.add_argument("--days", type=int, default=14, help="how many days back to look for missing days (default 14)")

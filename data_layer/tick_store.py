@@ -111,7 +111,7 @@ def _trim_for_segment(df: pd.DataFrame, segment: str) -> pd.DataFrame:
 
 def _write_segment(folder: Path, df: pd.DataFrame) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"seg-{_time.time_ns() // 1_000_000:015d}.parquet"
+    path = folder / f"seg-{_time.time_ns() // 1_000_000:015d}-{os.getpid()}.parquet"     # pid: two feed processes may share a folder (SCRUM-194)
     tmp = path.with_suffix(".tmp")
     con = duckdb.connect()
     con.register("t", df)

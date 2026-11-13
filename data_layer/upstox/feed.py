@@ -57,11 +57,35 @@ START_EARLY = timedelta(minutes=5)
 STOP_LATE = timedelta(minutes=5)
 
 
-def depth5_enabled(flag: bool | None = None, env=None) -> bool:
-    """Store order book levels 2 to 5: the --depth5 flag, else JARVIS_DEPTH5 (off unless set to 1/true/yes/on)."""
+def parse_shard(text: str | None) -> tuple[int, int]:
+    """"2/3" -> (2, 3); empty -> (1, 1)."""
+    if not text:
+        return 1, 1
+    i, n = (int(x) for x in str(text).split("/"))
+    if not 1 <= i <= n:
+        raise ValueError(f"bad shard {text!r}: expected I/N with 1 <= I <= N")
+    return i, n
+
+
+def shard_keys(key_map: dict[str, str], shard: int, shards: int) -> dict[str, str]:
+    """The part of a subscription list one connection takes when the list is split over `shards` connections (SCRUM-194): instruments
+    sorted by symbol and dealt round-robin, so every shard gets every expiry and a near-equal count, and the split is the same in every
+    process that reads the same list."""
+    if shards <= 1:
+        return dict(key_map)
+    ordered = sorted(key_map.items(), key=lambda kv: kv[1])
+    return dict(kv for n, kv in enumerate(ordered) if n % shards == shard - 1)
+
+
+def depth5_enabled(flag: bool | None = None, env=None, segment: str | None = None) -> bool:
+    """Store order book levels 2 to 5: the --depth5 flag, else JARVIS_DEPTH5: 1/true/yes/on/all for every feed, or a segment name
+    ("fo" or "eq", comma-separated) for only those feeds.  Off when unset."""
     if flag:
         return True
-    return (os.environ if env is None else env).get("JARVIS_DEPTH5", "").lower() in ("1", "true", "yes", "on")
+    v = (os.environ if env is None else env).get("JARVIS_DEPTH5", "").strip().lower()
+    if v in ("1", "true", "yes", "on", "all"):
+        return True
+    return bool(segment) and segment in {x.strip() for x in v.split(",") if x.strip()}
 
 
 def utcnow() -> datetime:
@@ -479,6 +503,9 @@ def main() -> None:
     ap.add_argument("--ext-fields", action="store_true", default=None,
                     help="also store trade size, average price, book totals, previous close, auction fields and session "
                          "events (default off; or JARVIS_EXT_FIELDS=1)")
+    ap.add_argument("--shard", default=None, metavar="I/N",
+                    help="split the subscription list over N connections and take part I (SCRUM-194; e.g. two F&O processes with 1/2 and 2/2: "
+                         "Upstox allows 2,000 instruments per connection in full mode and 5 connections on Plus)")
     ap.add_argument("--depth5", action="store_true", default=None,
                     help="also store order book levels 2 to 5 (full mode; default off; or JARVIS_DEPTH5=1; SCRUM-193)")
     a = ap.parse_args()
@@ -489,20 +516,29 @@ def main() -> None:
     def new_policy() -> TickPolicy:
         return TickPolicy(**{**{"mode": base.mode, "min_interval_s": base.min_interval_s, "greeks": base.greeks,
                                 "decimals": base.decimals}, **{k: v for k, v in policy_args.items() if v is not None}})
-    log.info("tick storage: %s; order book levels 2-5: %s", new_policy().describe(), "on" if depth5_enabled(a.depth5) else "off")
+    log.info("tick storage: %s; order book levels 2-5: %s", new_policy().describe(), "on" if depth5_enabled(a.depth5, segment=a.segment) else "off")
     token = current_token()
     if not token and a.once:
         raise SystemExit("no token: set UPSTOX_ACCESS_TOKEN (see python -m data_layer.upstox.auth)")
     if not token:
         log.warning("no Upstox token yet: the daemon will keep retrying; run python -m data_layer.upstox.auth")
+    shard, shards = parse_shard(a.shard)
+    label = a.segment if shards == 1 else f"{a.segment}-{shard}of{shards}"
+
     def keys() -> dict[str, str]:
-        km = segment_key_map(a.segment, a.fo_file)
-        return dict(list(km.items())[: a.limit]) if a.limit else km
+        km = shard_keys(segment_key_map(a.segment, a.fo_file), shard, shards)
+        km = dict(list(km.items())[: a.limit]) if a.limit else km
+        cap = MODE_CAP.get(a.mode)
+        if cap and len(km) > cap:
+            log.error("%s: %d instruments exceed the %d-key cap of mode %s on one connection: split the list with --shard I/N",
+                      label, len(km), cap, a.mode)
+        return km
 
     if a.segment == "fo" and not a.fo_file:
         from .fo_instruments import check_universe
         check_universe(allow_stale=a.allow_stale_universe)
     key_map = keys()
+    log.info("%s: %d instruments on this connection", label, len(key_map))
     if not key_map:
         raise SystemExit("no instruments to subscribe: " + ("run fo_instruments import and select" if a.segment == "fo"
                                                            else "no universe symbols with a usable ISIN"))
@@ -522,12 +558,12 @@ def main() -> None:
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
                           token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books,
                           ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"),
-                          segment=a.segment, depth=depth5_enabled(a.depth5))
+                          segment=a.segment, depth=depth5_enabled(a.depth5, segment=a.segment))
     books = BookStore()
 
     async def runner() -> None:
-        server = await serve_books(books, port_for(a.segment))
-        mon = start_sysmon(a.segment)
+        server = await serve_books(books, port_for(a.segment, shard=shard))
+        mon = start_sysmon(label)
         try:
             await run_forever(make, once=a.once)
         finally:
