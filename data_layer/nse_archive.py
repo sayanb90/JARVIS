@@ -44,6 +44,10 @@ class ParseError(ValueError):
     """The file is not what it should be (wrong date, missing columns, totals that do not add up)."""
 
 
+class OlderFile(ParseError):
+    """The server answered with an earlier day's file (what NSE's delivery archive does for a holiday): treated like a 404."""
+
+
 def http_fetch(url: str, timeout: float = 30.0) -> tuple[int, bytes]:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
     try:
