@@ -9,7 +9,7 @@ build plan" (E and the IV gap), and the hedge-fund-style additions of 13 Nov 202
 
 DOCUMENTED: dict[str, tuple[str, ...]] = {
     # A. implied volatility
-    "A1 volatility risk premium": ("vrp",),
+    "A1 volatility risk premium": ("vrp", "vrp_intraday"),                     # vrp_intraday: revised during the session (SCRUM-198)
     "A2 RV above IV trigger": ("rv_over_iv",),
     "A3 implied vs realised move": ("implied_move", "implied_move_outcome"),
     "A4 overnight vs intraday holding rule": ("day_night_returns",),
