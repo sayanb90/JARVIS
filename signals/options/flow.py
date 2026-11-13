@@ -108,6 +108,7 @@ def trade_size_flow(ctx: Context, p: dict) -> pd.DataFrame:
     s["signed_lots"] = s["sign"] * lots
     g = s.groupby(["minute", "kind", "bucket"])["signed_lots"].sum().unstack(["kind", "bucket"]).fillna(0)
     g.columns = [f"{k}_{b}" for k, b in g.columns]
+    g = g.reindex(columns=[f"{k}_{b}" for k in ("opt", "fut") for b in SIZE_LABELS], fill_value=0.0)   # the same columns every time
     g = g.reset_index().rename(columns={"minute": "ts"})
     g["known_at"] = g["ts"] + pd.Timedelta(minutes=1)
     return g

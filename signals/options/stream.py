@@ -87,7 +87,7 @@ class _Future:
         self.prev: Optional[dict] = None
         self.day: Optional[date] = None
         self.open: dict[str, _Bucket] = {}
-        self.depth_hist: dict[str, deque] = {w: deque(maxlen=max(1, int(pd.Timedelta(minutes=WITHDRAW_MINUTES) / td))) for w, td in widths.items()}
+        self.depth_hist: dict[str, deque] = {w: deque() for w in widths}          # (bucket start, mean depth) of the last 15 minutes
 
 
 class BookAccumulator:
@@ -226,12 +226,15 @@ class BookAccumulator:
         if b.dn:
             hist = fut.depth_hist[w]
             dmean = b.dsum / b.dn
-            need = min(5, hist.maxlen)
-            base_depth = median(hist) if len(hist) >= need else NAN
+            lo = b.start - pd.Timedelta(minutes=WITHDRAW_MINUTES)      # the batch's rolling("15min", closed="left"): [start-15m, start)
+            while hist and hist[0][0] < lo:
+                hist.popleft()
+            vals = [d for _, d in hist]
+            base_depth = median(vals) if len(vals) >= 5 else NAN
             rows.append(dict(base, signal="depth_features", depth_imb=b.imb_sum / b.imb_n if b.imb_n else NAN,
                              slope=median(b.slopes) if b.slopes else NAN, depth=dmean, refills=b.refills,
                              depth_change=dmean / base_depth - 1 if base_depth else NAN))
-            hist.append(dmean)
+            hist.append((b.start, dmean))
             if is_front:
                 r = dict(base, signal="mlofi_future")
                 norms = []

@@ -53,7 +53,7 @@ def day():
 def trim(hist: dict, days: int = 3) -> dict:
     """Option and future minutes of the last `days` sessions only, as history_for loads them (index minutes stay whole)."""
     out = dict(hist)
-    for k in ("opt_1m", "fut_1m"):
+    for k in ("opt_1m",):                                    # history_for trims options only; futures keep 400 days
         df = hist.get(k)
         if df is not None and len(df):
             d = pd.to_datetime(df["ts"]).dt.normalize()

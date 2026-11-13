@@ -63,7 +63,10 @@ def pcr_table(ch: pd.DataFrame, max_k: float, snaps: str = "fixed", bucket: pd.T
         return pd.DataFrame()
     c = ch.copy()
     c["day"] = c["ts"].dt.date
-    c["cumvol"] = c.sort_values("ts").groupby(["day", "expiry", "strike", "cp"])["volume"].cumsum()
+    if "vol_day" in c.columns and c["vol_day"].notna().any():      # live chain: the feed's own day counter (no need for the whole day)
+        c["cumvol"] = c["vol_day"]
+    else:
+        c["cumvol"] = c.sort_values("ts").groupby(["day", "expiry", "strike", "cp"])["volume"].cumsum()
     s = _at_snaps(_front(c), snaps, bucket)
     s = s[s["k"].abs() <= max_k]
     if s.empty:

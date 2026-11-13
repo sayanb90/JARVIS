@@ -156,7 +156,7 @@ def _grid_fill(o: pd.DataFrame, minutes: pd.DataFrame, stale_max: int) -> pd.Dat
     mins = minutes[["ts"]].copy()
     mins["day"] = mins["ts"].dt.normalize()
     parts = []
-    carry = [c for c in ("close", "oi", "bid", "ask", "bid_qty", "ask_qty", "iv_vendor", "delta_vendor", "gamma_vendor") if c in o.columns]
+    carry = [c for c in ("close", "oi", "bid", "ask", "bid_qty", "ask_qty", "iv_vendor", "delta_vendor", "gamma_vendor", "vol_day") if c in o.columns]
     for (day, sym), g in o.groupby(["day", "symbol"], sort=False):
         grid = mins.loc[mins["day"] == day, "ts"]
         if grid.empty:
@@ -267,7 +267,7 @@ def build_chain(opt: pd.DataFrame, contracts: pd.DataFrame, spot_m: pd.DataFrame
                         g["iv"].to_numpy(dtype=float), r)
     g["delta"], g["gamma"], g["vega"] = gk["delta"], gk["gamma"], gk["vega"]
     keep = ["ts", "expiry", "strike", "cp", "close", "volume", "oi", "age", "lot", "t", "r", "fwd", "fwd_src", "k", "iv", "delta", "gamma", "vega"]
-    keep += [c for c in ("bid", "ask", "bid_qty", "ask_qty", "iv_vendor", "delta_vendor", "gamma_vendor", "src") if c in g.columns]
+    keep += [c for c in ("bid", "ask", "bid_qty", "ask_qty", "iv_vendor", "delta_vendor", "gamma_vendor", "vol_day", "src") if c in g.columns]
     return g[keep].sort_values(["ts", "expiry", "strike", "cp"]).reset_index(drop=True)
 
 

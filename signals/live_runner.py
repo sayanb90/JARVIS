@@ -197,7 +197,12 @@ class LiveRunner:
             self.bars = pd.concat([old, fresh], ignore_index=True)
         else:
             self.bars = fresh
-        self.ticks = self.ticks[self.ticks["fts"] >= self.watermark.floor(self.bucket) - self.tick_window].reset_index(drop=True)
+        cutoff = self.watermark.floor(self.bucket) - self.tick_window
+        old_t = self.ticks[self.ticks["fts"] < cutoff]
+        if len(old_t):
+            # keep each contract's last tick before the window as an anchor: per-tick volume and the tick rule difference against it
+            anchors = old_t.sort_values("fts", kind="stable").groupby("symbol").tail(1)
+            self.ticks = pd.concat([anchors, self.ticks[self.ticks["fts"] >= cutoff]], ignore_index=True)
 
     # ----------------------------------------------------------------------------------------- compute
     def closed_until(self) -> Optional[pd.Timestamp]:
@@ -228,7 +233,7 @@ class LiveRunner:
 
         raw = dict(h)
         for name, keep in (("index_1m", self.index_sessions), ("vix_1m", self.index_sessions), ("opt_1m", self.option_sessions),
-                           ("fut_1m", self.option_sessions)):
+                           ("fut_1m", self.index_sessions)):                 # futures: noise_band and the lead-lag look back 14 sessions
             raw[name] = _last_sessions(h.get(name), keep)
         h = raw
         raw = dict(h)

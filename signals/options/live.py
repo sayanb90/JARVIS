@@ -70,7 +70,8 @@ def chain_live(ctx: Context) -> pd.DataFrame:
     o = t[t["instrument_type"].isin(["CE", "PE"])].copy()
     o["day"] = o["minute"].dt.normalize()
     o["dv"] = o.groupby(["day", "symbol"])["vol_today"].diff().clip(lower=0).fillna(0) if "vol_today" in o.columns else 0
-    agg = o.groupby(["minute", "symbol"]).agg(close=("ltp", "last"), volume=("dv", "sum"), oi=("oi", "last"), bid=("bid", "last"), ask=("ask", "last"),
+    agg = o.groupby(["minute", "symbol"]).agg(close=("ltp", "last"), volume=("dv", "sum"), vol_day=("vol_today", "last"), oi=("oi", "last"),
+                                              bid=("bid", "last"), ask=("ask", "last"),
                                               bid_qty=("bid_qty", "last"), ask_qty=("ask_qty", "last"), iv_vendor=("iv", "last"),
                                               delta_vendor=("delta", "last"), gamma_vendor=("gamma", "last")).reset_index().rename(columns={"minute": "ts"})
     agg["close"] = agg["close"].fillna((agg["bid"] + agg["ask"]) / 2)
@@ -376,8 +377,11 @@ def depth_features(ctx: Context, p: dict) -> pd.DataFrame:
                                              refills=("refill", "sum"), cp=("instrument_type", "first"), strike=("strike", "first"),
                                              expiry=("expiry", "first")).reset_index()
     m = m.sort_values("minute")
-    n = max(1, int(pd.Timedelta(minutes=p["withdraw_window"]) / ctx.bucket_td))          # the window is in minutes whatever the bucket
-    base = m.groupby(["symbol", m["minute"].dt.normalize()])["depth"].transform(lambda x: x.shift(1).rolling(n, min_periods=min(5, n)).median())
+    win = f"{p['withdraw_window']}min"                     # the previous 15 minutes of clock time (not of buckets with ticks)
+    m = m.sort_values(["symbol", "minute"], kind="stable")
+    base = m.groupby(["symbol", m["minute"].dt.normalize()], group_keys=False).apply(
+        lambda g: g.set_index("minute")["depth"].rolling(win, closed="left", min_periods=5).median().set_axis(g.index))
+    m = m.sort_values("minute", kind="stable")
     m["depth_change"] = m["depth"] / base - 1
     m["known_at"] = m["minute"] + ctx.bucket_td
     return m.rename(columns={"minute": "ts"})
