@@ -1,5 +1,6 @@
 requests>=2.31.0
 pandas>=2.0.0
+xlrd>=2.0.1            # NSE's FII derivative statistics are Excel 97 .xls files (data_layer/fii_derivatives.py)
 python-dotenv>=1.0.0
 yfinance>=0.2.40
 duckdb>=1.0.0

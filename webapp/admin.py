@@ -113,6 +113,8 @@ CATALOG = [
           "file", "positioning/participant_oi.parquet", "date", vendor="NSE"),
     Table("market", "participant_volume", "Participant volume", "Contracts traded long and short in the day by Client, DII, FII and Pro, per instrument type.",
           "file", "positioning/participant_volume.parquet", "date", vendor="NSE"),
+    Table("market", "fii_derivatives", "FII derivatives", "FII buying, selling and open interest each day: contracts and crores for index and stock futures and options, by index from 2023.",
+          "file", "positioning/fii_derivatives.parquet", "date", vendor="NSE"),
     Table("market", "eod_fo", "F&O end of day", "Every futures and options contract each trading day from 2015: OHLC, settlement, OI, contracts traded, turnover.",
           "years", "eod_fo", "date", vendor="NSE"),
     Table("market", "bars_1s_legacy", "1-second bars (legacy)", "Bars written by the feed before it stored raw ticks.", "days", "bars/interval=1s", "ts", vendor="Upstox"),
