@@ -66,7 +66,7 @@ class Table:
     name: str
     title: str
     about: str
-    kind: str                  # days: lake/<dir>/date=YYYY-MM-DD/*.parquet | file: one parquet | years: ohlc | frame: CSV | derived | union: several vendors' files
+    kind: str                  # days: lake/<dir>/date=YYYY-MM-DD/*.parquet | file: one parquet | years: lake/<dir>/year=YYYY/*.parquet (ohlc: ohlc.parquet) | frame: CSV | derived | union: several vendors' files
     location: str = ""         # relative to the lake (days, file, years) or a loader key (frame)
     time_col: str | None = None
     width_s: int = 0           # derived bars width
@@ -113,6 +113,8 @@ CATALOG = [
           "file", "positioning/participant_oi.parquet", "date", vendor="NSE"),
     Table("market", "participant_volume", "Participant volume", "Contracts traded long and short in the day by Client, DII, FII and Pro, per instrument type.",
           "file", "positioning/participant_volume.parquet", "date", vendor="NSE"),
+    Table("market", "eod_fo", "F&O end of day", "Every futures and options contract each trading day from 2015: OHLC, settlement, OI, contracts traded, turnover.",
+          "years", "eod_fo", "date", vendor="NSE"),
     Table("market", "bars_1s_legacy", "1-second bars (legacy)", "Bars written by the feed before it stored raw ticks.", "days", "bars/interval=1s", "ts", vendor="Upstox"),
     Table("aggregates", "ohlc_daily", "Daily OHLC", "Daily bars for every market, adjusted for splits and dividends by the vendor.", "years", "ohlc", "date", vendor="Yahoo"),
     Table("aggregates", "bars_1s", "1-second bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 1, vendor="Upstox"),
@@ -193,7 +195,7 @@ class Catalog:
             p = self.lake / t.location
             return [p] if p.exists() else []
         if t.kind == "years":
-            return sorted((self.lake / t.location).glob("year=*/ohlc.parquet"))
+            return sorted((self.lake / t.location).glob("year=*/ohlc.parquet" if t.location == "ohlc" else "year=*/*.parquet"))
         if t.kind == "union":
             return [self.lake / loc for _, loc, _ in t.parts if (self.lake / loc).exists()]
         return []
