@@ -24,6 +24,7 @@ columns, named as in the batch outputs:
 from __future__ import annotations
 
 import math
+import operator
 from collections import deque
 from datetime import date, datetime, timedelta
 from statistics import median
@@ -107,6 +108,13 @@ class BookAccumulator:
     def __init__(self, buckets: Iterable[str] = ("10s", "1min"), levels: int = LEVELS, front: Optional[dict[str, Any]] = None):
         self.widths = {b: pd.Timedelta(b) for b in buckets}
         self.width_ns = {b: td.value for b, td in self.widths.items()}
+        self._kb = ["bid"] + [f"bid{i}" for i in range(2, levels + 1)]
+        self._ka = ["ask"] + [f"ask{i}" for i in range(2, levels + 1)]
+        self._kbq = ["bid_qty"] + [f"bid{i}_qty" for i in range(2, levels + 1)]
+        self._kaq = ["ask_qty"] + [f"ask{i}_qty" for i in range(2, levels + 1)]
+        self._keys = self._kb + self._ka + self._kbq + self._kaq + ["ltp", "vol_today"]
+        self._items = operator.itemgetter(*self._keys)
+        self._attrs = operator.attrgetter(*self._keys)
         self.levels = levels
         self.fixed_front = {u: pd.Timestamp(e).date() for u, e in (front or {}).items()}   # underlying -> front expiry, from the contracts
         self.front: dict[str, date] = dict(self.fixed_front)                               # else the nearest expiry seen today
@@ -150,11 +158,12 @@ class BookAccumulator:
                 out += self._close(fut, w)
         self.ticks += 1
         book = self._book(t)
+        x = self._derive(fut.prev, book)
         for w, wns in self.width_ns.items():
             b = fut.open.get(w)
             if b is None:
                 b = fut.open[w] = _Bucket(ns - ns % wns, self.levels)
-            self._add(fut, b, book)
+            self._accumulate(b, x)
         fut.prev = book
         return out
 
@@ -166,62 +175,83 @@ class BookAccumulator:
 
     # ----------------------------------------------------------------------------------------- internals
     def _book(self, t: Any) -> dict:
-        bk = {"bid": [_f(_get(t, "bid"))], "ask": [_f(_get(t, "ask"))], "bq": [_f(_get(t, "bid_qty"))], "aq": [_f(_get(t, "ask_qty"))],
-              "ltp": _f(_get(t, "ltp")), "vol": _f(_get(t, "vol_today"))}
-        for i in range(2, self.levels + 1):
-            bk["bid"].append(_f(_get(t, f"bid{i}")))
-            bk["ask"].append(_f(_get(t, f"ask{i}")))
-            bk["bq"].append(_f(_get(t, f"bid{i}_qty")))
-            bk["aq"].append(_f(_get(t, f"ask{i}_qty")))
-        bk["deep"] = not math.isnan(bk["bid"][1]) if self.levels > 1 else False
+        """The tick's book as lists per side and level, missing values as NaN.  All fields are read in one C call (itemgetter for a
+        mapping, attrgetter for the feed's Tick objects); a mapping without some of the fields falls back to one lookup each."""
+        try:
+            vals = self._items(t) if isinstance(t, dict) else self._attrs(t)
+        except (KeyError, AttributeError):
+            get = t.get if isinstance(t, dict) else (lambda k: getattr(t, k, None))
+            vals = tuple(get(k) for k in self._keys)
+        v = [NAN if x is None else x for x in vals]
+        n = self.levels
+        bk = {"bid": v[0:n], "ask": v[n:2 * n], "bq": v[2 * n:3 * n], "aq": v[3 * n:4 * n], "ltp": v[4 * n], "vol": v[4 * n + 1]}
+        bk["deep"] = n > 1 and bk["bid"][1] == bk["bid"][1]                                # level 2 present (NaN != NaN)
         return bk
 
-    def _add(self, fut: _Future, b: _Bucket, bk: dict) -> None:
+    def _derive(self, p: Optional[dict], bk: dict) -> dict:
+        """Everything one tick adds to a bucket, computed once per tick (not once per bucket width)."""
+        isnan = math.isnan
         bid, ask, bq, aq = bk["bid"][0], bk["ask"][0], bk["bq"][0], bk["aq"][0]
-        p = fut.prev
-        if p is None:
-            b.e += 0.0
-        else:
-            b.e += _ofi_step(bid, ask, bq, aq, p["bid"][0], p["ask"][0], p["bq"][0], p["aq"][0])
+        x = {"e": 0.0 if p is None else _ofi_step(bid, ask, bq, aq, p["bid"][0], p["ask"][0], p["bq"][0], p["aq"][0])}
         d = (bq + aq) / 2
-        if not math.isnan(d):
-            b.depth_sum += d
-            b.depth_n += 1
+        x["d"] = None if isnan(d) else d
         mid = (bid + ask) / 2
-        if not math.isnan(mid):
-            b.mid = mid
+        x["mid"] = None if isnan(mid) else mid
+        x["micro"] = x["qi"] = None
         tot = bq + aq
-        if tot and not math.isnan(tot):
+        if tot and not isnan(tot):
             micro = (bid * aq + ask * bq) / tot
-            if not math.isnan(micro):
-                b.micro = micro
             qi = (bq - aq) / tot
-            if not math.isnan(qi):
-                b.qi = qi
+            x["micro"] = None if isnan(micro) else micro
+            x["qi"] = None if isnan(qi) else qi
+        x["deep"] = bk["deep"]
         if not bk["deep"]:
-            return
-        for i in range(self.levels):
-            if p is not None:
-                b.lev_e[i] += _ofi_step(bk["bid"][i], bk["ask"][i], bk["bq"][i], bk["aq"][i], p["bid"][i], p["ask"][i], p["bq"][i], p["aq"][i])
-            di = (bk["bq"][i] + bk["aq"][i]) / 2
-            if not math.isnan(di):
-                b.lev_d_sum[i] += di
-                b.lev_d_n[i] += 1
-        sb = sum(0.0 if math.isnan(x) else x for x in bk["bq"])
-        sa = sum(0.0 if math.isnan(x) else x for x in bk["aq"])
-        if sb + sa:
-            b.imb_sum += (sb - sa) / (sb + sa)
-            b.imb_n += 1
+            return x
+        n = self.levels
+        x["lev_e"] = [0.0] * n if p is None else [_ofi_step(bk["bid"][i], bk["ask"][i], bk["bq"][i], bk["aq"][i], p["bid"][i], p["ask"][i],
+                                                          p["bq"][i], p["aq"][i]) for i in range(n)]
+        x["lev_d"] = [(bk["bq"][i] + bk["aq"][i]) / 2 for i in range(n)]
+        sb = sum(v for v in bk["bq"] if not isnan(v))
+        sa = sum(v for v in bk["aq"] if not isnan(v))
+        x["imb"] = (sb - sa) / (sb + sa) if sb + sa else None
         span = (bk["ask"][-1] - bk["bid"][-1]) / mid if mid else NAN
-        if span and not math.isnan(span):
-            b.slopes.append((sb + sa) / span)
-        b.dsum += sb + sa
-        b.dn += 1
+        x["slope"] = (sb + sa) / span if span and not isnan(span) else None
+        x["dsum"] = sb + sa
+        x["refill"] = False
         if p is not None:
-            sold = (not math.isnan(bk["ltp"]) and bk["ltp"] <= p["bid"][0] and not math.isnan(bk["vol"]) and not math.isnan(p["vol"])
+            sold = (not isnan(bk["ltp"]) and bk["ltp"] <= p["bid"][0] and not isnan(bk["vol"]) and not isnan(p["vol"])
                     and bk["vol"] - p["vol"] > 0)
-            if sold and bid == p["bid"][0] and bq >= p["bq"][0]:
-                b.refills += 1
+            x["refill"] = bool(sold and bid == p["bid"][0] and bq >= p["bq"][0])
+        return x
+
+    @staticmethod
+    def _accumulate(b: _Bucket, x: dict) -> None:
+        b.e += x["e"]
+        if x["d"] is not None:
+            b.depth_sum += x["d"]
+            b.depth_n += 1
+        if x["mid"] is not None:
+            b.mid = x["mid"]
+        if x["micro"] is not None:
+            b.micro = x["micro"]
+        if x["qi"] is not None:
+            b.qi = x["qi"]
+        if not x["deep"]:
+            return
+        for i, (e, d) in enumerate(zip(x["lev_e"], x["lev_d"])):
+            b.lev_e[i] += e
+            if d == d:                                                                    # not NaN
+                b.lev_d_sum[i] += d
+                b.lev_d_n[i] += 1
+        if x["imb"] is not None:
+            b.imb_sum += x["imb"]
+            b.imb_n += 1
+        if x["slope"] is not None:
+            b.slopes.append(x["slope"])
+        b.dsum += x["dsum"]
+        b.dn += 1
+        if x["refill"]:
+            b.refills += 1
 
     def _close_all(self, fut: _Future) -> list[dict]:
         out: list[dict] = []
