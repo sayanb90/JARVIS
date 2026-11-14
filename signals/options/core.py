@@ -25,7 +25,7 @@ import pandas as pd
 
 from analytics import black76, realised
 from data_layer.greeks_calc import parse_future, parse_option
-from signals.framework import Context, provider
+from signals.framework import Context, merge_asof, provider
 
 EXPIRY_UTC = pd.Timedelta(hours=10)              # 15:30 IST
 YEAR = pd.Timedelta(days=365)
@@ -237,7 +237,7 @@ def rate_by_row(ts: pd.Series, table: pd.DataFrame, default: float) -> np.ndarra
     tab = pd.DataFrame({"d": (pd.to_datetime(table["date"]) + pd.Timedelta(days=1)).astype("datetime64[ns]"),
                         "r": table["r"].astype(float)}).sort_values("d")
     left = pd.DataFrame({"d": days.to_numpy(), "i": np.arange(len(ts))}).sort_values("d")
-    m = pd.merge_asof(left, tab, on="d", direction="backward").sort_values("i")
+    m = merge_asof(left, tab, on="d", direction="backward").sort_values("i")
     return m["r"].fillna(float(default)).to_numpy()
 
 
@@ -352,9 +352,9 @@ def interp_at(j: pd.DataFrame, targets: pd.DataFrame, value: str = "iv_otm") -> 
     tg = targets[["ts", "expiry", "k"]].reset_index(drop=True).copy()
     tg["_i"] = np.arange(len(tg))
     tg = tg.sort_values("k")
-    lo = pd.merge_asof(tg, src.rename(columns={"k": "k_lo", value: "v_lo"}), left_on="k", right_on="k_lo", by=["ts", "expiry"],
+    lo = merge_asof(tg, src.rename(columns={"k": "k_lo", value: "v_lo"}), left_on="k", right_on="k_lo", by=["ts", "expiry"],
                        direction="backward")
-    hi = pd.merge_asof(tg, src.rename(columns={"k": "k_hi", value: "v_hi"}), left_on="k", right_on="k_hi", by=["ts", "expiry"],
+    hi = merge_asof(tg, src.rename(columns={"k": "k_hi", value: "v_hi"}), left_on="k", right_on="k_hi", by=["ts", "expiry"],
                        direction="forward")
     m = lo.merge(hi[["_i", "k_hi", "v_hi"]], on="_i").sort_values("_i")
     span = (m["k_hi"] - m["k_lo"]).to_numpy()

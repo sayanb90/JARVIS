@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from analytics import black76
-from signals.framework import Context, Spec, register
+from signals.framework import Context, Spec, merge_asof, register
 from signals.options.core import era_of, minute_of_session
 
 SESSION_MINUTES = 375
@@ -56,7 +56,7 @@ def fair_straddle(ctx: Context, p: dict) -> pd.DataFrame:
     a = a.merge(prof[["date", "minute", "remaining"]], on=["date", "minute"], how="inner")
     fc = fc.sort_values("known_at")
     a["_q"] = pd.to_datetime(a["ts"])
-    a = pd.merge_asof(a.sort_values("_q"), fc[["known_at", "rv_fc_1", "on_var"]].rename(columns={"known_at": "fc_at"}), left_on="_q",
+    a = merge_asof(a.sort_values("_q"), fc[["known_at", "rv_fc_1", "on_var"]].rename(columns={"known_at": "fc_at"}), left_on="_q",
                       right_on="fc_at", direction="backward", allow_exact_matches=False)
     var = a["remaining"] * a["rv_fc_1"] + np.where(a["dte"] >= 1, a["on_var"].fillna(0) + a["rv_fc_1"], 0.0) * (a["dte"] >= 1)
     a["var_left"] = var

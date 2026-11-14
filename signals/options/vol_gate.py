@@ -20,7 +20,7 @@ import pandas as pd
 
 from analytics import realised
 from analytics.realised import SESSIONS_PER_YEAR
-from signals.framework import Context, Spec, register, trailing_pct
+from signals.framework import Context, Spec, merge_asof, register, trailing_pct
 from signals.options.core import OPEN_UTC
 
 MU1 = float(np.sqrt(2.0 / np.pi))
@@ -37,7 +37,7 @@ def _with_forecast(ctx: Context, snaps: pd.DataFrame, horizon: int = 5) -> pd.Da
     f = f.rename(columns={"known_at": "fc_at"}).sort_values("fc_at")
     s = snaps.copy()
     s["_q"] = pd.to_datetime(s["known_at"]) - pd.Timedelta(seconds=1)
-    s = pd.merge_asof(s.sort_values("_q"), f[["fc_at", "rv_fc", "rv_yz20"]], left_on="_q", right_on="fc_at", direction="backward",
+    s = merge_asof(s.sort_values("_q"), f[["fc_at", "rv_fc", "rv_yz20"]], left_on="_q", right_on="fc_at", direction="backward",
                       allow_exact_matches=False)
     return s.drop(columns=["_q"])
 
@@ -55,7 +55,7 @@ def vrp(ctx: Context, p: dict) -> pd.DataFrame:
     if v is not None and len(v):
         vv = v[["ts", "close"]].rename(columns={"close": "vix"}).sort_values("ts")
         vv["_at"] = vv["ts"] + ctx.bucket_td
-        s = pd.merge_asof(s.sort_values("known_at"), vv[["_at", "vix"]], left_on="known_at", right_on="_at", direction="backward",
+        s = merge_asof(s.sort_values("known_at"), vv[["_at", "vix"]], left_on="known_at", right_on="_at", direction="backward",
                           tolerance=pd.Timedelta(minutes=5)).drop(columns=["_at"])
         s["vix_vrp_diff"] = s["vix"] / 100.0 - s["rv_fc"]
     return s[["date", "snap", "known_at", "iv7", "iv7_how", "rv_fc", "rv_yz20", "vrp_diff", "vrp_ratio"] +
@@ -78,14 +78,14 @@ def vrp_intraday(ctx: Context, p: dict) -> pd.DataFrame:
     f["in_frac"] = (f["rv"] / f["tv"]).clip(0.05, 1.0).rolling(p["frac_window"], min_periods=5).mean()
     f = f.dropna(subset=["har_1", "in_frac"]).rename(columns={"known_at": "fc1_at"})[["fc1_at", "har_1", "in_frac"]].sort_values("fc1_at")
     s["_q"] = pd.to_datetime(s["known_at"]) - pd.Timedelta(seconds=1)
-    s = pd.merge_asof(s.sort_values("_q"), f, left_on="_q", right_on="fc1_at", direction="backward", allow_exact_matches=False)
+    s = merge_asof(s.sort_values("_q"), f, left_on="_q", right_on="fc1_at", direction="backward", allow_exact_matches=False)
     # realised variance so far today, from the index minutes that ended by the bucket's end
     r = realised.minute_returns(sp)
     r["date"] = r["day"].dt.date
     r["end"] = r["ts"] + pd.Timedelta(minutes=1)
     r = r.sort_values("end")
     r["rv_cum"] = (r["r"] ** 2).groupby(r["date"]).cumsum()
-    s = pd.merge_asof(s.sort_values("known_at"), r[["end", "date", "rv_cum", "minute"]].rename(columns={"date": "_d"}),
+    s = merge_asof(s.sort_values("known_at"), r[["end", "date", "rv_cum", "minute"]].rename(columns={"date": "_d"}),
                       left_on="known_at", right_on="end", direction="backward")
     s.loc[s["_d"] != s["date"], ["rv_cum", "minute"]] = np.nan          # nothing realised yet today
     s["rv_cum"] = s["rv_cum"].fillna(0.0)

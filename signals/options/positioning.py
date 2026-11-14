@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from analytics import black76
-from signals.framework import provider, Context, Spec, register, trailing_pct
+from signals.framework import Context, Spec, merge_asof, provider, register, trailing_pct
 from signals.options.core import snap_utc, SNAP_TIMES_IST
 
 BUCKET = "15min"
@@ -173,7 +173,7 @@ def gex_table(ch: pd.DataFrame, participant: pd.DataFrame | None, max_k: float, 
         pt["client_net_calls"] = pt["option_index_call_long"] - pt["option_index_call_short"]
         pt["client_net_puts"] = pt["option_index_put_long"] - pt["option_index_put_short"]
         pt = pt.sort_values("known_at")[["known_at", "client_net_calls", "client_net_puts"]].rename(columns={"known_at": "pt_at"})
-        out = pd.merge_asof(out.sort_values("known_at"), pt, left_on="known_at", right_on="pt_at", direction="backward")
+        out = merge_asof(out.sort_values("known_at"), pt, left_on="known_at", right_on="pt_at", direction="backward")
         out["gex_participant"] = -np.sign(out["client_net_calls"]) * out["gex_calls"] - np.sign(out["client_net_puts"]) * out["gex_puts"]
     flips = []
     if since is not None:                        # live: the flip search only for the rows that will be written (Context.since)

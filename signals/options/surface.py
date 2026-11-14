@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from signals.framework import Context, Spec, register, trailing_z
+from signals.framework import Context, Spec, merge_asof, register, trailing_z
 from signals.options.core import OPEN_UTC, snap_utc
 
 EVENT_KINDS = ("rbi_mpc", "budget", "election_result")
@@ -296,7 +296,7 @@ def iv_gap(ctx: Context, p: dict) -> pd.DataFrame:
         return pd.DataFrame()
     m = s[s["snap"] == "09:20"][["date", "known_at", "iv7"]].rename(columns={"iv7": "iv7_open"}).sort_values("known_at")
     c = s[s["snap"] == "15:15"][["known_at", "iv7"]].rename(columns={"iv7": "iv7_prev_close", "known_at": "prev_at"}).sort_values("prev_at")
-    m = pd.merge_asof(m, c, left_on="known_at", right_on="prev_at", direction="backward", allow_exact_matches=False)
+    m = merge_asof(m, c, left_on="known_at", right_on="prev_at", direction="backward", allow_exact_matches=False)
     m = m.dropna(subset=["iv7_prev_close"]).drop(columns=["prev_at"])
     m = m.merge(d[["date", "r_on"]], on="date", how="left")
     m["iv_gap"] = m["iv7_open"] - m["iv7_prev_close"]

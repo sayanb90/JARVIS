@@ -27,7 +27,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from signals.framework import Context, Spec, provider, register
+from signals.framework import Context, Spec, merge_asof, provider, register
 from signals.options.core import STALE_MAX, _years, build_chain, minute_of_session, rate_table
 from signals.options.positioning import gex_table, pcr_table
 
@@ -206,10 +206,10 @@ def cost_log(ctx: Context, p: dict) -> pd.DataFrame:
     q = t[["t_evt", "symbol", "mid"]].sort_values("t_evt")
     f = fills.copy()
     f["ts"] = pd.to_datetime(f["ts"])
-    f = pd.merge_asof(f.sort_values("ts"), q, left_on="ts", right_on="t_evt", by="symbol", direction="backward")
+    f = merge_asof(f.sort_values("ts"), q, left_on="ts", right_on="t_evt", by="symbol", direction="backward")
     later = q.rename(columns={"mid": "mid_5m", "t_evt": "t5"})
     f["t_after"] = f["ts"] + pd.Timedelta(minutes=5)
-    f = pd.merge_asof(f.sort_values("t_after"), later, left_on="t_after", right_on="t5", by="symbol", direction="backward")
+    f = merge_asof(f.sort_values("t_after"), later, left_on="t_after", right_on="t5", by="symbol", direction="backward")
     f["effective_spread"] = 2 * f["side"] * (f["price"] - f["mid"]) / f["mid"]
     f["realised_spread_5m"] = 2 * f["side"] * (f["price"] - f["mid_5m"]) / f["mid"]
     f["known_at"] = f["t_after"]

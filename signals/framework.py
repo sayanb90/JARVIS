@@ -171,6 +171,29 @@ def normalise_output(spec: Spec, out: Optional[pd.DataFrame], underlying: str) -
     return out[cols].sort_values([key, "known_at"] + [c for c in ("snap", "expiry", "strike", "cp", "symbol", "bucket", "group", "participant", "hour", "leg") if c in out.columns]).reset_index(drop=True)
 
 
+def _ns_cols(df: pd.DataFrame, cols) -> pd.DataFrame:
+    bad = [c for c in cols if c in df.columns and getattr(df[c].dtype, "kind", "") == "M" and str(df[c].dtype) != "datetime64[ns]"
+           and "tz" not in str(df[c].dtype)]
+    if not bad:
+        return df
+    df = df.copy()
+    for c in bad:
+        df[c] = df[c].astype("datetime64[ns]")
+    return df
+
+
+def merge_asof(left: pd.DataFrame, right: pd.DataFrame, **kw) -> pd.DataFrame:
+    """pd.merge_asof with datetime keys brought to nanoseconds on both sides.  pandas 3 infers microseconds for some constructions
+    (dates plus a time delta, parsed text) and nanoseconds for others (the bus, integer epochs), and refuses to merge keys of different
+    resolution: without this a signal works on one input path and fails on another."""
+    keys = []
+    for k in ("on", "left_on", "right_on", "by", "left_by", "right_by"):
+        v = kw.get(k)
+        if v is not None:
+            keys += [v] if isinstance(v, str) else list(v)
+    return pd.merge_asof(_ns_cols(left, keys), _ns_cols(right, keys), **kw)
+
+
 # ---------------------------------------------------------------------------------------------- prefix invariance
 def cut_raw(raw: dict[str, pd.DataFrame], cut: pd.Timestamp) -> dict[str, pd.DataFrame]:
     """Every raw frame restricted to what was known at `cut`: tick frames (with an `fts` event time) by that time, minute frames by ts
