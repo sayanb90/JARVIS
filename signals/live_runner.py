@@ -312,7 +312,8 @@ class LiveRunner:
         keep = (t["fts"] >= lo) & (t["fts"] < upto)
         anchors = t[t["fts"] < lo].sort_values("fts", kind="stable").groupby("symbol").tail(1)
         w = dict(raw, ticks_fo=pd.concat([anchors, t[keep]], ignore_index=True))
-        new = Context(self.underlying, w, bucket=self.bucket, since=start, cache=dict(self.fixed, **self._shared)).get("chain_live")
+        new = Context(self.underlying, w, bucket=self.bucket, since=start, cut=upto,       # cut: the grid runs to the closed range's end
+                      cache=dict(self.fixed, **self._shared)).get("chain_live")
         if new is not None and len(new):
             new = new[(new["ts"] >= start) & (new["ts"] < upto)]
             self.chain_live = pd.concat([self.chain_live, new], ignore_index=True) if len(self.chain_live) else new.reset_index(drop=True)

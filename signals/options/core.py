@@ -378,7 +378,8 @@ def smile(ctx: Context) -> pd.DataFrame:
         g[f"iv_{name}"] = interp_at(j, g)
     g = g.drop(columns=["k"])
     j["dist"] = (j["strike"] - j["fwd"]).abs()
-    near = j.loc[j.groupby(["ts", "expiry"])["dist"].idxmin(), ["ts", "expiry", "strike", "close_c", "close_p"]]
+    jv = j[j["dist"].notna()]                      # a bucket with no forward has no nearest strike (its straddle stays empty)
+    near = jv.loc[jv.groupby(["ts", "expiry"])["dist"].idxmin(), ["ts", "expiry", "strike", "close_c", "close_p"]]
     near["straddle"] = near["close_c"] + near["close_p"]
     g = g.merge(near[["ts", "expiry", "strike", "straddle"]].rename(columns={"strike": "atm_strike"}), on=["ts", "expiry"], how="left")
     return g.sort_values(["ts", "t"]).reset_index(drop=True)

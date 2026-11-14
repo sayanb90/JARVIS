@@ -84,7 +84,7 @@ def chain_live(ctx: Context) -> pd.DataFrame:
     # forward falls back to the front future's bucket mid from its own ticks.  Staleness is still counted in minutes.
     steps = int(pd.Timedelta(minutes=STALE_MAX) / ctx.bucket_td)
     return build_chain(agg, ctx.get("contract_table"), pd.DataFrame(columns=["ts", "close"]), _fut_buckets(t, ctx.bucket_td), ctx.r, stale_max=steps,
-                       rates=rates, from_ts=ctx.since, bucket=ctx.bucket_td)
+                       rates=rates, from_ts=ctx.since, bucket=ctx.bucket_td, grid_to=ctx.cut)
 
 
 def _fut_buckets(t: pd.DataFrame, bucket: pd.Timedelta) -> pd.DataFrame:
