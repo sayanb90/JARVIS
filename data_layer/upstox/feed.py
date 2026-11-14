@@ -622,7 +622,7 @@ def main() -> None:
         acc = None
         if a.segment == "fo" and live_signals_enabled():
             from signals.options.stream import BookAccumulator, front_expiries
-            acc = BookAccumulator(buckets=("10s", "1min"), front=front_expiries(key_map.values(), utcnow().date()))
+            acc = BookAccumulator(buckets=("1s", "10s", "1min"), front=front_expiries(key_map.values(), utcnow().date()))
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
                           token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books,
                           ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"),

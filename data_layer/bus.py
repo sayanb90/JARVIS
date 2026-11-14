@@ -160,6 +160,11 @@ def rows_frame(msgs: Iterable[dict]):
     return df
 
 
+def signal_names(underlyings=("NIFTY", "BANKNIFTY")) -> list[str]:
+    """Publishers of the live signal engines (one process per underlying)."""
+    return [f"signals-{u}" for u in underlyings]
+
+
 def feed_names(env=None) -> list[str]:
     """Publishers of the running feeds: the equity feed and the F&O shards (JARVIS_FO_SHARDS, default 2)."""
     n = int((os.environ if env is None else env).get("JARVIS_FO_SHARDS", "2"))

@@ -46,6 +46,10 @@ log = logging.getLogger("signals.live")
 TICK_WINDOW = pd.Timedelta(minutes=30)
 OVERRUNS_BEFORE_FALLBACK = 3
 CADENCES = {"1m": "1min", "1min": "1min", "10s": "10s", "1s": "1s"}
+# Signals that read only the book and the tape (ticks), never the option chain: a cadence group made only of these skips building
+# the chain, the smile and the tick chain (at 1 s those builds alone take about 1.6 s on 2,000 contracts; feasibility, 14 Nov 2026).
+CHAIN_FREE = {"fut_ofi", "mlofi_future", "book_pressure", "depth_features", "illiquidity", "trade_size_flow", "block_prints",
+              "opening_flow", "noise_band"}
 # Inputs the runner cannot provide during the session (published after the close, or needing the constituents' feed).
 NOT_LIVE = {"basket_fair_value", "constituent_flow", "option_positioning_hourly", "implied_corr_proxy", "expiry_inverted_v",
             "manipulation_flag", "cost_log"}
@@ -348,13 +352,16 @@ class LiveRunner:
         ctx = Context(self.underlying, raw, bucket=self.bucket, snaps="all", cache=dict(self.fixed))
         # inputs that read only index, VIX and futures minutes and the contract table: built once per cycle, shared by every window
         self._shared = {k: ctx.get(k) for k in ("contract_table", "spot", "vix", "futures", "fut_front", "expiries", "eras")}
-        before = len(self.chain)
         tb = _time.perf_counter()
-        chain = self._extend_chain(ctx, opt_today, upto)
-        self._extend_surface(raw, chain.iloc[before:] if len(chain) else chain)
-        atm_all = pd.concat([self.hist_atm, self.atm], ignore_index=True) if len(self.hist_atm) else self.atm
-        chain_live = self._extend_chain_live(raw, upto)
-        self._time("_shared: chain, smile, tick chain", _time.perf_counter() - tb)
+        if set(self.ids) <= CHAIN_FREE:                    # book and tape only: no chain, smile or tick chain to build
+            chain, chain_live, atm_all = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        else:
+            before = len(self.chain)
+            chain = self._extend_chain(ctx, opt_today, upto)
+            self._extend_surface(raw, chain.iloc[before:] if len(chain) else chain)
+            atm_all = pd.concat([self.hist_atm, self.atm], ignore_index=True) if len(self.hist_atm) else self.atm
+            chain_live = self._extend_chain_live(raw, upto)
+            self._time("_shared: chain, smile, tick chain", _time.perf_counter() - tb)
         first_new = self.emitted_to if self.emitted_to is not None else upto.normalize()
         since = self.emitted_to
         out = []
@@ -368,6 +375,8 @@ class LiveRunner:
             w["ticks_fo"] = pd.concat([anchors, t[keep]], ignore_index=True)
             w["opt_1m"] = raw["opt_1m"][pd.to_datetime(raw["opt_1m"]["ts"]) >= lo] if len(raw["opt_1m"]) else raw["opt_1m"]
             cw = chain[chain["ts"] >= lo] if len(chain) else chain
+            if not len(chain_live):
+                chain_live = pd.DataFrame(columns=["ts"])
             cache = dict(self.fixed, **self._shared, chain=cw, atm=atm_all)
             cache["chain_live"] = chain_live[chain_live["ts"] >= lo] if len(chain_live) else chain_live
             c = Context(self.underlying, w, bucket=self.bucket, snaps="all", since=since, signals=dict(self.daily_signals), cache=cache)

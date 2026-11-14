@@ -1,7 +1,25 @@
 # Live signal cadence (owner decision 14 Nov 2026): 1s, 10s or 1min per signal.  Chosen from the feasibility measurements
-# (python -m signals feasibility; numbers in the runbook, section 19.8).  A signal not listed runs at `default`.
-# JARVIS_SIGNAL_CADENCE in .env overrides `default` (not the lines below).  Signals with a minimum cadence (signals/cadence.py,
-# MIN_CADENCE) cannot be set faster; the engine refuses to start on an invalid file.
-default = "1min"
+# (python -m signals feasibility, synthetic 2,000-contract session, 14 Nov 2026; runbook section 19.8):
+#   1s   book and tape only (no option chain): ~0.5 s per cycle, about half a core per underlying
+#   10s  everything that reads the option chain: ~1.35 s per cycle (13 % of the cadence); at 1 s the chain builds alone take 1.6 s
+#   1min signals built on minute-of-day patterns (their minimum, signals/cadence.py MIN_CADENCE)
+# A signal not listed runs at `default`.  JARVIS_SIGNAL_CADENCE in .env overrides `default` (not the lines below).  The engine refuses
+# to start on an invalid file, and moves a group that keeps overrunning to the next coarser cadence for the rest of the session.
+default = "10s"
 
 [signal]
+# 1 s: the book and the tape (fut_ofi and mlofi_future are also computed tick by tick inside the feed when JARVIS_LIVE_SIGNALS=1)
+fut_ofi = "1s"
+mlofi_future = "1s"
+book_pressure = "1s"
+depth_features = "1s"
+illiquidity = "1s"
+trade_size_flow = "1s"
+block_prints = "1s"
+opening_flow = "1s"
+# 1 min: minute-of-day patterns of earlier sessions
+noise_band = "1min"
+fair_straddle = "1min"
+vrp_intraday = "1min"
+volume_burst = "1min"
+residual_iv = "1min"

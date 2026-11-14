@@ -5,7 +5,7 @@ The live signal engine (SCRUM-201, SCRUM-159): event-driven, one process, every 
   python -m signals feasibility             # cost of every live signal at 1 s, 10 s and 1 min on a synthetic 2,000-contract chain
 
   ticks ──(bus, or tick files when the bus is off)──► Engine ──► one incremental runner per cadence group (1s / 10s / 1min)
-                                                         └─► signal rows ──► "signals" bus (now) and <store>/live/date=D/ (every 15 s)
+                                                         └─► signal rows ──► "signals-<U>" bus (now) and <store>/live/date=D/ (every 15 s)
 
 - Cadence per signal from signals/cadence.toml (signals/cadence.py); each cadence group is a LiveRunner at that bucket width, so the
   chain, smile, tick chain and every signal of the group are built per bucket of that width, incrementally, within each signal's
@@ -222,7 +222,8 @@ def start(lake: Path, store: Path, underlyings: Iterable[str], until_utc: str = 
     groups = cadence_mod.groups(cad)
     base = {u: {c: load_baselines(store, u, day, ids_c, c) for c, ids_c in groups.items()} for u in us}
     vsd = {u: slot_volume_history(lake, u, day) for u in us}
-    pub = bus.Publisher("signals", env=env) if bus.bus_enabled(env) else None
+    # one publisher per engine process (one process per underlying): consumers subscribe to signals-NIFTY, signals-BANKNIFTY, ...
+    pub = bus.Publisher("signals-" + "-".join(us), env=env) if bus.bus_enabled(env) else None
     eng = Engine(us, hist, cad, store=store, publisher=pub, exclude=exclude, baselines=base, volume_slot_daily=vsd)
     src = BusSource(env=env) if bus.bus_enabled(env) else FileSource(lake, day)
     log.info("live engine: %s; cadence groups %s; source %s", us, {c: len(v) for c, v in groups.items()}, type(src).__name__)
