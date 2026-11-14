@@ -3,7 +3,8 @@ JARVIS Scheduler — cron-invokable data refresh orchestrator.
 
 Jobs
 ----
-ohlc-daily      Fetch last N days of daily OHLC via yfinance for India, US, UK, EU, JP, KR, TW, SG, CN and HK
+ohlc-daily      Fetch last N days of daily OHLC via yfinance for India, US, UK, EU, JP, KR, TW, SG, CN, HK and GLOBAL (the global
+                cues of data/global_cues.csv: ES=F, NQ=F, ^VIX, INR=X, CL=F, ^GSPC)
                 (free, no API key).
                 Writes data/ohlc/ohlc_daily_*.csv then calls:
                   data_layer.lake.load_ohlc(daily=True)  -> lake/ohlc/year=YYYY/

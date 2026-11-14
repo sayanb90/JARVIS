@@ -25,12 +25,13 @@ const countText = (n, w) => (w === 0 ? `${fmtInt(n)} ticks (raw)` : `${fmtInt(n)
 const nearestDay = (days, want) => days.reduce((best, d) => (Math.abs(new Date(d) - new Date(want)) < Math.abs(new Date(best) - new Date(want)) ? d : best), days[0]);
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
 const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'],
-               candles: ['chart', 'profile'], data: ['coverage', 'run', 'storage'], history: ['chart', 'volume'] };
+               candles: ['chart', 'profile'], data: ['coverage', 'run', 'storage'], history: ['chart', 'volume'], signals: ['live', 'daily'] };
 const CANDLE_LABEL = { 1: '1 minute', 3: '3 minutes', 5: '5 minutes', 15: '15 minutes', 30: '30 minutes', 60: '1 hour' };
 const SOURCE_LABEL = { live: 'live feed', rest: 'REST candle API' };
 
 const state = {
-  meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary', candles: 'chart', data: 'coverage', history: 'chart' },
+  meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary', candles: 'chart', data: 'coverage', history: 'chart', signals: 'live' },
+  sg: { underlying: 'NIFTY', data: null, timer: null },
   hx: { instruments: null, symbol: null, tf: '1d', span: 365, type: 'candle', data: null, vol: { market: '', date: '', sort: 'volume', n: 20 } },
   dt: null, dtMarkets: null, dtRange: 'ohlc',
   cSymbol: null, cMarket: null, cList: [], cMinutes: 1, cBins: 40, cSource: 'auto', cData: null,
@@ -170,7 +171,9 @@ function setTab(tab, load = true) {
   showSub(tab, state.sub[tab], false);
   const dayPicker = document.querySelector('label.day');
   if (dayPicker) dayPicker.hidden = tab === 'data' || tab === 'history';                                  // the Data tab is not about one trading day
+  clearInterval(state.sg.timer);
   if (!load) return;
+  if (tab === 'signals') { loadSignals().catch(fail); state.sg.timer = setInterval(() => loadSignals().catch(fail), 15000); return; }
   if (tab === 'history') { loadHistory().catch(fail); return; }
   if (tab === 'data') { loadData().catch(fail); return; }
   if (!syncDays(tab)) { setStatus('No data for this section yet', 'err'); return; }
@@ -1349,3 +1352,44 @@ window.addEventListener('resize', () => {                // re-layout charts whe
   if (state.tab === 'fo' && state.foData) { renderFo(state.foData); if (state.foContractData) renderSeries(state.foContractData, FC); }
 });
 init();
+
+
+/* ===================== Signals tab (SCRUM-199): read only, refreshed every 15 s while open ===================== */
+const escHtml = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function spark(series) {
+  const pts = (series || []).filter((p) => p[1] != null);
+  if (pts.length < 2) return '';
+  const ys = pts.map((p) => p[1]), lo = Math.min(...ys), hi = Math.max(...ys), w = 120, h = 24;
+  const xy = pts.map((p, i) => `${(i / (pts.length - 1) * w).toFixed(1)},${(h - 2 - (hi > lo ? (p[1] - lo) / (hi - lo) : 0.5) * (h - 4)).toFixed(1)}`);
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true"><polyline points="${xy.join(' ')}"/></svg>`;
+}
+const zCell = (z) => (z == null ? '<span class="muted">–</span>' : `<span class="${Math.abs(z) >= 2 ? (z > 0 ? 'pos' : 'neg') : ''}">${fmt(z, 1)}</span>`);
+const timeIst = (iso) => (iso ? new Date(iso + (iso.endsWith('Z') ? '' : 'Z')).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '–');
+async function loadSignals() {
+  state.sg.underlying = $('sg-underlying').value || state.sg.underlying;
+  state.sg.data = await api('/api/signals/live', { underlying: state.sg.underlying });
+  renderSignals();
+}
+function renderSignals() {
+  const j = state.sg.data;
+  if (!j) return;
+  renderKpis('sg-cards', [
+    ['Status', j.newest ? (j.stale ? 'Stale' : 'Live') : 'No data', j.newest ? `newest ${timeIst(j.newest)} IST` : 'the runner has not written today'],
+    ['Cadence', j.cadence.length ? j.cadence.join(' · ') : '–', 'bucket widths in the table'],
+    ['Live signals', fmtInt(new Set(j.signals.map((s) => s.signal)).size), j.date],
+    ['Daily signals', fmtInt(j.daily.length), 'from the last close'],
+  ]);
+  const rows = j.signals.map((s) => {
+    const v = s.headline != null ? s.values[s.headline] : null;
+    return `<tr><td>${escHtml(s.signal)}</td><td>${escHtml(s.bucket)}</td><td>${timeIst(s.known_at)}</td><td>${escHtml(s.headline || '')}</td>
+      <td class="num">${fmt(v, 4)}</td><td class="num">${zCell(s.headline != null ? s.z[s.headline] : null)}</td><td>${spark(s.series)}</td></tr>`;
+  }).join('');
+  $('sg-live').innerHTML = `<thead><tr><th>Signal</th><th>Bucket</th><th>As of (IST)</th><th>Value</th><th class="num"></th><th class="num">z</th><th>Today</th></tr></thead><tbody>${rows ||
+    '<tr><td colspan="7" class="muted">No live rows for this day yet.</td></tr>'}</tbody>`;
+  $('sg-note').textContent = j.stale && j.newest ? 'Stale: the newest bucket is older than two buckets. Check the F&O feed and logs/signals-live.log.' : '';
+  $('sg-daily').innerHTML = `<thead><tr><th>Signal</th><th>Session</th><th>Values</th></tr></thead><tbody>${j.daily.map((d) =>
+    `<tr><td>${escHtml(d.signal)}</td><td>${escHtml(d.date)}</td><td class="wrap">${Object.entries(d.values).slice(0, 6).map(([k, x]) => `${escHtml(k)} ${fmt(x, 4)}`).join(' · ')}</td></tr>`).join('') ||
+    '<tr><td colspan="3" class="muted">The nightly job has not written any daily signals yet.</td></tr>'}</tbody>`;
+  setStatus(j.newest ? `${state.sg.underlying}: ${j.signals.length} live series · newest ${timeIst(j.newest)} IST` : `${state.sg.underlying}: no live rows today`);
+}
+if ($('sg-underlying')) $('sg-underlying').onchange = () => loadSignals().catch(fail);

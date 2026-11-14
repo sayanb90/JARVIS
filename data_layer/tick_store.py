@@ -41,6 +41,9 @@ from .lake import LAKE_DIR
 from .ticks import Bar, Tick
 
 
+# order book levels 2 to 5 (SCRUM-193, JARVIS_DEPTH5=1): written only when a batch carries them
+DEPTH_COLUMNS = {f"{side}{i}{suffix}": ("float64" if suffix == "" else "Int64")
+                 for side in ("bid", "ask") for i in range(2, 6) for suffix in ("", "_qty")}
 # extended stream fields (see ticks.Tick): written only when a batch carries them, so output is unchanged while off
 EXT_COLUMNS = {"ltq": "Int64", "atp": "float64", "tbq": "Int64", "tsq": "Int64", "cp": "float64", "iep": "float64",
                "ieq": "Int64", "iiq_total": "Int64", "iiq_market": "Int64", "ref_price": "float64", "cas_eligible": "boolean"}
@@ -54,10 +57,11 @@ ZERO_IS_EMPTY = ("delta", "gamma", "oi")        # the feed sends 0.0 for these o
 
 
 INDEX_PREFIX = "NSE_INDEX:"                     # lake symbols of indices (India VIX included): stored with the stocks, shown apart from them
+INDEX_PREFIXES = (INDEX_PREFIX, "BSE_INDEX:")   # SENSEX (SCRUM-195)
 
 
 def is_index(symbol: str) -> bool:
-    return symbol.startswith(INDEX_PREFIX)
+    return symbol.startswith(INDEX_PREFIXES)
 
 
 def segment_of(symbol: str) -> str:
@@ -108,7 +112,7 @@ def _trim_for_segment(df: pd.DataFrame, segment: str) -> pd.DataFrame:
 
 def _write_segment(folder: Path, df: pd.DataFrame) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"seg-{_time.time_ns() // 1_000_000:015d}.parquet"
+    path = folder / f"seg-{_time.time_ns() // 1_000_000:015d}-{os.getpid()}.parquet"     # pid: two feed processes may share a folder (SCRUM-194)
     tmp = path.with_suffix(".tmp")
     con = duckdb.connect()
     con.register("t", df)
@@ -146,7 +150,7 @@ def write_ticks(ticks: Iterable[Tick], lake_dir: Path | None = None) -> int:
             df[c] = pd.to_datetime(df[c])
         else:
             df = df.drop(columns=c)
-    for c, dtype in EXT_COLUMNS.items():                         # extended stream fields: only when present in this batch
+    for c, dtype in {**EXT_COLUMNS, **DEPTH_COLUMNS}.items():    # extended fields and depth levels: only when present in this batch
         if df[c].notna().any():
             df[c] = df[c].astype(dtype)
         else:
@@ -393,11 +397,23 @@ def main(argv: list[str] | None = None) -> int:
         c.add_argument("--lake", type=Path, default=None)
         if name == "dedupe":
             c.add_argument("--no-backup", action="store_true")
+    sz = sub.add_parser("size", help="bytes per day and per column of a day's tick files (to measure what a setting such as JARVIS_DEPTH5 costs)")
+    sz.add_argument("day", type=date.fromisoformat)
+    sz.add_argument("--segment", choices=SEGMENTS, default=None)
+    sz.add_argument("--lake", type=Path, default=None)
     sp = sub.add_parser("split", help="convert days from the older layout (stocks and options in one file) to lake/ticks/segment=eq|fo; "
                                       "checks the result row for row and moves the original to lake/_pre_split (nothing is deleted)")
     sp.add_argument("days", nargs="*", type=date.fromisoformat, help="days to convert (default: every day still in the older layout)")
     sp.add_argument("--lake", type=Path, default=None)
     a = ap.parse_args(argv)
+    if a.cmd == "size":
+        r = day_size(a.day, a.lake, [a.segment] if a.segment else list(SEGMENTS))
+        for sg, v in r.items():
+            print(f"{a.day} {sg}: {v['rows']:,} rows, {v['bytes'] / 1e6:.1f} MB on disk, {v['bytes_per_row']:.1f} bytes per row; "
+                  f"depth levels 2-5: {v['depth_bytes'] / 1e6:.1f} MB ({v['depth_share']:.0%})")
+            for c, b in v["columns"][:12]:
+                print(f"    {c:16} {b / 1e6:8.2f} MB")
+        return 0
     if a.cmd == "compact":
         print(f"{a.day}: {compact_ticks_day(a.day, a.lake)} rows")
     elif a.cmd == "split":
@@ -420,6 +436,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{a.day}: {before} rows before, {after} after, {before - after} duplicates removed")
     return 0
 
+
+
+def day_size(day: date, lake_dir: Path | None = None, segments: Iterable[str] = SEGMENTS) -> dict:
+    """{segment: rows, bytes, bytes_per_row, compressed bytes per column (largest first), depth_bytes, depth_share} for one day's tick files."""
+    out = {}
+    con = duckdb.connect()
+    for sg in segments:
+        files = sorted(segment_folder(lake_dir or LAKE_DIR, day, sg).glob("*.parquet"))
+        if not files:
+            continue
+        names = ", ".join("'" + str(f).replace("'", "''") + "'" for f in files)
+        rows = con.execute(f"SELECT count(*) FROM read_parquet([{names}], union_by_name=true)").fetchone()[0]
+        cols = con.execute(f"SELECT path_in_schema, sum(total_compressed_size) FROM parquet_metadata([{names}]) GROUP BY 1 ORDER BY 2 DESC").fetchall()
+        total = sum(f.stat().st_size for f in files)
+        depth = sum(b for c, b in cols if c in DEPTH_COLUMNS)
+        out[sg] = {"rows": rows, "bytes": total, "bytes_per_row": total / rows if rows else 0.0, "columns": [(c, int(b)) for c, b in cols],
+                   "depth_bytes": depth, "depth_share": depth / max(1, sum(b for _, b in cols))}
+    return out
 
 
 def compact_day(interval: str, day: date, lake_dir: Path | None = None) -> int:

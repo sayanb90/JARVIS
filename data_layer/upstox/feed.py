@@ -57,6 +57,49 @@ START_EARLY = timedelta(minutes=5)
 STOP_LATE = timedelta(minutes=5)
 
 
+def parse_shard(text: str | None) -> tuple[int, int]:
+    """"2/3" -> (2, 3); empty -> (1, 1)."""
+    if not text:
+        return 1, 1
+    i, n = (int(x) for x in str(text).split("/"))
+    if not 1 <= i <= n:
+        raise ValueError(f"bad shard {text!r}: expected I/N with 1 <= I <= N")
+    return i, n
+
+
+def shard_keys(key_map: dict[str, str], shard: int, shards: int) -> dict[str, str]:
+    """The part of a subscription list one connection takes when the list is split over `shards` connections (SCRUM-194): instruments
+    sorted by symbol and dealt round-robin, so every shard gets every expiry and a near-equal count, and the split is the same in every
+    process that reads the same list."""
+    if shards <= 1:
+        return dict(key_map)
+    ordered = sorted(key_map.items(), key=lambda kv: kv[1])
+    return dict(kv for n, kv in enumerate(ordered) if n % shards == shard - 1)
+
+
+def depth5_enabled(flag: bool | None = None, env=None, segment: str | None = None) -> bool:
+    """Store order book levels 2 to 5: the --depth5 flag, else JARVIS_DEPTH5: 1/true/yes/on/all for every feed, or a segment name
+    ("fo" or "eq", comma-separated) for only those feeds.  Off when unset."""
+    if flag:
+        return True
+    v = (os.environ if env is None else env).get("JARVIS_DEPTH5", "").strip().lower()
+    if v in ("1", "true", "yes", "on", "all"):
+        return True
+    return bool(segment) and segment in {x.strip() for x in v.split(",") if x.strip()}
+
+
+def live_signals_enabled(env=None) -> bool:
+    """Compute the futures order-book signals inside the feed (SCRUM-196): JARVIS_LIVE_SIGNALS=1.  Off when unset."""
+    return (os.environ if env is None else env).get("JARVIS_LIVE_SIGNALS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def write_interval(env=None) -> float:
+    """Seconds between tick writes: 15, or 5 when the live signals run at 10-second buckets (JARVIS_SIGNAL_CADENCE=10s), so the runner
+    reading the tick files is at most one bucket behind."""
+    cad = (os.environ if env is None else env).get("JARVIS_SIGNAL_CADENCE", "1m").strip().lower()
+    return 5.0 if cad in ("10s", "10sec") else 15.0
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -65,9 +108,14 @@ class FeedProcessor:
     """Synchronous core: frame bytes in, raw ticks out.  The async runner only moves data."""
 
     def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None,
-                 books: BookStore | None = None, ext: bool = False, segment: str | None = None) -> None:
+                 books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False,
+                 book_signals=None) -> None:
         self.key_map = key_map
+        self.book_signals = book_signals                 # signals.options.stream.BookAccumulator, or None (SCRUM-196)
+        self.signal_rows: list[dict] = []
+        self.signal_errors = 0
         self.ext = ext                                   # extended fields and session events (off in production for now)
+        self.depth = depth                               # order book levels 2 to 5 (SCRUM-193; JARVIS_DEPTH5=1, off by default)
         self.events: list[dict] = []
         self._event_state: dict[tuple, str] = {}
         self.books = books if books is not None else BookStore()   # live five-level books, memory only
@@ -100,7 +148,7 @@ class FeedProcessor:
             self._index_seen.update(self._index_keys.intersection(resp.feeds.keys()))
         for sym, ts, ltp, bids, asks in decode.books_from_response(resp, self.key_map):
             self.books.update(sym, ts, ltp, bids, asks)
-        for t in decode.ticks_from_response(resp, self.key_map, ext=self.ext):
+        for t in decode.ticks_from_response(resp, self.key_map, ext=self.ext, depth=self.depth):
             t.rts = now                                  # when this process received the message (exact arrival order)
             if t.ts.date() != now.date():                # last trade from an earlier day: no trade yet today
                 if t.fts is not None and t.fts.date() == now.date():
@@ -116,13 +164,34 @@ class FeedProcessor:
                                 "(is ltt really epoch ms?)", t.ts, now)
                 continue
             self.ticks += 1
+            if self.book_signals is not None and "_FUT_" in t.symbol:
+                self._book_signal(t)
             kept = self.policy.apply(t)
             if kept is not None:
                 self._ticks.append(kept)
 
+    def _book_signal(self, t: Tick) -> None:
+        """Feed one futures tick to the order-book accumulator; a failure there is counted and never stops the tick capture."""
+        from signals.options.stream import fut_meta
+        try:
+            meta = fut_meta(t.symbol)
+            row = {f: getattr(t, f) for f in t.__slots__}
+            row.update(underlying=meta[0] if meta else None, expiry=meta[1] if meta else None)
+            self.signal_rows += self.book_signals.update(row)
+        except Exception:                                  # noqa: BLE001
+            self.signal_errors += 1
+            if self.signal_errors in (1, 100, 10_000):
+                log.exception("order-book signal update failed (%d so far); ticks are unaffected", self.signal_errors)
+
     def drain(self) -> list[Tick]:
         ticks, self._ticks = self._ticks, []
         return ticks
+
+    def drain_signals(self, final: bool = False) -> list[dict]:
+        if final and self.book_signals is not None:
+            self.signal_rows += self.book_signals.flush()
+        rows, self.signal_rows = self.signal_rows, []
+        return rows
 
     def drain_events(self) -> list[dict]:
         ev, self.events = self.events, []
@@ -136,14 +205,16 @@ class UpstoxFeed:
                  stale_s: float = 120.0, batch: int = SUBSCRIBE_BATCH, clock=utcnow,
                  dump_frames: int = 0, dump_dir: Path | None = None,
                  token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None,
-                 books: BookStore | None = None, ext: bool = False, segment: str | None = None) -> None:
+                 books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False,
+                 book_signals=None, signal_store: Path | None = None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
         # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
         self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
-        self.proc = FeedProcessor(key_map, policy, books, ext=ext)
+        self.proc = FeedProcessor(key_map, policy, books, ext=ext, depth=depth, book_signals=book_signals)
+        self.signal_store = signal_store
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.segment = segment                            # 'eq' or 'fo': the folder this feed owns and compacts at the end of the session (SCRUM-133)
         self.clock = clock
@@ -169,6 +240,14 @@ class UpstoxFeed:
             except Exception:
                 self.proc.events[:0] = events
                 raise
+        if self.proc.book_signals is not None:
+            rows = self.proc.drain_signals(final=final)
+            try:
+                from signals.options.stream import write_rows
+                write_rows(rows, self.signal_store)
+            except Exception:                              # noqa: BLE001 -- signals are best effort; ticks are what must not be lost
+                self.proc.signal_rows[:0] = rows
+                log.exception("could not write %d live signal rows; kept for the next write", len(rows))
         return n
 
     BISECT_BUDGET = 256               # write attempts one flush may spend isolating bad ticks
@@ -471,6 +550,11 @@ def main() -> None:
     ap.add_argument("--ext-fields", action="store_true", default=None,
                     help="also store trade size, average price, book totals, previous close, auction fields and session "
                          "events (default off; or JARVIS_EXT_FIELDS=1)")
+    ap.add_argument("--shard", default=None, metavar="I/N",
+                    help="split the subscription list over N connections and take part I (SCRUM-194; e.g. two F&O processes with 1/2 and 2/2: "
+                         "Upstox allows 2,000 instruments per connection in full mode and 5 connections on Plus)")
+    ap.add_argument("--depth5", action="store_true", default=None,
+                    help="also store order book levels 2 to 5 (full mode; default off; or JARVIS_DEPTH5=1; SCRUM-193)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     load_dotenv(ENV_FILE)
@@ -479,20 +563,29 @@ def main() -> None:
     def new_policy() -> TickPolicy:
         return TickPolicy(**{**{"mode": base.mode, "min_interval_s": base.min_interval_s, "greeks": base.greeks,
                                 "decimals": base.decimals}, **{k: v for k, v in policy_args.items() if v is not None}})
-    log.info("tick storage: %s", new_policy().describe())
+    log.info("tick storage: %s; order book levels 2-5: %s", new_policy().describe(), "on" if depth5_enabled(a.depth5, segment=a.segment) else "off")
     token = current_token()
     if not token and a.once:
         raise SystemExit("no token: set UPSTOX_ACCESS_TOKEN (see python -m data_layer.upstox.auth)")
     if not token:
         log.warning("no Upstox token yet: the daemon will keep retrying; run python -m data_layer.upstox.auth")
+    shard, shards = parse_shard(a.shard)
+    label = a.segment if shards == 1 else f"{a.segment}-{shard}of{shards}"
+
     def keys() -> dict[str, str]:
-        km = segment_key_map(a.segment, a.fo_file)
-        return dict(list(km.items())[: a.limit]) if a.limit else km
+        km = shard_keys(segment_key_map(a.segment, a.fo_file), shard, shards)
+        km = dict(list(km.items())[: a.limit]) if a.limit else km
+        cap = MODE_CAP.get(a.mode)
+        if cap and len(km) > cap:
+            log.error("%s: %d instruments exceed the %d-key cap of mode %s on one connection: split the list with --shard I/N",
+                      label, len(km), cap, a.mode)
+        return km
 
     if a.segment == "fo" and not a.fo_file:
         from .fo_instruments import check_universe
         check_universe(allow_stale=a.allow_stale_universe)
     key_map = keys()
+    log.info("%s: %d instruments on this connection", label, len(key_map))
     if not key_map:
         raise SystemExit("no instruments to subscribe: " + ("run fo_instruments import and select" if a.segment == "fo"
                                                            else "no universe symbols with a usable ISIN"))
@@ -509,15 +602,20 @@ def main() -> None:
         if fresh and fresh != key_map:
             log.info("subscription list changed: %d -> %d instruments", len(key_map), len(fresh))
             key_map = fresh
+        acc = None
+        if a.segment == "fo" and live_signals_enabled():
+            from signals.options.stream import BookAccumulator, front_expiries
+            acc = BookAccumulator(buckets=("10s", "1min"), front=front_expiries(key_map.values(), utcnow().date()))
         return UpstoxFeed(current_token(), key_map, url=a.url, mode=a.mode, dump_frames=a.dump_frames,
                           token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books,
                           ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"),
-                          segment=a.segment)
+                          segment=a.segment, depth=depth5_enabled(a.depth5, segment=a.segment), book_signals=acc,
+                          write_s=write_interval())
     books = BookStore()
 
     async def runner() -> None:
-        server = await serve_books(books, port_for(a.segment))
-        mon = start_sysmon(a.segment)
+        server = await serve_books(books, port_for(a.segment, shard=shard))
+        mon = start_sysmon(label)
         try:
             await run_forever(make, once=a.once)
         finally:

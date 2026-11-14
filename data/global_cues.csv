@@ -1,0 +1,10 @@
+# Global cues (SCRUM-188): what moves the Indian open overnight.  Collected from Yahoo by the daily OHLC job and the 1-minute bars job
+# (with its gap healing) under the market code GLOBAL; the viewer shows them in UTC over the whole day (futures and FX trade nearly 24 hours).
+# Add a row here to follow another cue.  Columns as in universe.csv.
+symbol,name,market,exchange,isin,cusip,ric,bbg_code,sector,currency
+ES=F,E-mini S&P 500 futures (front month),GLOBAL,CME,,,,,Index future,USD
+NQ=F,E-mini Nasdaq-100 futures (front month),GLOBAL,CME,,,,,Index future,USD
+^VIX,CBOE Volatility Index,GLOBAL,CBOE,,,,,Volatility index,USD
+INR=X,US dollar in Indian rupees,GLOBAL,FX,,,,,Currency,INR
+CL=F,WTI crude oil futures (front month),GLOBAL,NYMEX,,,,,Commodity future,USD
+^GSPC,S&P 500 index,GLOBAL,NYSE / Nasdaq,,,,,Index,USD

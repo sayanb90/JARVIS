@@ -1,0 +1,49 @@
+date,time_ist,kind,description,source,verified
+2022-02-01,11:00,budget,Union Budget 2022-23,https://www.indiabudget.gov.in/,false
+2022-02-10,10:00,rbi_mpc,RBI MPC decision (Feb 2022),https://website.rbi.org.in/web/rbi/policy-rate-archive,false
+2022-04-08,10:00,rbi_mpc,RBI MPC decision (Apr 2022),https://website.rbi.org.in/web/rbi/policy-rate-archive,false
+2022-05-04,14:00,rbi_mpc,RBI MPC off-cycle decision: repo +40 bp,https://www.rbi.org.in/scripts/BS_PressReleaseDisplay.aspx?prid=54236,true
+2022-06-08,10:00,rbi_mpc,RBI MPC decision (Jun 2022),https://website.rbi.org.in/web/rbi/policy-rate-archive,false
+2022-08-05,10:00,rbi_mpc,RBI MPC decision: repo +50 bp to 5.40%,https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2022-09-30,10:00,rbi_mpc,RBI MPC decision: repo +50 bp to 5.90%,https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2022-12-07,10:00,rbi_mpc,RBI MPC decision: repo +35 bp to 6.25%,https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2023-02-01,11:00,budget,Union Budget 2023-24,https://www.indiabudget.gov.in/,false
+2023-02-08,10:00,rbi_mpc,RBI MPC decision: repo +25 bp to 6.50%,https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2023-04-06,10:00,rbi_mpc,RBI MPC decision (Apr 2023),https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2023-06-08,10:00,rbi_mpc,RBI MPC decision (Jun 2023),https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2023-08-10,10:00,rbi_mpc,RBI MPC decision (Aug 2023),https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2023-10-06,10:00,rbi_mpc,RBI MPC decision (Oct 2023),https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2023-12-08,10:00,rbi_mpc,RBI MPC decision (Dec 2023),https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2024-02-01,11:00,budget,Interim Union Budget 2024-25,https://www.indiabudget.gov.in/,false
+2024-02-08,10:00,rbi_mpc,RBI MPC decision (Feb 2024),https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2024-04-05,10:00,rbi_mpc,RBI MPC decision (Apr 2024),https://website.rbi.org.in/web/rbi/policy-rate-archive,true
+2024-06-01,18:30,election_result,General election exit polls published (Saturday; market reacted Monday 3 Jun),https://www.business-standard.com/,false
+2024-06-04,08:00,election_result,General election 2024 counting and results,https://results.eci.gov.in/,false
+2024-06-07,10:00,rbi_mpc,RBI MPC decision (Jun 2024),https://website.rbi.org.in/web/rbi/policy-rate-archive,false
+2024-07-23,11:00,budget,Full Union Budget 2024-25,https://www.indiabudget.gov.in/,false
+2024-08-08,10:00,rbi_mpc,RBI MPC decision (Aug 2024),https://website.rbi.org.in/web/rbi/policy-rate-archive,false
+2024-10-01,,sebi_rule,SEBI circular on index-derivatives framework (SEBI/HO/MRD/TPD-1/P/CIR/2024/132),https://www.sebi.gov.in/,false
+2024-10-09,10:00,rbi_mpc,RBI MPC decision (Oct 2024),https://website.rbi.org.in/web/rbi/policy-rate-archive,false
+2024-11-20,,expiry_rule,One weekly index expiry per exchange: BANKNIFTY and FINNIFTY weeklies end; higher contract size; extra expiry-day margin,https://www.business-standard.com/markets/news/sebi-tightens-rules-for-booming-equity-derivatives-market-effective-nov-20-124100101113_1.html,false
+2024-12-06,10:00,rbi_mpc,RBI MPC decision (Dec 2024),https://website.rbi.org.in/web/rbi/policy-rate-archive,false
+2025-01-02,,lot_size,First NIFTY weekly on the larger lot (25 to 75) after the Nov 2024 contract-size rule,https://www.nseindia.com/,false
+2025-02-01,11:00,budget,Union Budget 2025-26 (Saturday; special trading session),https://www.indiabudget.gov.in/,false
+2025-02-07,10:00,rbi_mpc,RBI MPC decision (Feb 2025),https://website.rbi.org.in/web/rbi/policy-rate-archive,false
+2025-04-09,10:00,rbi_mpc,RBI MPC decision (Apr 2025),https://website.rbi.org.in/web/rbi/-/press-releases/meeting-schedule-of-the-monetary-policy-committee-for-2025-2026,true
+2025-05-26,,expiry_rule,SEBI circular: each exchange's equity-derivative expiries on Tuesday or Thursday only,https://www.taxmann.com/post/blog/sebi-fixes-equity-derivatives-expiry-to-either-tuesday-or-thursday,false
+2025-06-06,10:00,rbi_mpc,RBI MPC decision (Jun 2025),https://website.rbi.org.in/web/rbi/-/press-releases/meeting-schedule-of-the-monetary-policy-committee-for-2025-2026,true
+2025-07-03,,sebi_rule,SEBI interim order against Jane Street (expiry-day trading in BANKNIFTY and NIFTY),https://www.sebi.gov.in/,false
+2025-08-06,10:00,rbi_mpc,RBI MPC decision (Aug 2025; sources differ between 6 and 7 Aug),https://website.rbi.org.in/web/rbi/-/press-releases/meeting-schedule-of-the-monetary-policy-committee-for-2025-2026,false
+2025-09-01,,expiry_rule,NSE expiries move from Thursday to Tuesday (last Thursday expiry 28 Aug 2025),https://www.business-standard.com/markets/news/nse-bids-adieu-to-thursday-expiry-as-dates-swap-come-into-effect-explained-125082800635_1.html,false
+2025-10-01,10:00,rbi_mpc,RBI MPC decision (Oct 2025),https://website.rbi.org.in/web/rbi/-/press-releases/meeting-schedule-of-the-monetary-policy-committee-for-2025-2026,true
+2025-12-05,10:00,rbi_mpc,RBI MPC decision (Dec 2025),https://website.rbi.org.in/web/rbi/-/press-releases/meeting-schedule-of-the-monetary-policy-committee-for-2025-2026,true
+2025-12-30,,lot_size,Index lot sizes cut after the close (NIFTY 75 to 65; BANKNIFTY 35 to 30),https://www.angelone.in/news/market-updates/nse-revises-lot-sizes-for-index-derivatives-from-december-2025-nifty-lot-size-to-reduce-to-65,false
+2026-02-01,11:00,budget,Union Budget 2026-27 (Sunday; special trading session),https://www.business-standard.com/budget/news/budget-2026-bse-nse-trading-session-sunday-february-1-time-126011601035_1.html,true
+2026-02-06,10:00,rbi_mpc,RBI MPC decision (Feb 2026),https://www.website.rbi.org.in/documents/d/rbi/prmpcresolutionfeb2026,true
+2026-04-08,10:00,rbi_mpc,RBI MPC decision (Apr 2026),https://rbi.org.in/scripts/Annualpolicy.aspx,true
+2026-06-05,10:00,rbi_mpc,RBI MPC decision (Jun 2026),https://rbi.org.in/scripts/Annualpolicy.aspx,true
+2026-08-05,10:00,rbi_mpc,RBI MPC decision (Aug 2026),https://rbi.org.in/scripts/Annualpolicy.aspx,true
+2026-10-07,10:00,rbi_mpc,RBI MPC decision (Oct 2026),https://rbi.org.in/scripts/Annualpolicy.aspx,true
+2026-11-03,,other,Live level-1 capture with Upstox IV starts (our own data),internal,true
+2026-12-04,10:00,rbi_mpc,RBI MPC decision (Dec 2026; scheduled),https://www.millenniumpost.in/business/rbi-announces-mpc-schedule-for-fy27-first-rate-decision-on-april-8-652990,false
+2027-02-05,10:00,rbi_mpc,RBI MPC decision (Feb 2027; scheduled),https://www.millenniumpost.in/business/rbi-announces-mpc-schedule-for-fy27-first-rate-decision-on-april-8-652990,false
