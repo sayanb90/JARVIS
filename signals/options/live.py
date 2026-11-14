@@ -134,8 +134,11 @@ def spread_gate(ctx: Context, p: dict) -> pd.DataFrame:
     return m.rename(columns={"minute": "ts"})[["ts", "known_at", "symbol", "expiry", "strike", "cp", "k", "rel_spread", "z"]]
 
 
-@register(_spec("fair_value_gap", "C1: option mid moved by delta x the future's microprice change since the last minute, against the quoted "
-                "ask (buy edge) and bid (sell edge), as a fraction of the mid."))
+@register(Spec(id="fair_value_gap", version=2, family="live", grid="1m", inputs=("ticks_fo",), live_only=True, min_sample=MIN_SAMPLE,
+               tickets=("SCRUM-181", "SCRUM-198"),
+               doc="C1: option mid moved by delta x the future's microprice change since the previous bucket, against the quoted ask (buy "
+                   "edge) and bid (sell edge), as a fraction of the mid.  v2: only against the immediately previous bucket (empty when the "
+                   "contract had no quote in it), not the contract's last quote however old (lookback rule of 14 Nov 2026)."))
 def fair_value_gap(ctx: Context, p: dict) -> pd.DataFrame:
     t = ctx.get("ticks_meta")
     ch = ctx.get("chain_live")
@@ -151,7 +154,8 @@ def fair_value_gap(ctx: Context, p: dict) -> pd.DataFrame:
     m = m.merge(ch[["ts", "expiry", "strike", "cp", "delta"]].rename(columns={"ts": "minute"}), on=["minute", "expiry", "strike", "cp"], how="left")
     m = m.join(fmp, on="minute").sort_values("minute")
     g = m.groupby("symbol")
-    m["fair"] = g["mid"].shift(1) + m["delta"] * (m["fut_mp"] - g["fut_mp"].shift(1))
+    adjacent = (m["minute"] - g["minute"].shift(1)) == ctx.bucket_td            # the previous bucket, not an older one
+    m["fair"] = (g["mid"].shift(1) + m["delta"] * (m["fut_mp"] - g["fut_mp"].shift(1))).where(adjacent)
     m["buy_edge"] = (m["fair"] - m["ask"]) / m["mid"]
     m["sell_edge"] = (m["bid"] - m["fair"]) / m["mid"]
     m["known_at"] = m["minute"] + ctx.bucket_td

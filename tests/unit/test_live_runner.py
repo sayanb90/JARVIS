@@ -64,7 +64,8 @@ def trim(hist: dict, days: int = 3) -> dict:
 @pytest.fixture(scope="module")
 def replayed(day):
     hist, ticks, _ = day
-    return replay("NIFTY", trim(hist), ticks, step="5min")
+    # live loads the 20-session volume baseline at the open (slot_volume_history); give the replay the same one
+    return replay("NIFTY", trim(hist), ticks, step="5min", volume_slot_daily=Context("NIFTY", hist).get("volume_slot_daily"))
 
 
 @pytest.fixture(scope="module")

@@ -221,10 +221,12 @@ class LiveRunner:
     def _today_raw(self, upto: pd.Timestamp) -> dict:
         b = self.bars[self.bars["ts"] < upto].copy()
         b["volume"] = bar_volume(b)
+        if "vol_last" in b.columns:
+            b["vol_day"] = b["vol_last"]                     # the feed's day counter: session volume without reading the whole day
         sym = b["symbol"].astype(str)
         is_opt = sym.str.match(rf"^{self.underlying}_[0-9.]+_(CE|PE)_")
         is_fut = sym.str.startswith(f"{self.underlying}_FUT_")
-        cols = ["ts", "symbol", "open", "high", "low", "close", "volume", "oi"]
+        cols = ["ts", "symbol", "open", "high", "low", "close", "volume", "oi", "vol_day"]
         h = self.history
 
         def cat(name, today):
@@ -233,7 +235,7 @@ class LiveRunner:
                 return prev if prev is not None else pd.DataFrame(columns=cols)
             today = today.reindex(columns=cols)
             out = pd.concat([prev, today], ignore_index=True) if prev is not None and len(prev) else today.reset_index(drop=True)
-            for c in ("open", "high", "low", "close", "volume", "oi"):
+            for c in ("open", "high", "low", "close", "volume", "oi", "vol_day"):
                 out[c] = pd.to_numeric(out[c], errors="coerce").astype(float)
             out["ts"] = pd.to_datetime(out["ts"])
             return out
