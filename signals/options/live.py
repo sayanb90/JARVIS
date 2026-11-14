@@ -78,12 +78,12 @@ def chain_live(ctx: Context) -> pd.DataFrame:
     agg["src"] = "tick"
     rates = rate_table(ctx.raw.get("rates"))
     if ctx.bucket_td >= pd.Timedelta(minutes=1):
-        return build_chain(agg, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rates)
+        return build_chain(agg, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rates, from_ts=ctx.since)
     # Sub-minute buckets (10 s): the index and future minute bars are too coarse, so the grid is the option buckets themselves and the
     # forward falls back to the front future's bucket mid from its own ticks.  Staleness is still counted in minutes.
     steps = int(pd.Timedelta(minutes=STALE_MAX) / ctx.bucket_td)
     return build_chain(agg, ctx.get("contract_table"), pd.DataFrame(columns=["ts", "close"]), _fut_buckets(t), ctx.r, stale_max=steps,
-                       rates=rates)
+                       rates=rates, from_ts=ctx.since)
 
 
 def _fut_buckets(t: pd.DataFrame) -> pd.DataFrame:
@@ -338,6 +338,23 @@ def minute_index(ts: pd.Series) -> pd.Series:
 LEVELS = 5
 
 
+def _trailing_median(df: pd.DataFrame, tcol: str, key: str, col: str, window: pd.Timedelta, step: pd.Timedelta,
+                     min_periods: int = 5) -> pd.Series:
+    """Per `key`, the median of `col` over the window before each row's bucket ([t - window, t), clock time, within the session): one
+    wide table (buckets x keys) on the regular bucket grid and one rolling median, instead of a loop over contracts."""
+    out = pd.Series(np.nan, index=df.index)
+    n = max(1, int(window / step))
+    for day, g in df.groupby(df[tcol].dt.normalize(), sort=False):
+        wide = g.pivot_table(index=tcol, columns=key, values=col, aggfunc="last")
+        grid = pd.date_range(wide.index.min(), wide.index.max(), freq=step)
+        wide = wide.reindex(grid)
+        med = wide.shift(1).rolling(n, min_periods=min(min_periods, n)).median()
+        long = med.stack(future_stack=True).rename("v").reset_index()
+        long.columns = [tcol, key, "v"]
+        out.loc[g.index] = g[[tcol, key]].merge(long, on=[tcol, key], how="left")["v"].to_numpy()
+    return out
+
+
 def _book_cols(t: pd.DataFrame) -> bool:
     return all(c in t.columns for c in ("bid2", "ask2", "bid2_qty", "ask2_qty")) and t["bid2"].notna().any()
 
@@ -350,10 +367,10 @@ def _level(t: pd.DataFrame, side: str, i: int, what: str) -> pd.Series:
     return t[col] if col in t.columns else pd.Series(np.nan, index=t.index)
 
 
-@register(Spec(id="depth_features", version=1, family="live", grid="1m", inputs=("ticks_fo",), live_only=True, min_sample=MIN_SAMPLE,
-               params={"levels": LEVELS, "withdraw_window": 15}, tickets=("SCRUM-193",),
+@register(Spec(id="depth_features", version=2, family="live", grid="1m", inputs=("ticks_fo",), live_only=True, min_sample=MIN_SAMPLE,
+               params={"levels": LEVELS, "withdraw_window": 5}, tickets=("SCRUM-193", "SCRUM-198"),
                doc="Per contract-minute from the 5-level book: depth imbalance over 5 levels, book slope (quantity per unit of price "
-                   "away from the mid), total depth and its change against the previous 15 minutes (liquidity withdrawal), and "
+                   "away from the mid), total depth and its change against its median of the previous 5 minutes (liquidity withdrawal; v2: 5 minutes, was 15), and "
                    "quote refills after trades at the touch (an iceberg proxy).  Empty until JARVIS_DEPTH5 is on."))
 def depth_features(ctx: Context, p: dict) -> pd.DataFrame:
     t = ctx.get("ticks_meta")
@@ -377,11 +394,10 @@ def depth_features(ctx: Context, p: dict) -> pd.DataFrame:
                                              refills=("refill", "sum"), cp=("instrument_type", "first"), strike=("strike", "first"),
                                              expiry=("expiry", "first")).reset_index()
     m = m.sort_values("minute")
-    win = f"{p['withdraw_window']}min"                     # the previous 15 minutes of clock time (not of buckets with ticks)
-    m = m.sort_values(["symbol", "minute"], kind="stable")
-    base = m.groupby(["symbol", m["minute"].dt.normalize()], group_keys=False).apply(
-        lambda g: g.set_index("minute")["depth"].rolling(win, closed="left", min_periods=5).median().set_axis(g.index))
     m = m.sort_values("minute", kind="stable")
+    m["depth_change"] = np.nan
+    m["_base"] = _trailing_median(m, "minute", "symbol", "depth", pd.Timedelta(minutes=p["withdraw_window"]), ctx.bucket_td)
+    base = m.pop("_base")
     m["depth_change"] = m["depth"] / base - 1
     m["known_at"] = m["minute"] + ctx.bucket_td
     return m.rename(columns={"minute": "ts"})

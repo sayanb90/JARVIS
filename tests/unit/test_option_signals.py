@@ -191,3 +191,20 @@ def test_chain_uses_the_dated_rate_from_the_next_session():
     ch = Context("NIFTY", {**raw, "rates": pd.DataFrame({"date": [d0 - pd.Timedelta(days=1)], "series": ["repo"], "value_pct": [3.0]})}).get("chain")
     assert np.allclose(ch["r"], 0.03)
     assert np.allclose(Context("NIFTY", raw).get("chain")["r"], 0.065)
+
+
+def test_vectorised_grid_fill_equals_the_loop():
+    """The chain's carry-forward (stale prints for up to STALE_MAX steps, with their age) is vectorised; same rows as one contract at a time."""
+    raw = make_raw()
+    o = raw["opt_1m"].copy()
+    o["ts"] = pd.to_datetime(o["ts"])
+    o = o.iloc[::3]                                               # gaps, so carries and their limits are exercised
+    sp = Context("NIFTY", raw).get("spot")
+    a = core._grid_fill_loop(o, sp, core.STALE_MAX).sort_values(["symbol", "ts"]).reset_index(drop=True)
+    b = core._grid_fill(o, sp, core.STALE_MAX).sort_values(["symbol", "ts"]).reset_index(drop=True)[a.columns]
+    assert len(a) == len(b) and len(a) > len(o)
+    for c in a.columns:
+        if pd.api.types.is_numeric_dtype(a[c]):
+            np.testing.assert_allclose(a[c].astype(float), b[c].astype(float), equal_nan=True, err_msg=c)
+        else:
+            assert (a[c].astype(str) == b[c].astype(str)).all(), c

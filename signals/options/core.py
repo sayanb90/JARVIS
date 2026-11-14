@@ -147,8 +147,8 @@ def fut_front(ctx: Context) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------------------------- the chain
-def _grid_fill(o: pd.DataFrame, minutes: pd.DataFrame, stale_max: int) -> pd.DataFrame:
-    """Carry each contract's last trade forward inside its session for up to `stale_max` minutes, with its age."""
+def _grid_fill_loop(o: pd.DataFrame, minutes: pd.DataFrame, stale_max: int) -> pd.DataFrame:
+    """Reference implementation of _grid_fill (one contract at a time); kept for the equality test."""
     if o.empty:
         return o
     o = o.copy()
@@ -156,7 +156,7 @@ def _grid_fill(o: pd.DataFrame, minutes: pd.DataFrame, stale_max: int) -> pd.Dat
     mins = minutes[["ts"]].copy()
     mins["day"] = mins["ts"].dt.normalize()
     parts = []
-    carry = [c for c in ("close", "oi", "bid", "ask", "bid_qty", "ask_qty", "iv_vendor", "delta_vendor", "gamma_vendor", "vol_day") if c in o.columns]
+    carry = [c for c in CARRY if c in o.columns]
     for (day, sym), g in o.groupby(["day", "symbol"], sort=False):
         grid = mins.loc[mins["day"] == day, "ts"]
         if grid.empty:
@@ -174,6 +174,41 @@ def _grid_fill(o: pd.DataFrame, minutes: pd.DataFrame, stale_max: int) -> pd.Dat
         r = r[pos.notna().to_numpy()]
         r["symbol"] = sym
         parts.append(r.reset_index().rename(columns={"index": "ts"}))
+    out = pd.concat(parts, ignore_index=True) if parts else o.iloc[:0]
+    return out.drop(columns=["day"], errors="ignore")
+
+
+CARRY = ("close", "oi", "bid", "ask", "bid_qty", "ask_qty", "iv_vendor", "delta_vendor", "gamma_vendor", "vol_day")
+
+
+def _grid_fill(o: pd.DataFrame, minutes: pd.DataFrame, stale_max: int) -> pd.DataFrame:
+    """Carry each contract's last trade forward inside its session for up to `stale_max` grid steps, with its age in minutes.
+    Vectorised (one merge and one grouped forward fill over every contract at once); gives the rows of _grid_fill_loop."""
+    if o.empty:
+        return o
+    o = o.copy()
+    o["ts"] = pd.to_datetime(o["ts"])
+    o["day"] = o["ts"].dt.normalize()
+    mins = pd.DataFrame({"ts": pd.to_datetime(minutes["ts"]).drop_duplicates()})
+    mins["day"] = mins["ts"].dt.normalize()
+    days_with_grid = set(mins["day"])
+    own = o[~o["day"].isin(days_with_grid)]                        # a day with no grid: each contract on its own times (rare)
+    o = o[o["day"].isin(days_with_grid)]
+    parts = [_grid_fill_loop(own.drop(columns=["day"]), own[["ts"]].iloc[:0], stale_max)] if len(own) else []
+    if len(o):
+        o = o.sort_values(["symbol", "ts"], kind="stable").drop_duplicates(["symbol", "ts"], keep="last")
+        first = o.groupby(["day", "symbol"], as_index=False)["ts"].min().rename(columns={"ts": "first"})
+        g = first.merge(mins, on="day")
+        g = g[g["ts"] >= g["first"]].drop(columns=["first"])
+        g = g.merge(o.drop(columns=["day"]).assign(_trade_ts=o["ts"]), on=["symbol", "ts"], how="left")
+        g = g.sort_values(["symbol", "ts"], kind="stable")
+        key = [g["day"], g["symbol"]]
+        carry = [c for c in CARRY if c in g.columns]
+        g[carry + ["_trade_ts"]] = g.groupby(key, sort=False)[carry + ["_trade_ts"]].ffill(limit=stale_max)
+        g = g[g["_trade_ts"].notna()]
+        g["volume"] = g["volume"].fillna(0) if "volume" in g.columns else 0
+        g["age"] = ((g["ts"] - pd.to_datetime(g["_trade_ts"])) / pd.Timedelta(minutes=1)).astype(float)
+        parts.append(g.drop(columns=["_trade_ts", "day"]))
     out = pd.concat(parts, ignore_index=True) if parts else o.iloc[:0]
     return out.drop(columns=["day"], errors="ignore")
 
@@ -221,8 +256,11 @@ def parity_forward(ch: pd.DataFrame, r: float, max_age: float = PARITY_AGE, pair
 
 
 def build_chain(opt: pd.DataFrame, contracts: pd.DataFrame, spot_m: pd.DataFrame, fut: pd.DataFrame, r: float,
-                stale_max: int = STALE_MAX, iv_age: int = IV_AGE, rates: pd.DataFrame | None = None) -> pd.DataFrame:
-    """`r` is the flat rate used where `rates` (from rate_table) has no value yet."""
+                stale_max: int = STALE_MAX, iv_age: int = IV_AGE, rates: pd.DataFrame | None = None,
+                from_ts: Optional[pd.Timestamp] = None) -> pd.DataFrame:
+    """`r` is the flat rate used where `rates` (from rate_table) has no value yet.  `from_ts` (live runner): rows before it are dropped
+    once stale prints are carried, so the forward, IV and Greeks are solved only for the new buckets (each row reads only its own
+    bucket from here on, so the rows kept are the same as on the whole day)."""
     if opt is None or not len(opt):
         return pd.DataFrame()
     o = opt.copy()
@@ -234,6 +272,8 @@ def build_chain(opt: pd.DataFrame, contracts: pd.DataFrame, spot_m: pd.DataFrame
     ct = contracts[contracts["instrument_type"].isin(["CE", "PE"])][["symbol", "instrument_type", "strike", "expiry", "lot_size"]]
     minutes = spot_m[["ts"]] if len(spot_m) else o[["ts"]].drop_duplicates()
     g = _grid_fill(o, minutes, stale_max)
+    if from_ts is not None and len(g):
+        g = g[g["ts"] >= from_ts]
     g = g.merge(ct, on="symbol", how="inner")
     g["cp"] = np.where(g["instrument_type"] == "CE", "C", "P")
     g["lot"] = g["lot_size"]

@@ -72,31 +72,36 @@ def spot_vol_beta(ctx: Context, p: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@register(Spec(id="residual_iv", version=1, family="surface", grid="snap", inputs=("atm_snaps", "spot_vol_beta", "spot"), tickets=("SCRUM-148",),
-               doc="A7: at 12:00 and 15:15, the change in front ATM IV since 09:20 net of the previous session's spot-vol beta times the "
-                   "index return since 09:20."))
+@register(Spec(id="residual_iv", version=2, family="surface", grid="snap", inputs=("atm", "atm_snaps", "spot_vol_beta", "spot"),
+               params={"window_min": 5}, tickets=("SCRUM-148", "SCRUM-198"),
+               doc="A7: the change in front ATM IV over the last 5 minutes net of the previous session's spot-vol beta times the index "
+                   "return over the same 5 minutes (v1 measured from 09:20; the live lookback rule of 14 Nov 2026 keeps it to minutes).  "
+                   "Empty when the front expiry changed inside the window."))
 def residual_iv(ctx: Context, p: dict) -> pd.DataFrame:
     s = _snaps(ctx)
+    a = ctx.get("atm")
     b = ctx.signal("spot_vol_beta")
     sp = ctx.get("spot")
-    if not len(s) or not len(b):
+    if not len(s) or a is None or not len(a) or not len(b) or not len(sp):
         return pd.DataFrame()
-    px = sp.set_index("ts")["close"]
-    base = s[s["snap"] == "09:20"].set_index("date")
-    prev_beta = b.set_index("date")["beta"].shift(1)
-    rows = []
-    for _, r in s[s["snap"] != "09:20"].iterrows():
-        d = r["date"]
-        if d not in base.index or d not in prev_beta.index or np.isnan(prev_beta.get(d, np.nan)):
-            continue
-        p0, p1 = px.get(snap_utc(d, "09:20") - pd.Timedelta(minutes=1)), px.get(pd.Timestamp(r["known_at"]) - pd.Timedelta(minutes=1))
-        if p0 is None or p1 is None:
-            continue
-        ret = np.log(p1 / p0)
-        div = r["atm_iv"] - base.loc[d, "atm_iv"]
-        rows.append({"date": d, "snap": r["snap"], "known_at": r["known_at"], "d_iv": div, "ret": ret, "beta_prev": prev_beta[d],
-                     "residual": div - prev_beta[d] * ret})
-    return pd.DataFrame(rows)
+    w = pd.Timedelta(minutes=p["window_min"])
+    s = s.copy()
+    s["_t"] = pd.to_datetime(s["known_at"]) - pd.Timedelta(minutes=1)          # the bar the snapshot reads
+    s["_t0"] = s["_t"] - w
+    past = a[["ts", "expiry", "atm_iv"]].rename(columns={"ts": "_t0", "expiry": "_e0", "atm_iv": "iv0"})
+    s = s.merge(past, on="_t0", how="left")
+    px = sp[["ts", "close"]]
+    s = s.merge(px.rename(columns={"ts": "_t", "close": "p1"}), on="_t", how="left")
+    s = s.merge(px.rename(columns={"ts": "_t0", "close": "p0"}), on="_t0", how="left")
+    beta = b[["date", "beta"]].sort_values("date").copy()
+    beta["beta_prev"] = beta["beta"].shift(1)
+    s = s.merge(beta[["date", "beta_prev"]], on="date", how="left")
+    same = s["_e0"].astype(str) == s["expiry"].astype(str)
+    s["d_iv"] = np.where(same, s["atm_iv"] - s["iv0"], np.nan)
+    s["ret"] = np.log(s["p1"] / s["p0"])
+    s["residual"] = s["d_iv"] - s["beta_prev"] * s["ret"]
+    s = s.dropna(subset=["d_iv", "ret", "beta_prev"])
+    return s[["date", "snap", "known_at", "d_iv", "ret", "beta_prev", "residual"]].reset_index(drop=True)
 
 
 @register(Spec(id="term_slope", version=1, family="surface", grid="snap", inputs=("atm_snaps",), params={"min_front_days": 1}, tickets=("SCRUM-148",),
@@ -155,11 +160,11 @@ def vol_of_vol(ctx: Context, p: dict) -> pd.DataFrame:
     return out
 
 
-@register(Spec(id="skew", version=2, family="surface", grid="snap", inputs=("atm_snaps",), tickets=("SCRUM-148", "SCRUM-198"),
-               params={"halflife_min": 5},
+@register(Spec(id="skew", version=3, family="surface", grid="snap", inputs=("atm_snaps",), tickets=("SCRUM-148", "SCRUM-198"),
+               params={"halflife_min": 2, "window_min": 10},
                doc="A11: IV 2 % below the forward minus IV 2 % above (and at 1 %), front expiry, and the change since the previous session.  "
-                   "v2 adds skew1_s and skew2_s: an exponential average over the session (half-life 5 minutes, on event time, gaps carried) "
-                   "so one wing strike that was stale and prints again does not make the skew jump."))
+                   "skew1_s and skew2_s (every bar only): an exponential average with a 2-minute half-life over the last 10 minutes, so a wing "
+                   "strike whose last print was stale does not make the skew jump (v3: shorter memory, lookback rule of 14 Nov 2026)."))
 def skew(ctx: Context, p: dict) -> pd.DataFrame:
     s = _snaps(ctx)
     if not len(s):
@@ -171,13 +176,26 @@ def skew(ctx: Context, p: dict) -> pd.DataFrame:
     s["d_skew1"] = s.groupby("snap")["skew1"].diff()
     s["d_skew2"] = s.groupby("snap")["skew2"].diff()
     s = s.sort_values("known_at")
-    hl = pd.Timedelta(minutes=p["halflife_min"])
     for c in ("skew1", "skew2"):
         s[f"{c}_s"] = np.nan
-        if ctx.snaps != "all":                  # a per-bar average: not defined on three snapshots a day
-            continue
+    if ctx.snaps == "all":                      # a per-bar average: not defined on three snapshots a day
+        hl = p["halflife_min"] * 60.0
+        win = p["window_min"] * 60.0
         for _, g in s.groupby(["date", "expiry"], sort=False):
-            s.loc[g.index, f"{c}_s"] = g[c].ewm(halflife=hl, times=pd.to_datetime(g["known_at"]), ignore_na=True).mean().to_numpy()
+            t = (pd.to_datetime(g["known_at"]) - pd.Timestamp("1970-01-01")).dt.total_seconds().to_numpy()
+            for c in ("skew1", "skew2"):
+                x = g[c].to_numpy(dtype=float)
+                out = np.full(len(x), np.nan)
+                lo = 0
+                for i in range(len(x)):
+                    while t[i] - t[lo] >= win:                      # the last 10 minutes: (t - 10 min, t]
+                        lo += 1
+                    xs, ts = x[lo:i + 1], t[lo:i + 1]
+                    ok = ~np.isnan(xs)
+                    if ok.any():
+                        wts = 0.5 ** ((t[i] - ts[ok]) / hl)
+                        out[i] = float((wts * xs[ok]).sum() / wts.sum())
+                s.loc[g.index, f"{c}_s"] = out
     return s[["date", "snap", "known_at", "expiry", "skew1", "skew2", "d_skew1", "d_skew2", "skew1_s", "skew2_s"]].sort_values(["snap", "date"])
 
 

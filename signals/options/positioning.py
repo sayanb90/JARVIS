@@ -17,7 +17,7 @@ near-money measure; full-chain versions come from the live feed (signals.options
   basis_roll            B12  future against the index (annualised carry) at the close, and the next contract's share of futures OI
   option_volume         E1   option volume per 15-minute bucket and moneyness group against its 20-session average in the same bucket
   premium_turnover      E2   price x volume x lot per 15-minute bucket, calls and puts, and their ratio
-  volume_burst          E3   minutes where a short-dated out-of-the-money contract trades 5 times its trailing hourly pace
+  volume_burst          E3   minutes where a short-dated out-of-the-money contract trades 5 times the same slot of earlier sessions
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from analytics import black76
-from signals.framework import Context, Spec, register, trailing_pct
+from signals.framework import provider, Context, Spec, register, trailing_pct
 from signals.options.core import snap_utc, SNAP_TIMES_IST
 
 BUCKET = "15min"
@@ -293,22 +293,76 @@ def premium_turnover(ctx: Context, p: dict) -> pd.DataFrame:
     return g
 
 
-@register(Spec(id="volume_burst", version=1, family="positioning", grid="1m", inputs=("chain",),
-               params={"ratio": 5.0, "max_dte": 2, "min_k": 0.005, "min_volume": 100}, tickets=("SCRUM-148",),
-               doc="E3: minutes where a short-dated out-of-the-money contract's 5-minute volume is 5 times its trailing hourly pace."))
+@provider("volume_slot_daily")
+def volume_slot_daily(ctx: Context) -> pd.DataFrame:
+    """Per session, the mean 5-minute volume of one contract in each (call/put, days to expiry 0-2, moneyness band of 0.5 %, 5-minute
+    slot of the day), from option minutes, the contract table and the index (no IV needed, so the live runner builds it at the open
+    from earlier sessions).  Columns date, cp, dteb, band, slot, v5_mean."""
+    o, ct, sp = ctx.raw.get("opt_1m"), ctx.get("contract_table"), ctx.get("spot")
+    cols = ["date", "cp", "dteb", "band", "slot", "v5_mean"]
+    if o is None or not len(o) or not len(sp):
+        return pd.DataFrame(columns=cols)
+    o = o[["ts", "symbol", "volume"]].merge(ct[ct["instrument_type"].isin(["CE", "PE"])][["symbol", "instrument_type", "strike", "expiry"]],
+                                            on="symbol", how="inner")
+    o["ts"] = pd.to_datetime(o["ts"])
+    o = o.merge(sp[["ts", "close"]], on="ts", how="inner")
+    o["date"] = o["ts"].dt.date
+    o["dteb"] = (pd.to_datetime(o["expiry"]) - pd.to_datetime(o["date"])).dt.days
+    o = o[(o["dteb"] >= 0) & (o["dteb"] <= 2)]
+    o["cp"] = np.where(o["instrument_type"] == "CE", "C", "P")
+    k = np.log(o["strike"] / o["close"]).where((o["strike"] > 0) & (o["close"] > 0))
+    o = o[np.isfinite(k)]
+    o["band"] = np.round(k[np.isfinite(k)] / 0.005).astype(int)
+    o["slot"] = o["ts"].dt.floor("5min") - o["ts"].dt.normalize()
+    per = o.groupby(["date", "symbol", "cp", "dteb", "band", "slot"], as_index=False)["volume"].sum()
+    return per.groupby(["date", "cp", "dteb", "band", "slot"], as_index=False)["volume"].mean().rename(columns={"volume": "v5_mean"})
+
+
+@register(Spec(id="volume_burst", version=2, family="positioning", grid="1m", inputs=("chain", "volume_slot_daily"),
+               params={"ratio": 5.0, "max_dte": 2, "min_k": 0.005, "min_volume": 100, "sessions": 20}, tickets=("SCRUM-148", "SCRUM-198"),
+               doc="E3: minutes where a short-dated out-of-the-money contract's volume over the last 5 minutes is 5 times what contracts "
+                   "like it (call or put, days to expiry, moneyness band of 0.5 %) traded in the same 5-minute slot over the previous 20 "
+                   "sessions.  v2: the baseline is earlier sessions at the same time of day, not the contract's own last hour (lookback rule "
+                   "of 14 Nov 2026; it also removes the time-of-day pattern in volume)."))
 def volume_burst(ctx: Context, p: dict) -> pd.DataFrame:
     ch = ctx.get("chain")
-    if ch is None or not len(ch):
+    base = ctx.get("volume_slot_daily")
+    if ch is None or not len(ch) or base is None or not len(base):
         return pd.DataFrame()
     c = ch.sort_values("ts").copy()
     c["date"] = c["ts"].dt.date
-    key = ["date", "expiry", "strike", "cp"]
-    c["v5"] = c.groupby(key)["volume"].transform(lambda s: s.rolling(5, min_periods=1).sum())
-    c["pace"] = c.groupby(key)["volume"].transform(lambda s: s.shift(5).rolling(60, min_periods=20).mean() * 5)
+    c["dteb"] = (pd.to_datetime(c["expiry"]) - pd.to_datetime(c["date"])).dt.days
     otm = ((c["cp"] == "C") & (c["k"] > p["min_k"])) | ((c["cp"] == "P") & (c["k"] < -p["min_k"]))
-    dte = (pd.to_datetime(c["expiry"]) - pd.to_datetime(c["date"])).dt.days
-    hit = otm & (dte <= p["max_dte"]) & (c["v5"] >= p["min_volume"]) & (c["v5"] >= p["ratio"] * c["pace"])
+    c = c[otm & (c["dteb"] >= 0) & (c["dteb"] <= p["max_dte"])]
+    if c.empty:
+        return pd.DataFrame()
+    key = ["date", "expiry", "strike", "cp"]
+    c = c.reset_index(drop=True)
+    c["_id"] = c.groupby(key, sort=False).ngroup()
+    c["v5"] = np.nan
+    for _, g in c.groupby("date", sort=False):                # the last 5 minutes: one wide table (minutes x contracts) per session
+        wide = g.pivot_table(index="ts", columns="_id", values="volume", aggfunc="sum")
+        wide = wide.reindex(pd.date_range(wide.index.min(), wide.index.max(), freq="1min")).fillna(0.0)
+        v5 = wide.rolling(5, min_periods=1).sum().stack(future_stack=True).rename("v5").reset_index()
+        v5.columns = ["ts", "_id", "v5"]
+        c.loc[g.index, "v5"] = g[["ts", "_id"]].merge(v5, on=["ts", "_id"], how="left")["v5"].to_numpy()
+    c = c.drop(columns=["_id"])
+    c = c[np.isfinite(c["k"])]
+    c["band"] = np.round(c["k"] / 0.005).astype(int)        # log(strike / forward), as the baseline's log(strike / index)
+    c["slot"] = (c["ts"] - pd.Timedelta(minutes=4)).dt.floor("5min") - c["ts"].dt.normalize()   # the slot the 5 minutes mostly fall in
+    rows = []
+    for d, g in c.groupby("date"):
+        prev = base[base["date"] < d]
+        days = sorted(prev["date"].unique())[-p["sessions"]:]
+        if len(days) < 5:
+            continue
+        b = prev[prev["date"].isin(days)].groupby(["cp", "dteb", "band", "slot"], as_index=False)["v5_mean"].mean().rename(columns={"v5_mean": "pace"})
+        rows.append(g.merge(b, on=["cp", "dteb", "band", "slot"], how="left"))
+    if not rows:
+        return pd.DataFrame()
+    c = pd.concat(rows, ignore_index=True)
+    hit = (c["v5"] >= p["min_volume"]) & (c["v5"] >= p["ratio"] * c["pace"])
     out = c[hit][["ts", "expiry", "strike", "cp", "k", "v5", "pace", "oi"]].copy()
     out["ratio"] = out["v5"] / out["pace"]
     out["known_at"] = out["ts"] + pd.Timedelta(minutes=1)
-    return out
+    return out.reset_index(drop=True)

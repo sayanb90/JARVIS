@@ -71,7 +71,8 @@ def replayed(day):
 def batch(day):
     """The batch for the day: every live signal, all the day's ticks at once."""
     hist, ticks, _ = day
-    r = LiveRunner("NIFTY", hist, tick_window=pd.Timedelta(days=1), option_sessions=100, index_sessions=1000)   # nothing trimmed
+    r = LiveRunner("NIFTY", hist, tick_window=pd.Timedelta(days=1), option_sessions=100, index_sessions=1000,
+                   windowed=False)   # nothing trimmed
     r.ingest(ticks)
     r.watermark = r.watermark.floor("1min") + pd.Timedelta("1min")
     return r.cycle()
@@ -142,3 +143,14 @@ def test_cadence_setting():
     assert cadence({}) == "1min" and cadence({"JARVIS_SIGNAL_CADENCE": "10s"}) == "10s"
     with pytest.raises(ValueError):
         cadence({"JARVIS_SIGNAL_CADENCE": "5s"})
+
+
+def test_every_live_signal_declares_a_short_lookback():
+    """Owner rule of 14 Nov 2026: a few minutes of today's options data at most; anything over 5 minutes carries a written reason."""
+    from signals.lookbacks import LONGER_THAN, LOOKBACK, lookback
+    assert set(live_signal_ids()) <= set(LOOKBACK), set(live_signal_ids()) - set(LOOKBACK)
+    for sid in live_signal_ids():
+        lb, why = LOOKBACK[sid]
+        assert lookback(sid) <= pd.Timedelta(minutes=10), sid
+        if lookback(sid) > LONGER_THAN:
+            assert len(why) > 120, f"{sid}: a lookback over 5 minutes needs its reason written out"

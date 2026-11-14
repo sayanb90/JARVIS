@@ -35,7 +35,7 @@ from signals import catalogue
 from signals.framework import REGISTRY, Context, log_trial, read_output, specs, write_output
 
 PASS1_INPUTS = {"chain", "ticks_fo", "fills"}
-CHAIN_WARMUP = {"option_volume": 35, "spread_gate": 35, "oi_quadrant": 5, "day_night_returns": 5, "pin_test": 1, "volume_burst": 1}
+CHAIN_WARMUP = {"option_volume": 35, "spread_gate": 35, "oi_quadrant": 5, "day_night_returns": 5, "pin_test": 1, "volume_burst": 30}
 DEFAULT_WARMUP = 3
 INDEX_HISTORY_FROM = date(2022, 1, 3)
 PASS2_LOOKBACK_DAYS = 400       # ATM history read back for pass 2, so trailing windows (z-scores, vol-of-vol) are full on a one-day run

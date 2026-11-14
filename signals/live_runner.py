@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 
 from signals import catalogue  # noqa: F401  (registers every signal)
-from signals import normalise
+from signals import lookbacks, normalise
 from signals.framework import REGISTRY, Context, specs
 from signals.options.core import INDEX_SYMBOL, STALE_MAX, VIX_SYMBOL, build_chain, rate_table
 
@@ -155,6 +155,10 @@ class LiveRunner:
     bars: pd.DataFrame = field(default_factory=pd.DataFrame)     # every bucket of today, every symbol (options, futures, index, VIX)
     chain: pd.DataFrame = field(default_factory=pd.DataFrame)    # today's chain, closed buckets only
     hist_chain: Optional[pd.DataFrame] = None
+    hist_atm: pd.DataFrame = field(default_factory=pd.DataFrame)
+    smile: pd.DataFrame = field(default_factory=pd.DataFrame)
+    chain_live: pd.DataFrame = field(default_factory=pd.DataFrame)  # today's chain from the ticks at the runner's bucket, closed buckets
+    atm: pd.DataFrame = field(default_factory=pd.DataFrame)
     watermark: Optional[pd.Timestamp] = None         # newest event time seen
     emitted_to: Optional[pd.Timestamp] = None        # rows with known_at up to here have been written
     overruns: int = 0
@@ -164,6 +168,9 @@ class LiveRunner:
     daily_signals: Optional[dict] = None             # daily signals the live ones read (e.g. spot_vol_beta), from the nightly store
     index_sessions: int = 30                         # index and VIX history per cycle (noise_band looks back 14 sessions)
     option_sessions: int = 1                         # option and future history per cycle (day-over-day changes)
+    windowed: bool = True                            # False: every signal reads the whole day (the test's batch reference)
+    _hist_trim: Optional[dict] = None
+    _shared: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.ids = self.ids or live_signal_ids()
@@ -231,11 +238,13 @@ class LiveRunner:
             out["ts"] = pd.to_datetime(out["ts"])
             return out
 
-        raw = dict(h)
-        for name, keep in (("index_1m", self.index_sessions), ("vix_1m", self.index_sessions), ("opt_1m", self.option_sessions),
-                           ("fut_1m", self.index_sessions)):                 # futures: noise_band and the lead-lag look back 14 sessions
-            raw[name] = _last_sessions(h.get(name), keep)
-        h = raw
+        if self._hist_trim is None:                  # trimmed once: the history does not change during the session
+            raw = dict(h)
+            for name, keep in (("index_1m", self.index_sessions), ("vix_1m", self.index_sessions), ("opt_1m", self.option_sessions),
+                               ("fut_1m", self.index_sessions)):             # futures: noise_band and the lead-lag look back 14 sessions
+                raw[name] = _last_sessions(h.get(name), keep)
+            self._hist_trim = raw
+        h = self._hist_trim
         raw = dict(h)
         raw["index_1m"] = cat("index_1m", b[sym == self.index_symbol])
         raw["vix_1m"] = cat("vix_1m", b[sym == VIX_SYMBOL])
@@ -255,13 +264,14 @@ class LiveRunner:
             return self.chain
         lo = start - pd.Timedelta(minutes=STALE_MAX) - self.td
         o = opt_today[(opt_today["ts"] >= lo) & (opt_today["ts"] < upto)]
-        new = build_chain(o, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rate_table(ctx.raw.get("rates")))
+        new = build_chain(o, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rate_table(ctx.raw.get("rates")),
+                          from_ts=start)
         if len(new):
             new = new[(new["ts"] >= start) & (new["ts"] < upto)]
             self.chain = pd.concat([self.chain, new], ignore_index=True) if len(self.chain) else new.reset_index(drop=True)
         return self.chain
 
-    def _fixed_providers(self, day: pd.Timestamp) -> dict:
+    def _fixed_providers(self, day: pd.Timestamp, volume_slot_daily: Optional[pd.DataFrame] = None) -> dict:
         """The daily realised measures with the HAR forecast, and the time-of-day variance profile, depend only on sessions before
         today (every row a signal reads from them was known at the last close), so they are computed once at the start instead of
         every cycle.  Today's profile row is built from earlier sessions; a two-minute placeholder makes today a session to profile."""
@@ -274,10 +284,51 @@ class LiveRunner:
         daily = c.get("daily")
         daily = daily[pd.to_datetime(daily["known_at"]) < day] if daily is not None and len(daily) else daily
         tod = c.get("tod")
-        return {"daily": daily, "tod": tod}
+        vsd = volume_slot_daily if volume_slot_daily is not None else Context(self.underlying, dict(self.history)).get("volume_slot_daily")
+        return {"daily": daily, "tod": tod, "volume_slot_daily": vsd}
+
+    def _extend_surface(self, raw: dict, new_chain: pd.DataFrame) -> None:
+        """Smile and ATM rows of the buckets just added to the chain (each bucket's smile reads only that bucket's chain rows)."""
+        if new_chain is None or not len(new_chain):
+            return
+        c = Context(self.underlying, raw, cache=dict(self.fixed, chain=new_chain))
+        sm, at = c.get("smile"), c.get("atm")
+        self.smile = pd.concat([self.smile, sm], ignore_index=True) if len(self.smile) else sm
+        self.atm = pd.concat([self.atm, at], ignore_index=True) if len(self.atm) else at
+
+    def _extend_chain_live(self, raw: dict, upto: pd.Timestamp) -> pd.DataFrame:
+        """Append the tick chain (quotes, vendor IV and Greeks, our IV) of the buckets closed since the last cycle.  A bucket reads its
+        own ticks and the STALE_MAX minutes before it, so building it on that slice gives the whole-day rows."""
+        done = self.chain_live["ts"].max() + self.td if len(self.chain_live) else None
+        t = self.ticks
+        if not len(t):
+            return self.chain_live
+        start = done if done is not None else t["fts"].min().floor(self.bucket)
+        if start >= upto:
+            return self.chain_live
+        lo = start - pd.Timedelta(minutes=STALE_MAX) - self.td
+        keep = (t["fts"] >= lo) & (t["fts"] < upto)
+        anchors = t[t["fts"] < lo].sort_values("fts", kind="stable").groupby("symbol").tail(1)
+        w = dict(raw, ticks_fo=pd.concat([anchors, t[keep]], ignore_index=True))
+        new = Context(self.underlying, w, bucket=self.bucket, since=start, cache=dict(self.fixed, **self._shared)).get("chain_live")
+        if new is not None and len(new):
+            new = new[(new["ts"] >= start) & (new["ts"] < upto)]
+            self.chain_live = pd.concat([self.chain_live, new], ignore_index=True) if len(self.chain_live) else new.reset_index(drop=True)
+        return self.chain_live
+
+    def _windows(self) -> dict:
+        """Signals grouped by (bucket width of their context, lookback into today's options data)."""
+        groups: dict = {}
+        for sid in self.ids:
+            tick = REGISTRY[sid][0].family == "live" and self.bucket != "1min"
+            td = self.td if tick else pd.Timedelta("1min")
+            groups.setdefault((tick, lookbacks.lookback(sid, td)), []).append(sid)
+        return groups
 
     def cycle(self, now: Optional[datetime] = None) -> pd.DataFrame:
-        """Compute every live signal for the buckets closed since the last cycle.  Returns the new rows (signal, ts, known_at, ...)."""
+        """Compute every live signal for the buckets closed since the last cycle.  Each signal sees today's option chain and option
+        ticks only as far back as its declared lookback (signals/lookbacks.py) before the first new bucket; the chain, smile and ATM
+        rows are built once per bucket and kept.  Returns the new rows (signal, ts, known_at, ...)."""
         t0 = _time.perf_counter()
         upto = self.closed_until()
         if upto is None or (self.emitted_to is not None and upto <= self.emitted_to):
@@ -285,34 +336,52 @@ class LiveRunner:
         raw, opt_today = self._today_raw(upto)
         if self.fixed is None:
             self.fixed = self._fixed_providers(upto.normalize())
-        ctx = Context(self.underlying, raw, bucket="1min", snaps="all", cache=dict(self.fixed))
         if self.hist_chain is None:
             hist_opt = _last_sessions(self.history.get("opt_1m"), self.option_sessions)
-            self.hist_chain = (Context(self.underlying, dict(self.history, opt_1m=hist_opt)).get("chain")
-                               if hist_opt is not None and len(hist_opt) else pd.DataFrame())
+            hc = Context(self.underlying, dict(self.history, opt_1m=hist_opt), cache=dict(self.fixed))
+            self.hist_chain = hc.get("chain") if hist_opt is not None and len(hist_opt) else pd.DataFrame()
+            self.hist_atm = hc.get("atm") if len(self.hist_chain) else pd.DataFrame()      # the previous session, for day-over-day changes
             if self.daily_signals is None:
                 self.daily_signals = daily_inputs(self.underlying, self.history, self.ids)
+            self.smile, self.atm = pd.DataFrame(), pd.DataFrame()
+        ctx = Context(self.underlying, raw, bucket="1min", snaps="all", cache=dict(self.fixed))
+        # inputs that read only index, VIX and futures minutes and the contract table: built once per cycle, shared by every window
+        self._shared = {k: ctx.get(k) for k in ("contract_table", "spot", "vix", "futures", "fut_front", "expiries", "eras")}
+        before = len(self.chain)
         chain = self._extend_chain(ctx, opt_today, upto)
+        self._extend_surface(raw, chain.iloc[before:] if len(chain) else chain)
+        atm_all = pd.concat([self.hist_atm, self.atm], ignore_index=True) if len(self.hist_atm) else self.atm
+        chain_live = self._extend_chain_live(raw, upto)
+        first_new = self.emitted_to if self.emitted_to is not None else upto.normalize()
         since = self.emitted_to
-        ctx = Context(self.underlying, raw, bucket="1min", snaps="all", since=since, signals=dict(self.daily_signals),
-                      cache=dict(self.fixed, chain=pd.concat([self.hist_chain, chain], ignore_index=True) if len(self.hist_chain) else chain))
-        tick_ctx = (Context(self.underlying, raw, bucket=self.bucket, snaps="all", since=since, cache=dict(self.fixed),
-                            signals=dict(self.daily_signals)) if self.bucket != "1min" else ctx)
         out = []
-        lo = self.emitted_to
-        for sid in self.ids:
-            spec = REGISTRY[sid][0]
-            c = tick_ctx if (spec.family == "live" and self.bucket != "1min") else ctx
-            try:
-                df = c.compute(sid)
-            except Exception:                                          # noqa: BLE001 -- one signal must not stop the others
-                log.exception("live %s %s failed", self.underlying, sid)
-                continue
-            if df is None or not len(df) or "known_at" not in df.columns:
-                continue
-            ka = pd.to_datetime(df["known_at"])
-            sel = (ka <= upto) & ((ka > lo) if lo is not None else (ka >= upto.normalize()))
-            if sel.any():
+        for (tick, lb), sids in self._windows().items():
+            td = self.td if tick else pd.Timedelta("1min")
+            lo = first_new - lb - td if self.windowed else pd.Timestamp.min       # the declared lookback before the first new bucket
+            t = self.ticks
+            keep = (t["fts"] >= lo) & (t["fts"] < upto)
+            anchors = t[t["fts"] < lo].sort_values("fts", kind="stable").groupby("symbol").tail(1)   # each contract's last earlier update
+            w = dict(raw)
+            w["ticks_fo"] = pd.concat([anchors, t[keep]], ignore_index=True)
+            w["opt_1m"] = raw["opt_1m"][pd.to_datetime(raw["opt_1m"]["ts"]) >= lo] if len(raw["opt_1m"]) else raw["opt_1m"]
+            cw = chain[chain["ts"] >= lo] if len(chain) else chain
+            cache = dict(self.fixed, **self._shared, chain=cw, atm=atm_all)
+            if tick or self.bucket == "1min":                          # the tick chain is kept at the runner's bucket
+                cache["chain_live"] = chain_live[chain_live["ts"] >= lo] if len(chain_live) else chain_live
+            c = Context(self.underlying, w, bucket=self.bucket if tick else "1min", snaps="all", since=since, signals=dict(self.daily_signals),
+                        cache=cache)
+            for sid in sids:
+                try:
+                    df = c.compute(sid)
+                except Exception:                                      # noqa: BLE001 -- one signal must not stop the others
+                    log.exception("live %s %s failed", self.underlying, sid)
+                    continue
+                if df is None or not len(df) or "known_at" not in df.columns:
+                    continue
+                ka = pd.to_datetime(df["known_at"])
+                sel = (ka <= upto) & ((ka > since) if since is not None else (ka >= upto.normalize()))
+                if not sel.any():
+                    continue
                 part = df[sel].copy()
                 if "signal" in part.columns:                       # a signal's own column of that name (noise_band) keeps its value
                     part = part.rename(columns={"signal": "signal_value"})
@@ -337,11 +406,14 @@ class LiveRunner:
 
 
 def replay(underlying: str, history: dict, ticks: pd.DataFrame, bucket: str = "1min", step: Optional[str] = None,
-           ids: Optional[list[str]] = None, baselines: Optional[dict] = None) -> pd.DataFrame:
+           ids: Optional[list[str]] = None, baselines: Optional[dict] = None, volume_slot_daily: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """Run the live runner over a day's recorded ticks, `step` at a time (default: one bucket), and return every row it would have
     written.  The after-close job uses this for the live era; the tests compare it with the batch."""
     r = LiveRunner(underlying, history, bucket=bucket, ids=ids, baselines=baselines or {})
     t = ticks.copy()
+    if volume_slot_daily is not None:
+        day = pd.to_datetime(t["fts"] if "fts" in t.columns else t["ts"]).min().normalize()
+        r.fixed = r._fixed_providers(day, volume_slot_daily=volume_slot_daily)
     t["fts"] = pd.to_datetime(t["fts"] if "fts" in t.columns else t["ts"])
     t = t.sort_values("fts", kind="stable")
     stp = pd.Timedelta(step or bucket)
@@ -408,8 +480,26 @@ def history_for(lake: Path, underlying: str, day: date) -> dict:
     """Everything before `day` the live signals look back at: index and VIX minutes for 400 days (realised-vol forecast, VIX regime),
     the last 5 sessions of option and future minutes (day-over-day changes), contracts, participant file, events, rates."""
     from signals.lakeio import load_raw
-    raw = load_raw(lake, underlying, day - timedelta(days=400), day - timedelta(days=1), option_from=day - timedelta(days=40), ticks=False)
+    raw = load_raw(lake, underlying, day - timedelta(days=400), day - timedelta(days=1), option_from=day - timedelta(days=7), ticks=False)
     return raw
+
+
+def slot_volume_history(lake: Path, underlying: str, day: date, sessions: int = 20) -> pd.DataFrame:
+    """volume_slot_daily for the `sessions` sessions before `day`, one session at a time, keeping only the aggregate (a session of
+    option minutes is about 750,000 rows; twenty of them at once would not fit next to the collectors)."""
+    from signals.lakeio import load_raw
+    out, d, tried = [], day - timedelta(days=1), 0
+    while len(out) < sessions and tried < sessions * 2:
+        tried += 1
+        if d.weekday() < 5:
+            raw = load_raw(lake, underlying, d, d, option_from=d, ticks=False)
+            if raw["opt_1m"] is not None and len(raw["opt_1m"]):
+                v = Context(underlying, raw).get("volume_slot_daily")
+                if len(v):
+                    out.append(v)
+            del raw
+        d -= timedelta(days=1)
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame(columns=["date", "cp", "dteb", "band", "slot", "v5_mean"])
 
 
 MAX_MB_DEFAULT = 2048
@@ -431,6 +521,7 @@ def run_session(lake: Path, store: Path, underlyings: Iterable[str], bucket: str
     runners = {}
     for u in underlyings:
         r = LiveRunner(u, history_for(lake, u, day), bucket=bucket)
+        r.fixed = r._fixed_providers(pd.Timestamp(day), volume_slot_daily=slot_volume_history(lake, u, day))
         r.baselines = load_baselines(store, u, day, r.ids, bucket)
         r.daily_signals = daily_inputs(u, r.history, r.ids, store)
         runners[u] = r
@@ -482,7 +573,8 @@ def replay_day(lake: Path, store: Path, underlying: str, day: date, bucket: str 
     ticks = pd.concat(parts, ignore_index=True)
     ids = live_signal_ids()
     rows = replay(underlying, history_for(lake, underlying, day), ticks, bucket=bucket, step="5min", ids=ids,
-                  baselines=load_baselines(store, underlying, day, ids, bucket))
+                  baselines=load_baselines(store, underlying, day, ids, bucket),
+                  volume_slot_daily=slot_volume_history(lake, underlying, day))
     if rows.empty:
         return 0
     n = 0

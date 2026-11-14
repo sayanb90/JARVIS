@@ -33,7 +33,7 @@ from typing import Any, Iterable, Optional
 import pandas as pd
 
 LEVELS = 5
-WITHDRAW_MINUTES = 15
+WITHDRAW_MINUTES = 5                 # the depth baseline: the previous 5 minutes (depth_features v2)
 WITHDRAW_NS = WITHDRAW_MINUTES * 60 * 10**9
 DAY_NS = 86_400 * 10**9
 NAN = float("nan")
