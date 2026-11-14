@@ -81,7 +81,7 @@ def pcr_table(ch: pd.DataFrame, max_k: float, snaps: str = "fixed", bucket: pd.T
 @register(Spec(id="pcr_near", version=1, family="positioning", grid="snap", inputs=("chain",), params={"max_k": 0.03}, tickets=("SCRUM-148",),
                doc="B2: put/call OI and volume ratios within 3 % of the forward, front expiry (near-money only)."))
 def pcr_near(ctx: Context, p: dict) -> pd.DataFrame:
-    return pcr_table(ctx.get("chain"), p["max_k"], ctx.snaps)
+    return pcr_table(ctx.get("chain"), p["max_k"], ctx.snaps, ctx.bucket_td)
 
 
 def _close_rows(ch: pd.DataFrame) -> pd.DataFrame:
@@ -205,7 +205,7 @@ def gex(ctx: Context, p: dict) -> pd.DataFrame:
     ch = ctx.get("chain")
     if ch is None or not len(ch):
         return pd.DataFrame()
-    return gex_table(ch, ctx.raw.get("participant"), p["max_k"], ctx.r, snaps=ctx.snaps, since=ctx.since)
+    return gex_table(ch, ctx.raw.get("participant"), p["max_k"], ctx.r, snaps=ctx.snaps, bucket=ctx.bucket_td, since=ctx.since)
 
 
 @register(Spec(id="participant_positioning", version=1, family="positioning", grid="daily", inputs=("participant",), params={"window": 250},

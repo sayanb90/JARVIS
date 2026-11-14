@@ -45,17 +45,10 @@ log = logging.getLogger("signals.live")
 
 TICK_WINDOW = pd.Timedelta(minutes=30)
 OVERRUNS_BEFORE_FALLBACK = 3
-CADENCES = {"1m": "1min", "1min": "1min", "10s": "10s"}
+CADENCES = {"1m": "1min", "1min": "1min", "10s": "10s", "1s": "1s"}
 # Inputs the runner cannot provide during the session (published after the close, or needing the constituents' feed).
 NOT_LIVE = {"basket_fair_value", "constituent_flow", "option_positioning_hourly", "implied_corr_proxy", "expiry_inverted_v",
             "manipulation_flag", "cost_log"}
-
-
-def cadence(env=None) -> str:
-    v = (os.environ if env is None else env).get("JARVIS_SIGNAL_CADENCE", "1m").strip().lower()
-    if v not in CADENCES:
-        raise ValueError(f"JARVIS_SIGNAL_CADENCE must be 1m or 10s, not {v!r}")
-    return CADENCES[v]
 
 
 def live_signal_ids() -> list[str]:
@@ -170,6 +163,8 @@ class LiveRunner:
     option_sessions: int = 1                         # option and future history per cycle (day-over-day changes)
     windowed: bool = True                            # False: every signal reads the whole day (the test's batch reference)
     _hist_trim: Optional[dict] = None
+    timings: dict = field(default_factory=dict)      # seconds spent per signal and per shared build, summed over cycles
+    cycles_run: int = 0
     _shared: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -212,6 +207,11 @@ class LiveRunner:
             self.ticks = pd.concat([anchors, self.ticks[self.ticks["fts"] >= cutoff]], ignore_index=True)
 
     # ----------------------------------------------------------------------------------------- compute
+    def advance(self, t: pd.Timestamp) -> None:
+        """Move the event-time watermark forward to `t` (the engine's clock minus a grace), so a quiet market still closes buckets."""
+        if self.watermark is None or t > self.watermark:
+            self.watermark = t
+
     def closed_until(self) -> Optional[pd.Timestamp]:
         """Start of the first bucket that is not closed yet: buckets ending at or before the newest event time are closed."""
         if self.watermark is None:
@@ -267,7 +267,7 @@ class LiveRunner:
         lo = start - pd.Timedelta(minutes=STALE_MAX) - self.td
         o = opt_today[(opt_today["ts"] >= lo) & (opt_today["ts"] < upto)]
         new = build_chain(o, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rate_table(ctx.raw.get("rates")),
-                          from_ts=start)
+                          from_ts=start, stale_max=max(1, int(pd.Timedelta(minutes=STALE_MAX) / self.td)), bucket=self.td, grid_to=upto)
         if len(new):
             new = new[(new["ts"] >= start) & (new["ts"] < upto)]
             self.chain = pd.concat([self.chain, new], ignore_index=True) if len(self.chain) else new.reset_index(drop=True)
@@ -319,12 +319,10 @@ class LiveRunner:
         return self.chain_live
 
     def _windows(self) -> dict:
-        """Signals grouped by (bucket width of their context, lookback into today's options data)."""
+        """Signals grouped by their lookback into today's options data (every context runs at the runner's bucket)."""
         groups: dict = {}
         for sid in self.ids:
-            tick = REGISTRY[sid][0].family == "live" and self.bucket != "1min"
-            td = self.td if tick else pd.Timedelta("1min")
-            groups.setdefault((tick, lookbacks.lookback(sid, td)), []).append(sid)
+            groups.setdefault(lookbacks.lookback(sid, self.td), []).append(sid)
         return groups
 
     def cycle(self, now: Optional[datetime] = None) -> pd.DataFrame:
@@ -346,19 +344,21 @@ class LiveRunner:
             if self.daily_signals is None:
                 self.daily_signals = daily_inputs(self.underlying, self.history, self.ids)
             self.smile, self.atm = pd.DataFrame(), pd.DataFrame()
-        ctx = Context(self.underlying, raw, bucket="1min", snaps="all", cache=dict(self.fixed))
+        ctx = Context(self.underlying, raw, bucket=self.bucket, snaps="all", cache=dict(self.fixed))
         # inputs that read only index, VIX and futures minutes and the contract table: built once per cycle, shared by every window
         self._shared = {k: ctx.get(k) for k in ("contract_table", "spot", "vix", "futures", "fut_front", "expiries", "eras")}
         before = len(self.chain)
+        tb = _time.perf_counter()
         chain = self._extend_chain(ctx, opt_today, upto)
         self._extend_surface(raw, chain.iloc[before:] if len(chain) else chain)
         atm_all = pd.concat([self.hist_atm, self.atm], ignore_index=True) if len(self.hist_atm) else self.atm
         chain_live = self._extend_chain_live(raw, upto)
+        self._time("_shared: chain, smile, tick chain", _time.perf_counter() - tb)
         first_new = self.emitted_to if self.emitted_to is not None else upto.normalize()
         since = self.emitted_to
         out = []
-        for (tick, lb), sids in self._windows().items():
-            td = self.td if tick else pd.Timedelta("1min")
+        for lb, sids in self._windows().items():
+            td = self.td
             lo = first_new - lb - td if self.windowed else pd.Timestamp.min       # the declared lookback before the first new bucket
             t = self.ticks
             keep = (t["fts"] >= lo) & (t["fts"] < upto)
@@ -368,13 +368,13 @@ class LiveRunner:
             w["opt_1m"] = raw["opt_1m"][pd.to_datetime(raw["opt_1m"]["ts"]) >= lo] if len(raw["opt_1m"]) else raw["opt_1m"]
             cw = chain[chain["ts"] >= lo] if len(chain) else chain
             cache = dict(self.fixed, **self._shared, chain=cw, atm=atm_all)
-            if tick or self.bucket == "1min":                          # the tick chain is kept at the runner's bucket
-                cache["chain_live"] = chain_live[chain_live["ts"] >= lo] if len(chain_live) else chain_live
-            c = Context(self.underlying, w, bucket=self.bucket if tick else "1min", snaps="all", since=since, signals=dict(self.daily_signals),
-                        cache=cache)
+            cache["chain_live"] = chain_live[chain_live["ts"] >= lo] if len(chain_live) else chain_live
+            c = Context(self.underlying, w, bucket=self.bucket, snaps="all", since=since, signals=dict(self.daily_signals), cache=cache)
             for sid in sids:
+                ts0 = _time.perf_counter()
                 try:
                     df = c.compute(sid)
+                    self._time(sid, _time.perf_counter() - ts0)
                 except Exception:                                      # noqa: BLE001 -- one signal must not stop the others
                     log.exception("live %s %s failed", self.underlying, sid)
                     continue
@@ -395,10 +395,14 @@ class LiveRunner:
                 part["underlying"] = self.underlying
                 out.append(part)
         self.emitted_to = upto
+        self.cycles_run += 1
         rows = pd.concat(out, ignore_index=True) if out else pd.DataFrame()
         secs = _time.perf_counter() - t0
         self.stats.append(CycleStats(datetime.utcnow(), secs, 1, len(rows), resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024))
         return rows
+
+    def _time(self, key: str, secs: float) -> None:
+        self.timings[key] = self.timings.get(key, 0.0) + secs
 
     # ----------------------------------------------------------------------------------------- guardrail
     def check_budget(self, seconds: float, cadence_s: float) -> bool:
@@ -465,7 +469,7 @@ def load_baselines(store: Path, underlying: str, day: date, ids: Iterable[str], 
                    window: int = normalise.WINDOW) -> dict:
     """Time-of-day baselines per signal from the per-bucket history in the store (the last `window` sessions before `day`)."""
     out = {}
-    layer = f"intraday/bucket={'10s' if bucket == '10s' else '1m'}"
+    layer = f"intraday/bucket={ {'1s': '1s', '10s': '10s'}.get(bucket, '1m') }"
     for sid in ids:
         spec = REGISTRY[sid][0]
         base = Path(store) / "signals" / sid / f"v{spec.version}" / layer / f"underlying={underlying}"
@@ -514,53 +518,7 @@ def cap_memory(env=None) -> int:
     return mb
 
 
-def run_session(lake: Path, store: Path, underlyings: Iterable[str], bucket: str, until_utc: str = "10:02", clock=datetime.utcnow,
-                sleep=_time.sleep, files=None) -> dict:
-    """The session loop: every `bucket` read new tick files, compute the closed buckets, append rows to <store>/live/date=D/.  Falls back
-    from 10 s to 1 m after OVERRUNS_BEFORE_FALLBACK slow cycles in a row.  Returns a summary."""
-    from signals.options.stream import write_rows
-    day = clock().date()
-    runners = {}
-    for u in underlyings:
-        r = LiveRunner(u, history_for(lake, u, day), bucket=bucket)
-        r.fixed = r._fixed_providers(pd.Timestamp(day), volume_slot_daily=slot_volume_history(lake, u, day))
-        r.baselines = load_baselines(store, u, day, r.ids, bucket)
-        r.daily_signals = daily_inputs(u, r.history, r.ids, store)
-        runners[u] = r
-    files = files or TickFiles(lake, day)
-    stop = datetime.combine(day, datetime.strptime(until_utc, "%H:%M").time())
-    cad = pd.Timedelta(bucket).total_seconds()
-    summary = {"cycles": 0, "rows": 0, "fallback": None, "max_cycle_s": 0.0}
-    while clock() < stop:
-        t0 = _time.perf_counter()
-        new = files.new()
-        for u, r in runners.items():
-            try:
-                r.ingest(new)
-                rows = r.cycle()
-            except MemoryError:
-                log.error("%s: cycle hit the memory cap and was skipped", u)
-                summary["memory_errors"] = summary.get("memory_errors", 0) + 1
-                continue
-            if len(rows):
-                summary["rows"] += write_rows(rows.to_dict("records"), store, prefix=f"chain-{u}")
-        secs = _time.perf_counter() - t0
-        summary["cycles"] += 1
-        summary["max_cycle_s"] = max(summary["max_cycle_s"], secs)
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-        log.info("cycle %.2fs bucket=%s ticks_new=%d rows_total=%d peak_rss=%.0fMB", secs, bucket, len(new), summary["rows"], rss)
-        if bucket != "1min" and any(r.check_budget(secs, cad) for r in runners.values()):
-            log.warning("cycles over %.0fs %d times in a row: falling back to 1-minute buckets for the rest of the session", cad,
-                        OVERRUNS_BEFORE_FALLBACK)
-            summary["fallback"] = clock().isoformat(timespec="seconds")
-            bucket, cad = "1min", 60.0
-            for r in runners.values():
-                r.bucket, r.td, r.overruns = "1min", pd.Timedelta("1min"), 0
-        sleep(max(0.0, cad - (_time.perf_counter() - t0)))
-    return summary
-
-
-def replay_day(lake: Path, store: Path, underlying: str, day: date, bucket: str = "1min") -> int:
+def replay_day(lake: Path, store: Path, underlying: str, day: date, bucket: str = "1min", ids: Optional[list[str]] = None) -> int:
     """After the close: replay the day's recorded ticks through the runner and write the per-bucket rows to the signal store, so the
     history of the live era is exactly what the runner computed (or would have).  Returns rows written."""
     from signals.framework import write_output
@@ -573,7 +531,7 @@ def replay_day(lake: Path, store: Path, underlying: str, day: date, bucket: str 
     if not parts:
         return 0
     ticks = pd.concat(parts, ignore_index=True)
-    ids = live_signal_ids()
+    ids = ids or live_signal_ids()
     rows = replay(underlying, history_for(lake, underlying, day), ticks, bucket=bucket, step="5min", ids=ids,
                   baselines=load_baselines(store, underlying, day, ids, bucket),
                   volume_slot_daily=slot_volume_history(lake, underlying, day))
@@ -585,5 +543,5 @@ def replay_day(lake: Path, store: Path, underlying: str, day: date, bucket: str 
         g = g.drop(columns=["signal"]).assign(underlying=underlying)
         if "ts" not in g.columns and "date" in g.columns:
             g["ts"] = pd.to_datetime(g["known_at"]) - pd.Timedelta(bucket)
-        n += write_output(store, spec, g, layer=f"intraday/bucket={'10s' if bucket == '10s' else '1m'}")
+        n += write_output(store, spec, g, layer=f"intraday/bucket={ {'1s': '1s', '10s': '10s'}.get(bucket, '1m') }")
     return n

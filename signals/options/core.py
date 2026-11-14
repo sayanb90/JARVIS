@@ -81,9 +81,10 @@ def contract_table(ctx: Context) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["symbol", "instrument_type", "strike", "expiry", "lot_size"])
 
 
-def _years(expiry: pd.Series, ts: pd.Series) -> np.ndarray:
+def _years(expiry: pd.Series, ts: pd.Series, bucket: pd.Timedelta = pd.Timedelta(minutes=1)) -> np.ndarray:
+    """Years from the end of the bucket starting at `ts` to expiry (15:30 IST)."""
     exp_dt = pd.to_datetime(expiry) + EXPIRY_UTC
-    return ((exp_dt - (pd.to_datetime(ts) + pd.Timedelta(minutes=1))) / YEAR).to_numpy(dtype=float)
+    return ((exp_dt - (pd.to_datetime(ts) + bucket)) / YEAR).to_numpy(dtype=float)
 
 
 # ---------------------------------------------------------------------------------------------- underlying, futures
@@ -142,7 +143,7 @@ def fut_front(ctx: Context) -> pd.DataFrame:
     front = f[f["rank"] == 1].drop(columns=["rank", "day"])
     nxt = f[f["rank"] == 2][["ts", "close", "oi"]].rename(columns={"close": "next_close", "oi": "next_oi"})
     out = front.merge(nxt, on="ts", how="left")
-    out["t_fut"] = _years(out["expiry"], out["ts"])
+    out["t_fut"] = _years(out["expiry"], out["ts"], ctx.bucket_td)
     return out.drop_duplicates("ts").reset_index(drop=True)
 
 
@@ -245,8 +246,9 @@ def parity_forward(ch: pd.DataFrame, r: float, max_age: float = PARITY_AGE, pair
     c = ch[(ch["cp"] == "C") & (ch["age"] <= max_age)][["ts", "expiry", "strike", "close", "t"] + (["r"] if "r" in ch.columns else [])]
     p = ch[(ch["cp"] == "P") & (ch["age"] <= max_age)][["ts", "expiry", "strike", "close"]]
     m = c.merge(p, on=["ts", "expiry", "strike"], suffixes=("_c", "_p"))
-    if m.empty:
-        return pd.DataFrame(columns=["ts", "expiry", "fwd_parity"])
+    if m.empty:                                   # typed, so the merge into the chain works on a bucket with no fresh pairs
+        return pd.DataFrame({"ts": pd.Series(dtype=ch["ts"].dtype), "expiry": pd.Series(dtype=ch["expiry"].dtype),
+                             "fwd_parity": pd.Series(dtype=float)})
     m["diff"] = (m["close_c"] - m["close_p"]).abs()
     rr = m["r"] if "r" in m.columns else r
     m["f"] = m["strike"] + np.exp(rr * m["t"]) * (m["close_c"] - m["close_p"])
@@ -257,7 +259,8 @@ def parity_forward(ch: pd.DataFrame, r: float, max_age: float = PARITY_AGE, pair
 
 def build_chain(opt: pd.DataFrame, contracts: pd.DataFrame, spot_m: pd.DataFrame, fut: pd.DataFrame, r: float,
                 stale_max: int = STALE_MAX, iv_age: int = IV_AGE, rates: pd.DataFrame | None = None,
-                from_ts: Optional[pd.Timestamp] = None) -> pd.DataFrame:
+                from_ts: Optional[pd.Timestamp] = None, bucket: pd.Timedelta = pd.Timedelta(minutes=1),
+                grid_to: Optional[pd.Timestamp] = None) -> pd.DataFrame:
     """`r` is the flat rate used where `rates` (from rate_table) has no value yet.  `from_ts` (live runner): rows before it are dropped
     once stale prints are carried, so the forward, IV and Greeks are solved only for the new buckets (each row reads only its own
     bucket from here on, so the rows kept are the same as on the whole day)."""
@@ -270,14 +273,23 @@ def build_chain(opt: pd.DataFrame, contracts: pd.DataFrame, spot_m: pd.DataFrame
     if "oi" not in o.columns:
         o["oi"] = np.nan
     ct = contracts[contracts["instrument_type"].isin(["CE", "PE"])][["symbol", "instrument_type", "strike", "expiry", "lot_size"]]
-    minutes = spot_m[["ts"]] if len(spot_m) else o[["ts"]].drop_duplicates()
+    if bucket < pd.Timedelta(minutes=1):
+        # below a minute the index ticks are too sparse to be the grid: every bucket of the session span, per day
+        days = o["ts"].dt.normalize().unique()
+        def _end(dd):                                   # the last bucket: the slice's end when given (live), else the last bar
+            last = o.loc[o["ts"].dt.normalize() == dd, "ts"].max()
+            return max(last, grid_to - bucket) if grid_to is not None and pd.Timestamp(grid_to).normalize() == dd else last
+        grid = [pd.date_range(o.loc[o["ts"].dt.normalize() == dd, "ts"].min(), _end(dd), freq=bucket) for dd in days]
+        minutes = pd.DataFrame({"ts": grid[0].append(grid[1:]) if len(grid) > 1 else grid[0]})
+    else:
+        minutes = spot_m[["ts"]] if len(spot_m) else o[["ts"]].drop_duplicates()
     g = _grid_fill(o, minutes, stale_max)
     if from_ts is not None and len(g):
         g = g[g["ts"] >= from_ts]
     g = g.merge(ct, on="symbol", how="inner")
     g["cp"] = np.where(g["instrument_type"] == "CE", "C", "P")
     g["lot"] = g["lot_size"]
-    g["t"] = _years(g["expiry"], g["ts"])
+    g["t"] = _years(g["expiry"], g["ts"], bucket)
     g = g[g["t"] > 0].copy()
     g["r"] = rate_by_row(g["ts"], rates, r)
     r = g["r"].to_numpy()
@@ -417,8 +429,8 @@ def atm_snaps(ctx: Context) -> pd.DataFrame:
     a = a.copy()
     a["date"] = pd.to_datetime(a["ts"]).dt.date
     if ctx.snaps == "all":                     # every bar (SCRUM-198): snap is the IST time the bar ends, known at that time
-        a["known_at"] = pd.to_datetime(a["ts"]) + pd.Timedelta(minutes=1)
-        a["snap"] = (a["known_at"] + pd.Timedelta(hours=5, minutes=30)).dt.strftime("%H:%M")
+        a["known_at"] = pd.to_datetime(a["ts"]) + ctx.bucket_td
+        a["snap"] = (a["known_at"] + pd.Timedelta(hours=5, minutes=30)).dt.strftime("%H:%M" if ctx.bucket_td >= pd.Timedelta(minutes=1) else "%H:%M:%S")
         return a.reset_index(drop=True)
     rows = []
     for d, g in a.groupby("date"):

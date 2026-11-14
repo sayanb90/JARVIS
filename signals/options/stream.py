@@ -340,8 +340,11 @@ def write_rows(rows: list[dict], store: Optional[Any] = None, prefix: str = "boo
     if not rows:
         return 0
     df = pd.DataFrame(rows)
+    when = pd.to_datetime(df["ts"]) if "ts" in df.columns else pd.Series(pd.NaT, index=df.index)
+    if "known_at" in df.columns:                       # snapshot signals carry known_at, not ts
+        when = when.fillna(pd.to_datetime(df["known_at"]))
     n = 0
-    for day, part in df.groupby(pd.to_datetime(df["ts"]).dt.date):
+    for day, part in df.groupby(when.dt.date):
         folder = live_dir(store, day)
         folder.mkdir(parents=True, exist_ok=True)
         name = f"{prefix}-{int(_time.time() * 1000)}-{os.getpid()}.parquet"

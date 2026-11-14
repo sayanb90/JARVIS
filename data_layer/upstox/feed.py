@@ -109,8 +109,10 @@ class FeedProcessor:
 
     def __init__(self, key_map: dict[str, str], policy: TickPolicy | None = None,
                  books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False,
-                 book_signals=None) -> None:
+                 book_signals=None, publisher=None) -> None:
         self.key_map = key_map
+        self.publisher = publisher                       # data_layer.bus.Publisher, or None (SCRUM-159: ticks to the in-memory bus)
+        self.bus_errors = 0
         self.book_signals = book_signals                 # signals.options.stream.BookAccumulator, or None (SCRUM-196)
         self.signal_rows: list[dict] = []
         self.signal_errors = 0
@@ -148,6 +150,7 @@ class FeedProcessor:
             self._index_seen.update(self._index_keys.intersection(resp.feeds.keys()))
         for sym, ts, ltp, bids, asks in decode.books_from_response(resp, self.key_map):
             self.books.update(sym, ts, ltp, bids, asks)
+        frame_ticks = [] if self.publisher is not None else None
         for t in decode.ticks_from_response(resp, self.key_map, ext=self.ext, depth=self.depth):
             t.rts = now                                  # when this process received the message (exact arrival order)
             if t.ts.date() != now.date():                # last trade from an earlier day: no trade yet today
@@ -164,11 +167,25 @@ class FeedProcessor:
                                 "(is ltt really epoch ms?)", t.ts, now)
                 continue
             self.ticks += 1
+            if frame_ticks is not None:
+                frame_ticks.append(t)
             if self.book_signals is not None and "_FUT_" in t.symbol:
                 self._book_signal(t)
             kept = self.policy.apply(t)
             if kept is not None:
                 self._ticks.append(kept)
+        if frame_ticks:
+            self._publish(frame_ticks)
+
+    def _publish(self, ticks: list) -> None:
+        """Every tick of the frame to the bus, before the storage policy (consumers see all of them).  Never raises."""
+        from data_layer import bus
+        try:
+            self.publisher.publish("tick", list(bus.TICK_FIELDS), bus.tick_rows(ticks))
+        except Exception:                                  # noqa: BLE001 -- the bus is optional; tick capture is not
+            self.bus_errors += 1
+            if self.bus_errors in (1, 100, 10_000):
+                log.exception("publishing to the tick bus failed (%d so far); ticks are unaffected", self.bus_errors)
 
     def _book_signal(self, t: Tick) -> None:
         """Feed one futures tick to the order-book accumulator; a failure there is counted and never stops the tick capture."""
@@ -206,14 +223,14 @@ class UpstoxFeed:
                  dump_frames: int = 0, dump_dir: Path | None = None,
                  token_provider=None, auth_retry_s: float | None = None, policy: TickPolicy | None = None,
                  books: BookStore | None = None, ext: bool = False, segment: str | None = None, depth: bool = False,
-                 book_signals=None, signal_store: Path | None = None) -> None:
+                 book_signals=None, signal_store: Path | None = None, publisher=None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         self.token, self.url, self.mode, self.batch = token, url, mode, batch
         # daemon mode: when Upstox rejects the token, keep waiting and re-read it instead of exiting (see runbook 0.9)
         self.token_provider, self.auth_retry_s = token_provider, auth_retry_s
         self.keys = list(key_map)
-        self.proc = FeedProcessor(key_map, policy, books, ext=ext, depth=depth, book_signals=book_signals)
+        self.proc = FeedProcessor(key_map, policy, books, ext=ext, depth=depth, book_signals=book_signals, publisher=publisher)
         self.signal_store = signal_store
         self.lake_dir, self.flush_s, self.write_s, self.stale_s = lake_dir, flush_s, write_s, stale_s
         self.segment = segment                            # 'eq' or 'fo': the folder this feed owns and compacts at the end of the session (SCRUM-133)
@@ -610,8 +627,13 @@ def main() -> None:
                           token_provider=current_token, auth_retry_s=None if a.once else 60.0, policy=new_policy(), books=books,
                           ext=bool(a.ext_fields) or os.getenv("JARVIS_EXT_FIELDS", "").lower() in ("1", "true", "yes", "on"),
                           segment=a.segment, depth=depth5_enabled(a.depth5, segment=a.segment), book_signals=acc,
-                          write_s=write_interval())
+                          write_s=write_interval(), publisher=publisher)
     books = BookStore()
+    publisher = None                                    # bound once for the life of the process; reconnects reuse it
+    from data_layer import bus as _bus
+    if _bus.bus_enabled():
+        publisher = _bus.Publisher(f"ticks-{a.segment}-{shard}")
+        log.info("publishing ticks on the bus as %s (%s)", publisher.name, _bus.endpoint(publisher.name))
 
     async def runner() -> None:
         server = await serve_books(books, port_for(a.segment, shard=shard))

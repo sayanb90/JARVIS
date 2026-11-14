@@ -119,7 +119,7 @@ def pin(ctx: Context, p: dict) -> pd.DataFrame:
     out = top_oi.merge(top_g, on="ts")
     out["dist_oi"] = (out["fwd"] - out["pin_oi"]) / out["fwd"]
     out["dist_gamma"] = (out["fwd"] - out["pin_gamma"]) / out["fwd"]
-    out["known_at"] = pd.to_datetime(out["ts"]) + pd.Timedelta(minutes=1)
+    out["known_at"] = pd.to_datetime(out["ts"]) + ctx.bucket_td
     return out
 
 

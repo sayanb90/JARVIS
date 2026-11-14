@@ -86,7 +86,7 @@ def residual_iv(ctx: Context, p: dict) -> pd.DataFrame:
         return pd.DataFrame()
     w = pd.Timedelta(minutes=p["window_min"])
     s = s.copy()
-    s["_t"] = pd.to_datetime(s["known_at"]) - pd.Timedelta(minutes=1)          # the bar the snapshot reads
+    s["_t"] = pd.to_datetime(s["known_at"]) - ctx.bucket_td                    # the bar the snapshot reads
     s["_t0"] = s["_t"] - w
     past = a[["ts", "expiry", "atm_iv"]].rename(columns={"ts": "_t0", "expiry": "_e0", "atm_iv": "iv0"})
     s = s.merge(past, on="_t0", how="left")
@@ -254,7 +254,7 @@ def cp_iv_gap(ctx: Context, p: dict) -> pd.DataFrame:
     s = _snaps(ctx)
     if ch is None or not len(ch) or not len(s):
         return pd.DataFrame()
-    want = set(pd.to_datetime(s["known_at"]) - pd.Timedelta(minutes=1))
+    want = set(pd.to_datetime(s["known_at"]) - ctx.bucket_td)
     c = ch[ch["ts"].isin(want)]
     first = c.groupby("ts")["expiry"].transform("min")
     c = c[(c["expiry"] == first) & (c["k"].abs() <= p["max_k"])]
@@ -271,7 +271,7 @@ def cp_iv_gap(ctx: Context, p: dict) -> pd.DataFrame:
         out["fut_fwd"] = out["close"] * np.exp(-ctx.r * (out["t_fut"] - out["t"]))
         out["basis_bp"] = np.where(out["src"] == "parity", (out["fwd"] / out["fut_fwd"] - 1) * 1e4, np.nan)
     out = out.reset_index()
-    out["known_at"] = out["ts"] + pd.Timedelta(minutes=1)
+    out["known_at"] = out["ts"] + ctx.bucket_td
     out = out.merge(s[["date", "snap", "known_at"]], on="known_at")
     return out[["date", "snap", "known_at", "cp_gap"] + [c for c in ("basis_bp",) if c in out.columns]]
 

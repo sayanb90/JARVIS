@@ -78,15 +78,16 @@ def chain_live(ctx: Context) -> pd.DataFrame:
     agg["src"] = "tick"
     rates = rate_table(ctx.raw.get("rates"))
     if ctx.bucket_td >= pd.Timedelta(minutes=1):
-        return build_chain(agg, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rates, from_ts=ctx.since)
+        return build_chain(agg, ctx.get("contract_table"), ctx.get("spot"), ctx.get("fut_front"), ctx.r, rates=rates, from_ts=ctx.since,
+                           bucket=ctx.bucket_td)
     # Sub-minute buckets (10 s): the index and future minute bars are too coarse, so the grid is the option buckets themselves and the
     # forward falls back to the front future's bucket mid from its own ticks.  Staleness is still counted in minutes.
     steps = int(pd.Timedelta(minutes=STALE_MAX) / ctx.bucket_td)
-    return build_chain(agg, ctx.get("contract_table"), pd.DataFrame(columns=["ts", "close"]), _fut_buckets(t), ctx.r, stale_max=steps,
-                       rates=rates, from_ts=ctx.since)
+    return build_chain(agg, ctx.get("contract_table"), pd.DataFrame(columns=["ts", "close"]), _fut_buckets(t, ctx.bucket_td), ctx.r, stale_max=steps,
+                       rates=rates, from_ts=ctx.since, bucket=ctx.bucket_td)
 
 
-def _fut_buckets(t: pd.DataFrame) -> pd.DataFrame:
+def _fut_buckets(t: pd.DataFrame, bucket: pd.Timedelta) -> pd.DataFrame:
     """The front future per bucket from its ticks (last mid, else last trade), shaped like fut_front."""
     f = t[t["instrument_type"] == "FUT"]
     if f.empty:
@@ -94,7 +95,7 @@ def _fut_buckets(t: pd.DataFrame) -> pd.DataFrame:
     f = f[f["expiry"] == f.groupby(f["minute"].dt.normalize())["expiry"].transform("min")]
     g = f.groupby("minute").agg(close=("mid", "last"), ltp=("ltp", "last"), expiry=("expiry", "first")).reset_index().rename(columns={"minute": "ts"})
     g["close"] = g["close"].fillna(g["ltp"])
-    g["t_fut"] = _years(g["expiry"], g["ts"])
+    g["t_fut"] = _years(g["expiry"], g["ts"], bucket)
     return g[["ts", "close", "t_fut"]]
 
 

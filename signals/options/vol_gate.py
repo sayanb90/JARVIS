@@ -54,7 +54,7 @@ def vrp(ctx: Context, p: dict) -> pd.DataFrame:
     v = ctx.get("vix")
     if v is not None and len(v):
         vv = v[["ts", "close"]].rename(columns={"close": "vix"}).sort_values("ts")
-        vv["_at"] = vv["ts"] + pd.Timedelta(minutes=1)
+        vv["_at"] = vv["ts"] + ctx.bucket_td
         s = pd.merge_asof(s.sort_values("known_at"), vv[["_at", "vix"]], left_on="known_at", right_on="_at", direction="backward",
                           tolerance=pd.Timedelta(minutes=5)).drop(columns=["_at"])
         s["vix_vrp_diff"] = s["vix"] / 100.0 - s["rv_fc"]

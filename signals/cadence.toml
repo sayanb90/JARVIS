@@ -1,0 +1,7 @@
+# Live signal cadence (owner decision 14 Nov 2026): 1s, 10s or 1min per signal.  Chosen from the feasibility measurements
+# (python -m signals feasibility; numbers in the runbook, section 19.8).  A signal not listed runs at `default`.
+# JARVIS_SIGNAL_CADENCE in .env overrides `default` (not the lines below).  Signals with a minimum cadence (signals/cadence.py,
+# MIN_CADENCE) cannot be set faster; the engine refuses to start on an invalid file.
+default = "1min"
+
+[signal]

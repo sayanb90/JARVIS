@@ -7,7 +7,7 @@ import pytest
 
 from signals import catalogue  # noqa: F401
 from signals.framework import Context
-from signals.live_runner import LiveRunner, bar_volume, cadence, live_signal_ids, replay, ticks_to_bars
+from signals.live_runner import LiveRunner, bar_volume, live_signal_ids, replay, ticks_to_bars
 from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
 from signals.synthetic import make_raw
 
@@ -138,12 +138,6 @@ def test_fallback_after_three_overruns():
     assert not r.check_budget(12.0, 10.0) and not r.check_budget(11.0, 10.0)
     assert not r.check_budget(3.0, 10.0)                       # a fast cycle resets the count
     assert [r.check_budget(12.0, 10.0) for _ in range(3)] == [False, False, True]
-
-
-def test_cadence_setting():
-    assert cadence({}) == "1min" and cadence({"JARVIS_SIGNAL_CADENCE": "10s"}) == "10s"
-    with pytest.raises(ValueError):
-        cadence({"JARVIS_SIGNAL_CADENCE": "5s"})
 
 
 def test_every_live_signal_declares_a_short_lookback():
