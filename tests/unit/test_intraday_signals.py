@@ -47,8 +47,9 @@ def test_every_bar_signals_are_point_in_time(raw, sid):
         assert ok, msg
 
 
-def test_smoothed_skew_does_not_jump_when_a_stale_wing_prints(raw):
-    """One wing strike missing for 20 minutes, then printing 3 vol points off: the raw skew jumps, the smoothed one moves a little."""
+def test_skew_smoothing_damps_a_bad_print_and_forgets_after_ten_minutes(raw):
+    """Skew smoothing (2-minute half-life, 10-minute memory): one bad wing print among continuous quotes is damped; a stale gap within
+    10 minutes is bridged; a longer gap leaves it empty.  After a long gap the next fresh print dominates by design: it is news."""
     al = Context("NIFTY", raw, snaps="all")
     s = al.compute("skew")
     day = s["date"].max()
@@ -60,12 +61,14 @@ def test_smoothed_skew_does_not_jump_when_a_stale_wing_prints(raw):
     idx = snaps[sel].sort_values("known_at").index
     snaps.loc[idx, "iv_m1"] = snaps.loc[idx, "iv_m1"].ffill().bfill()
     snaps.loc[idx, "iv_p1"] = snaps.loc[idx, "iv_p1"].ffill().bfill()
-    snaps.loc[idx[100:120], "iv_m1"] = np.nan                     # stale: no fresh print
-    snaps.loc[idx[120], "iv_m1"] += 0.03                          # the stale strike prints again, 3 vol points off
+    snaps.loc[idx[150], "iv_m1"] += 0.05                          # one bad wing print among continuous quotes, 5 vol points off
+    snaps.loc[idx[100:108], "iv_m1"] = np.nan                     # stale for 8 minutes: no fresh print
+    snaps.loc[idx[200:215], "iv_m1"] = np.nan                     # stale for 15 minutes: longer than the 10-minute memory
     ctx = Context("NIFTY", raw, snaps="all", cache={"atm_snaps": snaps})
-    out = skew_fn(ctx, {"halflife_min": 5})
+    out = skew_fn(ctx, {"halflife_min": 2, "window_min": 10})
     o = out[(out["date"] == day) & (out["expiry"] == g["expiry"].iloc[0])].sort_values("known_at").reset_index(drop=True)
-    raw_jump = abs(o["skew1"].iloc[120] - o["skew1"].iloc[99])
-    smooth_jump = abs(o["skew1_s"].iloc[120] - o["skew1_s"].iloc[119])
-    assert raw_jump > 0.025 and smooth_jump < 0.4 * raw_jump
-    assert o["skew1_s"].iloc[100:120].notna().all()                # the gap is carried, not blank
+    raw_jump = abs(o["skew1"].iloc[150] - o["skew1"].iloc[149])
+    smooth_jump = abs(o["skew1_s"].iloc[150] - o["skew1_s"].iloc[149])
+    assert raw_jump > 0.04 and smooth_jump < 0.4 * raw_jump        # a single bad print is damped to about a third
+    assert o["skew1_s"].iloc[100:108].notna().all()                # a gap within the memory is bridged
+    assert o["skew1_s"].iloc[211:215].isna().all()                 # past 10 minutes without a fresh print it is empty, not stale
