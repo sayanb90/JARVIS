@@ -107,6 +107,13 @@ def test_the_real_crontab_parses_every_line():
     assert len(jr.parse_crontab(text)) == len(lines)
 
 
+def test_every_cron_line_is_wrapped_so_the_jobs_tab_tracks_it():
+    jobs = jr.parse_crontab((jr.lake_mod.ROOT / "deploy" / "crontab").read_text())
+    assert jobs and [j.name for j in jobs if not j.wrapped] == []
+    assert len({j.name for j in jobs}) == len(jobs)                                    # unique names: one row each
+    assert all(j.log for j in jobs)                                                    # every job has a log to tail
+
+
 # -- states -------------------------------------------------------------------------------------
 def st(j, recs, now=NOW, alive=lambda p: True, root=None):
     return jr.states([j], recs, now, root=root, pid_alive=alive)[0]

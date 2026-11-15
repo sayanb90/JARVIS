@@ -218,6 +218,8 @@ Tested against a local fake server; not yet run against Upstox itself (runbook s
 
 **Admin:** set `WEBAPP_USER` and `WEBAPP_PASSWORD` and the viewer and `/admin` share that one login (`/admin` is never served without a login; `ADMIN_USER`/`ADMIN_PASSWORD` still work when the viewer login is not set). `/admin` is a data browser (tables grouped by service, paged), a read-only SQL console and the subscription list with ticker upload (runbook section 18).
 
+**Jobs (SCRUM-142, SCRUM-203):** the *Jobs* tab of `/admin` lists every entry of `deploy/crontab` the way a scheduler console does: state (running, ok, failed, lost, late, never, untracked), schedule, next run, last start, duration, exit code, the last ten runs, and a tail of the job's log with secrets hidden. States come from `logs/jobs/runs.jsonl`, written by `python -m data_layer.jobrun run NAME --shell '...'`, which every crontab line runs through (it passes the exit code through unchanged). `python -m data_layer.jobrun status` prints the same table in a terminal and exits non-zero when a job failed, was lost or is late. A line added to the crontab without the wrapper shows as *untracked*.
+
 Go-live steps, daily ops, backups and the futures/options section are in [the JARVIS Runbook in Notion](https://app.notion.com/p/40a23f85984081c4bf1eff52ac4bfcd5).
 
 **Manual runs:**

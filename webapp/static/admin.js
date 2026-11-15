@@ -58,13 +58,15 @@ function renderPager(el, page, pages, info, onGo) {
 /* ---------------------------------------------------------------- sections */
 function setTab(tab) {
   state.tab = tab;
-  for (const t of ['data', 'query', 'subs']) { $('tab-' + t).setAttribute('aria-selected', t === tab); $('view-' + t).hidden = t !== tab; }
+  for (const t of ['data', 'query', 'subs', 'jobs']) { $('tab-' + t).setAttribute('aria-selected', t === tab); $('view-' + t).hidden = t !== tab; }
   writeHash();
   if (tab === 'query' && !$('schema').dataset.loaded) loadSchema().catch(fail);
   if (tab === 'subs') loadSubs().catch(fail);
+  if (tab === 'jobs') loadJobs().catch(fail);
+  if (tab !== 'jobs') stopJobsTimer();
   if (tab === 'data') setStatus(state.table ? `${state.service}.${state.table}` : 'Pick a table');
 }
-for (const t of ['data', 'query', 'subs']) $('tab-' + t).onclick = () => setTab(t);
+for (const t of ['data', 'query', 'subs', 'jobs']) $('tab-' + t).onclick = () => setTab(t);
 
 /* ================================================================ Data */
 const svc = () => state.catalog.find((s) => s.service === state.service);
@@ -125,7 +127,7 @@ async function loadPage() {
     const info = d.total ? `Rows ${fmtInt(first)}–${fmtInt(first + d.rows.length - 1)} of ${fmtInt(d.total)} · ${d.elapsed_ms} ms` : 'No rows';
     renderPager($('pager'), d.page, d.total ? d.pages : 0, info, (p) => { state.page = p; loadPage(); $('grid').parentElement.scrollTop = 0; });
     writeHash();
-    setStatus(`${state.service}.${state.table}${state.day ? ' · ' + state.day : ''}${state.symbol ? ' · ' + state.symbol : ''} · page ${fmtInt(d.page)} of ${fmtInt(d.pages)}`);
+    if (state.tab === 'data') setStatus(`${state.service}.${state.table}${state.day ? ' · ' + state.day : ''}${state.symbol ? ' · ' + state.symbol : ''} · page ${fmtInt(d.page)} of ${fmtInt(d.pages)}`);
   } catch (e) { if (id === req) { fail(e); renderGrid($('grid'), [], []); $('pager').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; } }
 }
 
@@ -293,6 +295,61 @@ $('apply').onclick = async () => {
 ['csv', 'paste', 'mode'].forEach((id) => { $(id).addEventListener('change', () => { $('apply').disabled = true; state.plan = null; }); });
 $('paste').addEventListener('input', () => { $('apply').disabled = true; state.plan = null; });
 
+/* ---------------------------------------------------------------- jobs */
+const JOB_ORDER = ['failed', 'lost', 'late', 'running', 'ok', 'never', 'untracked'];
+const JOB_NOTE = { failed: 'the last run exited with an error', lost: 'started but never reported an end', late: 'should have started and did not',
+                   running: 'running now', ok: 'the last run succeeded', never: 'wrapped, no run recorded yet', untracked: 'not wrapped by the heartbeat yet' };
+const shortT = (t) => (t ? t.replace('T', ' ').slice(5, 16) : '–');
+const dur = (s) => (s == null ? '–' : s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h');
+let jobsTimer = null, jobsData = null, openJob = null;
+function stopJobsTimer() { if (jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; } }
+async function loadJobs() {
+  setStatus('Loading jobs…', 'busy');
+  jobsData = await api('/admin/api/jobs');
+  renderJobs();
+  setStatus(`${jobsData.jobs.length} jobs, ${jobsData.now} UTC`);
+  if (openJob) loadLog().catch(fail);
+}
+function renderJobs() {
+  const d = jobsData; if (!d) return;
+  const sel = $('jobs-filter'), want = sel.value;
+  fill(sel, [['', 'All'], ...JOB_ORDER.filter((s) => d.counts[s]).map((s) => [s, `${s} (${d.counts[s]})`])], want);
+  $('jobs-kpis').style.setProperty('--n', 4);
+  const bad = (d.counts.failed || 0) + (d.counts.lost || 0) + (d.counts.late || 0);
+  $('jobs-kpis').innerHTML = [['Jobs', d.jobs.length, 'in the crontab'], ['Need attention', bad, 'failed, lost or late'],
+    ['Running', d.counts.running || 0, 'right now'], ['Not tracked', d.counts.untracked || 0, 'cron line not wrapped']]
+    .map(([k, v, s]) => `<div class="kpi"><b>${k}</b><span>${v}</span><small>${s}</small></div>`).join('');
+  const rows = d.jobs.filter((j) => !sel.value || j.state === sel.value)
+    .sort((a, b) => JOB_ORDER.indexOf(a.state) - JOB_ORDER.indexOf(b.state) || a.name.localeCompare(b.name));
+  $('jobs-grid').innerHTML = '<thead><tr><th>Job</th><th>State</th><th>Schedule</th><th>Next run</th><th>Last start</th><th>Took</th><th>Exit</th><th>Recent</th></tr></thead><tbody>'
+    + rows.map((j) => `<tr data-job="${esc(j.name)}" class="${j.name === openJob ? 'sel' : ''}" title="${esc(j.command)}">
+      <td><b>${esc(j.name)}</b></td><td><span class="pill ${j.state}" title="${esc(JOB_NOTE[j.state] || '')}">${j.state}</span></td>
+      <td><code>${esc(j.schedule)}</code></td><td>${shortT(j.next_run)}</td>
+      <td>${j.last_start ? shortT(j.last_start) : (j.log_written ? 'log ' + shortT(j.log_written) : '–')}</td>
+      <td class="n">${dur(j.secs)}</td><td class="n">${j.exit_code == null ? '–' : j.exit_code}</td>
+      <td>${(j.history || []).map((h) => `<i class="dot-run ${h.code == null ? 'run' : h.code === 0 ? 'ok' : 'bad'}" title="${esc(shortT(h.start))} exit ${h.code == null ? '?' : h.code}"></i>`).join('')}</td></tr>`).join('')
+    + '</tbody>';
+  $('jobs-grid').querySelectorAll('tbody tr').forEach((tr) => { tr.onclick = () => { openJob = tr.dataset.job; renderJobs(); loadLog().catch(fail); }; });
+}
+async function loadLog() {
+  const j = jobsData && jobsData.jobs.find((x) => x.name === openJob);
+  if (!j) return;
+  $('log-panel').hidden = false; $('log-title').textContent = j.name; $('log-hint').textContent = j.log || '';
+  try {
+    const r = await api('/admin/api/jobs/log', { name: j.name, lines: $('log-lines').value });
+    const box = $('log-text'), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+    box.textContent = r.text || '(the log is empty)';
+    if (atEnd || !box.dataset.shown) box.scrollTop = box.scrollHeight;
+    box.dataset.shown = '1';
+  } catch (e) { $('log-text').textContent = e.message; }
+}
+$('jobs-filter').onchange = renderJobs;
+$('jobs-refresh').onclick = () => loadJobs().catch(fail);
+$('log-refresh').onclick = () => loadLog().catch(fail);
+$('log-lines').onchange = () => loadLog().catch(fail);
+$('log-close').onclick = () => { openJob = null; $('log-panel').hidden = true; renderJobs(); };
+$('jobs-auto').onchange = (e) => { stopJobsTimer(); if (e.target.checked) jobsTimer = setInterval(() => loadJobs().catch(fail), 15000); };
+
 /* ---------------------------------------------------------------- start-up */
 async function init() {
   const h = readHash();
@@ -308,6 +365,6 @@ async function init() {
   const service = state.catalog.find((s) => s.service === h.service) ? h.service : 'market';
   state.day = h.day || null; state.page = +h.page || 1;
   selectService(service, h.table || null);
-  setTab(['data', 'query', 'subs'].includes(h.tab) ? h.tab : 'data');
+  setTab(['data', 'query', 'subs', 'jobs'].includes(h.tab) ? h.tab : 'data');
 }
 init();

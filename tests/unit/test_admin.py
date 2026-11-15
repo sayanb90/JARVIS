@@ -1,8 +1,9 @@
 """JARVIS /admin: access, the table catalog and paging, the read-only SQL sandbox, and the subscription list."""
 from __future__ import annotations
 
+import json
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -348,3 +349,47 @@ def test_the_catalog_lists_each_tables_vendors_and_works_with_one_vendor_missing
     (lake.lakedir / "yf_fundamentals" / "versions.parquet").unlink()                           # only Upstox has stored anything
     one = client.get("/admin/api/table", params={"service": "fundamentals", "name": "items"}, auth=A).json()
     assert one["total"] == 1 and one["rows"][0][0] == "Upstox"
+
+
+# -- jobs (Autosys style) ---------------------------------------------------------------------------
+def jobs_world(lake):
+    root = lake.root
+    (root / "deploy").mkdir(exist_ok=True)
+    (root / "deploy" / "crontab").write_text(
+        "0 1 * * * cd $JARVIS && python -m data_layer.jobrun run fx -- python -m data_layer.fx refresh >> logs/fx.log 2>&1\n"
+        "30 2 * * * cd $JARVIS && python -m data_layer.health >> logs/health.log 2>&1\n"
+        "0 3 * * * cd $JARVIS && python -m data_layer.rates daily\n")
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "logs" / "fx.log").write_text("ok line\ntoken=SECRETVALUE\n")
+    (root / ".env").write_text("UPSTOX_FEED_TOKEN=abc\n")
+    from data_layer import jobrun
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    t = (now - timedelta(minutes=30)).isoformat(timespec="seconds")
+    p = jobrun.runs_path(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"ev": "start", "job": "fx", "id": "a", "at": t, "pid": 1}) + "\n"
+                 + json.dumps({"ev": "end", "job": "fx", "id": "a", "at": t, "code": 2, "secs": 4.0}) + "\n")
+
+
+def test_jobs_listing_states_and_counts(client, lake):
+    jobs_world(lake)
+    body = client.get("/admin/api/jobs", auth=A).json()
+    by = {j["name"]: j for j in body["jobs"]}
+    assert set(by) == {"fx", "health", "rates"}
+    assert by["fx"]["state"] == "failed" and by["fx"]["exit_code"] == 2 and by["fx"]["next_run"]
+    assert by["health"]["state"] == "untracked" and by["rates"]["log"] is None
+    assert body["counts"]["failed"] == 1 and body["counts"]["untracked"] == 2
+
+
+def test_job_log_tail_is_redacted_and_only_for_crontab_jobs(client, lake):
+    jobs_world(lake)
+    r = client.get("/admin/api/jobs/log", params={"name": "fx", "lines": 5}, auth=A)
+    assert r.status_code == 200 and "ok line" in r.json()["text"] and "SECRETVALUE" not in r.json()["text"]
+    assert client.get("/admin/api/jobs/log", params={"name": "../.env"}, auth=A).status_code == 404       # not a crontab job
+    assert client.get("/admin/api/jobs/log", params={"name": "rates"}, auth=A).status_code == 404         # writes no log
+    assert client.get("/admin/api/jobs/log", params={"name": "health"}, auth=A).status_code == 404         # log file not there yet
+    assert client.get("/admin/api/jobs/log", params={"name": "fx", "lines": 100000}, auth=A).status_code == 422
+
+
+def test_jobs_need_the_login(client):
+    assert client.get("/admin/api/jobs").status_code == 401 and client.get("/admin/api/jobs/log", params={"name": "fx"}).status_code == 401

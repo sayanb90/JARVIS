@@ -210,7 +210,7 @@ def derive_name(command: str, log: Optional[str]) -> str:
     if log:
         return _slug(Path(log).stem)
     m = re.search(r"python\S*\s+(?:-m\s+)?([\w.]+)", command)
-    return _slug(m.group(1)) if m else _slug(command)[:40]
+    return _slug(re.sub(r"^data_layer\.", "", m.group(1))) if m else _slug(command)[:40]
 
 
 def parse_crontab(text: str) -> list[Job]:

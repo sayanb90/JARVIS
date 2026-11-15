@@ -43,7 +43,7 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from data_layer import tick_store, universe_files, universe as uni
+from data_layer import jobrun, tick_store, universe_files, universe as uni
 from data_layer import lake as lake_mod
 from data_layer.query import Lake
 from data_layer.upstox import fo_instruments as fo
@@ -474,6 +474,35 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
                              "size": size, "day": day, "elapsed_ms": round((time.perf_counter() - t0) * 1000)}, headers=noindex)
 
     # -- read-only SQL ----------------------------------------------------------
+    # -- jobs (Autosys style): the crontab, each job's state from its heartbeat records, and a log tail ---------------------------------
+    root = data_dir.parent
+
+    def job_states():
+        return jobrun.states(jobrun.load_crontab(root), jobrun.load_runs(root), root=root)
+
+    @r.get("/api/jobs")
+    def jobs():
+        rows = [s.as_dict() for s in job_states()]
+        counts: dict[str, int] = {}
+        for s in rows:
+            counts[s["state"]] = counts.get(s["state"], 0) + 1
+        return JSONResponse({"now": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "counts": counts, "jobs": rows}, headers=noindex)
+
+    @r.get("/api/jobs/log")
+    def job_log(name: str = Query(..., max_length=80), lines: int = Query(200, ge=1, le=jobrun.MAX_TAIL_LINES)):
+        job = next((s for s in job_states() if s.name == name), None)          # only a log named in the crontab, never a path from the client
+        if job is None:
+            raise HTTPException(404, "no such job")
+        if not job.log:
+            raise HTTPException(404, "this job writes no log file")
+        try:
+            text = jobrun.tail(job.log, lines, root)
+        except FileNotFoundError:
+            raise HTTPException(404, "the log file does not exist yet")
+        except (ValueError, OSError):
+            raise HTTPException(404, "the log cannot be read")
+        return JSONResponse({"name": name, "log": job.log, "lines": lines, "text": text}, headers=noindex)
+
     @r.get("/api/schema")
     def schema():
         return JSONResponse(Sandbox(cat).views, headers=noindex)
