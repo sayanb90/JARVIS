@@ -1,8 +1,11 @@
-# Live signal cadence (owner decision 14 Nov 2026): 1s, 10s or 1min per signal.  Chosen from the feasibility measurements
-# (python -m signals feasibility, synthetic 2,000-contract session, 14 Nov 2026; runbook section 19.8):
-#   1s   book and tape only (no option chain): ~0.5 s per cycle, about half a core per underlying
-#   10s  everything that reads the option chain: ~1.35 s per cycle (13 % of the cadence); at 1 s the chain builds alone take 1.6 s
-#   1min signals built on minute-of-day patterns (their minimum, signals/cadence.py MIN_CADENCE)
+# Live signal cadence (owner decision 14 Nov 2026): 1s, 10s or 1min per signal, chosen from measurements
+# (python -m signals feasibility, synthetic 2,000-contract session; runbook sections 19.8, 19.9).  Engine v2, per bucket with every
+# live signal at that cadence (15 Nov 2026): 1 min 0.70 s (1 % of the cadence), 10 s 0.43 s (4 %), 1 s 0.38 s (38 % of a core);
+# the book-and-tape operators alone about 25 ms per 1 s bucket.  The first engine took 1.6 s, 1.35 s and 3.6 s.
+#   1s   book and tape (native operators), including the three that read the live chain's Greeks
+#   10s  everything that reads the option chain: 1 s fits on these numbers but costs about 40 % of a core per underlying next to the
+#        feeds; revisit after the first live session's real tick density (SCRUM-200)
+#   1min signals built on minute-of-day patterns of earlier sessions (their minimum, signals/cadence.py MIN_CADENCE)
 # A signal not listed runs at `default`.  JARVIS_SIGNAL_CADENCE in .env overrides `default` (not the lines below).  The engine refuses
 # to start on an invalid file, and moves a group that keeps overrunning to the next coarser cadence for the rest of the session.
 default = "10s"
@@ -17,6 +20,10 @@ illiquidity = "1s"
 trade_size_flow = "1s"
 block_prints = "1s"
 opening_flow = "1s"
+# engine v2 native operators that also read the live chain's Greeks (one live snapshot per second, about 20 ms)
+signed_flow = "1s"
+fair_value_gap = "1s"
+spread_gate = "1s"
 # 1 min: minute-of-day patterns of earlier sessions
 noise_band = "1min"
 fair_straddle = "1min"

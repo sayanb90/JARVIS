@@ -135,6 +135,35 @@ def check_day(lake: Path, day: date) -> list[Check]:
     return out
 
 
+def engine_checks(store: Path, day: date) -> list[Check]:
+    """The live engine's heartbeat files (signals/engine/core.py, rewritten every timer tick): one per engine process, last written
+    during the day's session (after 09:50 UTC means it ran to the close), buckets closed at every cadence, and few late ticks."""
+    import json
+    files = sorted((Path(store) / "live").glob("engine-*.heartbeat.json"))
+    if not files:
+        return [Check("engine", "WARN", f"no heartbeat in {Path(store) / 'live'} (engine not run, or JARVIS_SIGNAL_ENGINE=runner)")]
+    out = []
+    for f in files:
+        try:
+            doc = json.loads(f.read_text())
+        except (OSError, ValueError) as exc:
+            out.append(Check("engine", "FAIL", f"{f.name}: unreadable ({exc})"))
+            continue
+        at = pd.Timestamp(doc.get("at"))
+        name = f.name.replace(".heartbeat.json", "")
+        if at.date() != day:
+            out.append(Check("engine", "FAIL", f"{name}: last heartbeat {at}, not on {day}"))
+            continue
+        status = "OK" if at.time() >= pd.Timestamp("09:50").time() else "FAIL"
+        for u, e in doc.get("engines", {}).items():
+            buckets = e.get("buckets", {})
+            late, ticks = e.get("late", 0), max(1, e.get("ticks", 0))
+            st = status if all(v > 0 for v in buckets.values()) else "FAIL"
+            st = "WARN" if st == "OK" and late / ticks > 0.001 else st
+            out.append(Check("engine", st, f"{u}: last beat {at:%H:%M:%S} UTC, buckets {buckets}, late ticks {late} of {ticks}"))
+    return out
+
+
 def latest_day(lake: Path) -> Optional[date]:
     base = Path(lake) / "bars" / "interval=1m"
     days = sorted(d.name[5:] for d in base.glob("date=*")) if base.is_dir() else []
@@ -146,12 +175,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m signals health")
     ap.add_argument("--lake", type=Path, default=LAKE_DIR)
     ap.add_argument("--date", type=date.fromisoformat)
+    ap.add_argument("--store", type=Path, default=None, help="signal store (default: the research store) for the engine heartbeat")
     a = ap.parse_args(argv)
     day = a.date or latest_day(a.lake)
     if day is None:
         print("FAIL no 1-minute bars in the lake")
         return 1
     checks = check_day(a.lake, day)
+    from signals.__main__ import default_store
+    checks += engine_checks(a.store or default_store(), day)
     print(f"signal inputs for {day}:")
     for c in checks:
         print(" ", c)

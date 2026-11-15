@@ -173,3 +173,108 @@ def test_reorder_window_puts_a_slightly_late_tick_in_its_bucket(day):
     b = pd.concat(parts + [eng.finish()], ignore_index=True)
     assert eng.late == 0
     assert _compare(a, b, ["book_pressure"]) == {}
+
+
+def dense_ticks(ticks: pd.DataFrame, copies: int = 5, seed: int = 11) -> pd.DataFrame:
+    """The synthetic day has one tick per contract a minute; add `copies` later ticks per tick inside the same minute (quotes, sizes,
+    OI and prints moved a little, some block-sized prints), so sub-minute buckets see several updates and quiet ones."""
+    rng = np.random.default_rng(seed)
+    t = ticks.copy()
+    t["fts"] = pd.to_datetime(t["fts"])
+    o = t[t["symbol"].str.startswith("NIFTY_")]
+    parts = [t]
+    for j in range(1, copies + 1):
+        c = o.copy()
+        c["fts"] = c["fts"] + pd.to_timedelta(rng.integers(1, 29, len(c)), unit="s") + pd.Timedelta(milliseconds=j)
+        step = rng.choice([-1, 0, 1], len(c)) * 0.05
+        for col in ("bid", "ask"):
+            c[col] = c[col] + step
+        c["ltp"] = np.where(rng.random(len(c)) < 0.5, c["bid"], c["ask"])
+        c.loc[rng.random(len(c)) < 0.2, "ltp"] = np.nan                      # quote-only updates
+        c["bid_qty"] = rng.integers(65, 6500, len(c))
+        c["ask_qty"] = rng.integers(65, 6500, len(c))
+        c["vol_today"] = c["vol_today"] + 65 * j
+        c["oi"] = c["oi"] + rng.integers(-300, 300, len(c))
+        c["ltq"] = np.where(rng.random(len(c)) < 0.02, 65 * 120, c["ltq"])     # block-sized prints now and then
+        parts.append(c)
+    out = pd.concat(parts, ignore_index=True)
+    out["ts"] = out["fts"]
+    return out.sort_values("fts", kind="stable").reset_index(drop=True)
+
+
+@pytest.mark.parametrize("bucket,minutes", [("1min", 12), ("10s", 6), ("1s", 2)])
+def test_native_operators_equal_the_whole_day_batch(day, bucket, minutes):
+    """On dense ticks the native operators equal the batch functions run on the whole day at once.  (The windowed adapter does not
+    always: its Lee-Ready tick rule forgets the last price change at the window edge; the native operators remember the session.)"""
+    from signals.engine.operators import NATIVE
+    hist, ticks, d = day
+    t = _cut(dense_ticks(ticks), d, minutes)
+    ids = list(NATIVE)
+    r = LiveRunner("NIFTY", trim(hist), bucket=bucket, ids=ids, tick_window=pd.Timedelta(days=1), windowed=False)
+    r.ingest(t)
+    r.watermark = r.watermark.floor(bucket) + pd.Timedelta(bucket)
+    a = r.cycle()
+    b = engine_replay("NIFTY", trim(hist), t, {s: bucket for s in ids}, step="1min")
+    assert len(a) == len(b) > 50
+    assert {"block_prints", "opening_flow", "depth_features", "signed_flow"} <= set(b["signal"])
+    if bucket != "1s":                                   # one-second buckets rarely have the previous bucket's quote
+        assert "fair_value_gap" in set(b["signal"])
+    assert _compare(a, b, ids) == {}
+
+
+def test_session_loop_closes_buckets_stores_rows_publishes_provisional_and_beats(day, tmp_path):
+    import json
+    from signals.engine.core import run, write_heartbeat
+    from signals.options.stream import read_live
+    hist, ticks, d = day
+    t = _cut(ticks, d, 6)
+    parts = iter([g for _, g in t.groupby(t["fts"].dt.floor("10s"))])
+    now = {"t": d + pd.Timedelta(hours=3, minutes=45)}
+
+    class Src:                                     # each poll: the next 10 s of ticks; the wall clock follows them by 200 ms
+        def poll(self, timeout_ms=0):
+            g = next(parts, None)
+            if g is None:
+                now["t"] += pd.Timedelta(seconds=30)
+                return pd.DataFrame()
+            now["t"] = g["fts"].max() + pd.Timedelta(milliseconds=200)
+            return g
+
+    def clock():
+        return now["t"]
+
+    class Pub:
+        sent = []
+
+        def publish(self, topic, cols, rows):
+            self.sent.append((topic, cols, rows))
+
+    eng = OperatorEngine("NIFTY", trim(hist), {"book_pressure": "10s", "pcr_full": "1min"}, d)
+    hb = tmp_path / "live" / "engine-NIFTY.heartbeat.json"
+    pub = Pub()
+    stats = run([eng], Src(), d + pd.Timedelta(hours=3, minutes=53), publisher=pub, store=tmp_path, tick_ms=1, clock=clock,
+                heartbeat=write_heartbeat(hb))
+    assert stats["rows"] > 0 and stats["provisional"] > 0
+    topics = {tp for tp, _, _ in pub.sent}
+    assert topics == {"signal", "provisional"}
+    sig = [(c, r) for tp, c, r in pub.sent if tp == "signal"]
+    assert all({"t_vendor", "t_recv", "t_emit"} <= set(c) for c, _ in sig)          # latency stamps on the bus
+    stored = read_live(tmp_path, d.date())
+    assert len(stored) and "t_emit" not in stored.columns                          # ...but not in the store
+    doc = json.loads(hb.read_text())
+    assert doc["engines"]["NIFTY"]["buckets"]["10s"] > 10
+
+
+def test_health_reads_the_engine_heartbeat(tmp_path):
+    import json
+    from signals.health import engine_checks
+    d = pd.Timestamp("2026-11-16")
+    (tmp_path / "live").mkdir()
+    f = tmp_path / "live" / "engine-NIFTY.heartbeat.json"
+    f.write_text(json.dumps({"at": "2026-11-16 09:59:58", "engines": {"NIFTY": {"buckets": {"1s": 22000, "10s": 2200}, "late": 3,
+                                                                                  "ticks": 900000}}}))
+    assert [c.status for c in engine_checks(tmp_path, d.date())] == ["OK"]
+    f.write_text(json.dumps({"at": "2026-11-16 05:10:00", "engines": {"NIFTY": {"buckets": {"1s": 100}, "late": 0, "ticks": 10}}}))
+    assert [c.status for c in engine_checks(tmp_path, d.date())] == ["FAIL"]                # stopped mid-session
+    f.unlink()
+    assert [c.status for c in engine_checks(tmp_path, d.date())] == ["WARN"]

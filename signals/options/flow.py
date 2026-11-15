@@ -71,7 +71,7 @@ def opening_flow(ctx: Context, p: dict) -> pd.DataFrame:
     m["day"] = m["minute"].dt.normalize()
     m["d_oi"] = m.groupby(["day", "symbol"])["oi"].diff().fillna(0)
     out = _tabulate(m, ["minute"]).rename(columns={"minute": "ts"})
-    out["known_at"] = out["ts"] + pd.Timedelta(minutes=1)
+    out["known_at"] = out["ts"] + ctx.bucket_td            # the bucket end (was a fixed minute: wrong below 1 min)
     return out
 
 
@@ -110,7 +110,7 @@ def trade_size_flow(ctx: Context, p: dict) -> pd.DataFrame:
     g.columns = [f"{k}_{b}" for k, b in g.columns]
     g = g.reindex(columns=[f"{k}_{b}" for k in ("opt", "fut") for b in SIZE_LABELS], fill_value=0.0)   # the same columns every time
     g = g.reset_index().rename(columns={"minute": "ts"})
-    g["known_at"] = g["ts"] + pd.Timedelta(minutes=1)
+    g["known_at"] = g["ts"] + ctx.bucket_td
     return g
 
 

@@ -253,10 +253,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     lv.add_argument("--root", type=Path, default=None)
     lv.add_argument("--underlying", default="NIFTY,BANKNIFTY")
     lv.add_argument("--until", default="10:02", help="UTC time to stop (before the 10:05 compaction)")
+    lt = sub.add_parser("latency", help="tick-to-trade latency per leg (p50 / p95 / p99) from logs/latency-<day>.jsonl")
+    lt.add_argument("day")
+    lt.add_argument("--logs", default="logs")
     fz = sub.add_parser("feasibility", help="cost of every live signal at 1 s, 10 s and 1 min on a synthetic 2,000-contract session")
     fz.add_argument("--contracts", type=int, default=2000)
     fz.add_argument("--minutes", type=int, default=30)
     fz.add_argument("--out", type=Path, default=None, help="also write the markdown report here")
+    fz.add_argument("--engine", choices=["operators", "runner"], default="operators")
     cv = sub.add_parser("coverage")
     cv.add_argument("--root", type=Path, default=None)
     hl = sub.add_parser("health", add_help=False)
@@ -278,12 +282,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
         mb = cap_memory()
         logging.getLogger("signals.engine").info("memory cap %d MB", mb)
-        res = engine.start(a.lake or LAKE_DIR, a.root or default_store(), a.underlying.split(","), a.until)
+        from signals.engine import core
+        kind = core.engine_kind()                                   # JARVIS_SIGNAL_ENGINE: operators (default) or runner
+        logging.getLogger("signals.engine").info("engine %s", kind)
+        start = core.start if kind == "operators" else engine.start
+        res = start(a.lake or LAKE_DIR, a.root or default_store(), a.underlying.split(","), a.until)
         print(json.dumps(res, default=str))
+        return 0
+    if a.cmd == "latency":
+        from trading import latency
+        rep = latency.report(Path(a.logs), a.day)
+        print(rep.to_string(index=False) if len(rep) else f"no latency records in {latency.log_path(Path(a.logs), a.day)}")
         return 0
     if a.cmd == "feasibility":
         from signals import feasibility
-        md = feasibility.to_markdown(feasibility.report(a.contracts, a.minutes))
+        md = feasibility.to_markdown(feasibility.report(a.contracts, a.minutes, engine=a.engine))
         print(md)
         if a.out:
             Path(a.out).write_text(md)
