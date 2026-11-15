@@ -279,3 +279,35 @@ def test_health_reads_the_engine_heartbeat(tmp_path):
     assert [c.status for c in engine_checks(tmp_path, d.date())] == ["FAIL"]                # stopped mid-session
     f.unlink()
     assert [c.status for c in engine_checks(tmp_path, d.date())] == ["WARN"]
+
+
+@pytest.mark.parametrize("bucket,minutes", [("1min", 20), ("10s", 6), ("1s", 2)])
+def test_native_chain_operators_equal_their_batch_functions(day, bucket, minutes):
+    """Every native chain operator against its batch function run on frames cut from the same state (the adapter path)."""
+    from signals.engine.chain_ops import CHAIN_NATIVE
+    hist, ticks, d = day
+    t = _cut(dense_ticks(ticks), d, minutes)
+    cad = {s: bucket for s in CHAIN_NATIVE}
+    a = engine_replay("NIFTY", trim(hist), t, cad, step="1min", native=())
+    b = engine_replay("NIFTY", trim(hist), t, cad, step="1min")
+    assert len(a) == len(b) > 50
+    assert set(a["signal"]) == set(b["signal"]) and len(set(b["signal"])) >= 14
+    assert _compare(a, b, list(CHAIN_NATIVE)) == {}
+
+
+def test_native_term_slope_off_expiry_day():
+    """The synthetic tick day is an expiry (no term slope rows there): the ATM-row operator against the batch on a day-out front."""
+    from signals.engine.chain_ops import ChainNatives
+    from signals.engine.surface import ATM_COLS
+    ts = pd.Timestamp("2026-03-30 05:00")
+    row = dict.fromkeys(ATM_COLS, np.nan)
+    row.update(ts=ts, expiry=pd.Timestamp("2026-03-31").date(), t=1.4 / 365, atm_iv=0.14, next_expiry=pd.Timestamp("2026-04-07").date(),
+               next_t=8.4 / 365, next_atm_iv=0.13, iv_m1=0.15, iv_p1=0.135, iv_m2=0.16, iv_p2=0.13, iv7=0.131, iv7_how="interp")
+    td = pd.Timedelta("1min").value
+    nat = ChainNatives(["term_slope", "curvature"], td, book=None)
+    got = nat.run(ts.value, None, None, row)
+    c = Context("NIFTY", {}, bucket="1min", snaps="all", cache={"atm": pd.DataFrame([row])})
+    for sid in ("term_slope", "curvature"):
+        ref = c.compute(sid).drop(columns=["underlying"])
+        g = got[sid][list(ref.columns)]
+        assert len(g) == 1 and same_frames(ref, g, ["known_at"]) == []

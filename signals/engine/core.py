@@ -32,8 +32,8 @@ import pandas as pd
 
 from signals import cadence as cadence_mod
 from signals import lookbacks, normalise
-from signals.engine import operators, surface
-from signals.engine.state import NS_MIN, Session, td_ns
+from signals.engine import chain_ops, operators, surface
+from signals.engine.state import EXPIRY_NS, NS_MIN, YEAR_NS, Session, td_ns
 from signals.framework import REGISTRY, Context, normalise_output
 from signals.live_runner import CHAIN_FREE, LiveRunner, _last_sessions, bar_volume, daily_inputs, live_signal_ids
 from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
@@ -170,6 +170,7 @@ class Group:
 
     native: tuple = ()                                 # signals computed by native operators (signals/engine/operators.py)
     natives: object = None
+    cnatives: object = None                            # native chain operators (signals/engine/chain_ops.py)
 
     def __post_init__(self):
         self.td = td_ns(self.cadence)
@@ -180,7 +181,7 @@ class Group:
                 self.windows.setdefault(lb, []).append(sid)
         self.keep_ns = (max(lbs) if lbs else pd.Timedelta(0)).value + 2 * self.td
         adapters = [s for s in self.ids if s not in self.native]
-        self.needs_chain = not set(adapters) <= CHAIN_FREE           # the bar chain, smile and ATM feed adapters only
+        self.needs_chain = not set(adapters) <= CHAIN_FREE           # chain frames for the adapters (chain natives read arrays)
         self.needs_live = self.needs_chain or bool({"signed_flow", "fair_value_gap", "spread_gate"} & set(self.native))
 
 
@@ -196,14 +197,22 @@ class OperatorEngine:
         ids = sorted(self.cadence)
         self.anchors = Anchors(underlying, history, self.day, ids, volume_slot_daily=volume_slot_daily, daily_signals=daily_signals)
         groups = cadence_mod.groups(self.cadence)
-        nat = tuple(operators.NATIVE if native is None else native)
+        nat = tuple(operators.NATIVE + chain_ops.CHAIN_NATIVE if native is None else native)
         meta = operators.contract_meta(self.anchors.contract_table)
         self.groups = {}
+        self.session = Session(underlying, history.get("contracts"), self.day, cadences=tuple(groups), r=r, rates=history.get("rates"))
         for c, sids in groups.items():
             g = Group(c, sids, native=tuple(s for s in sids if s in nat))
-            g.natives = operators.Natives(g.native, g.td, meta) if g.native else None
+            tape = [s for s in g.native if s in operators.NATIVE]
+            chain = [s for s in g.native if s in chain_ops.CHAIN_NATIVE]
+            g.natives = operators.Natives(tape, g.td, meta) if tape else None
+            g.cnatives = chain_ops.ChainNatives(chain, g.td, self.session.options, self.anchors.hist_atm, history.get("participant"),
+                                                daily=self.anchors.fixed.get("daily"),
+                                                vix_hist=self.anchors.providers(c).get("vix"),
+                                                events=history.get("events")) if chain else None
+            if g.cnatives is not None and g.cnatives.needs_live:
+                g.needs_live = True
             self.groups[c] = g
-        self.session = Session(underlying, history.get("contracts"), self.day, cadences=tuple(self.groups), r=r, rates=history.get("rates"))
         self.baselines = baselines or {}                # cadence -> signal -> baseline
         self.reorder_ns = int(reorder_ms) * 1_000_000
         self.pending = pd.DataFrame()                   # reorder buffer
@@ -369,6 +378,11 @@ class OperatorEngine:
                 if part is not None:
                     out.append(self._finish_rows(g, sid, part))
             g.timings["native"] = g.timings.get("native", 0.0) + _time.perf_counter() - n0
+        at = None
+        if g.needs_chain or g.cnatives is not None:
+            at = surface.atm_row(surface.smile_rows(self.session.options, bk.chain("bar")))
+            if at is not None:
+                g.atm.append(at)
         if g.needs_chain:
             ch, cl = bk.chain("bar").frame(self.session.options), bk.chain("live").frame(self.session.options)
             for lst, fr in ((g.chain, ch), (g.chain_live, cl)):
@@ -376,12 +390,26 @@ class OperatorEngine:
                     lst.append((b, fr))
                 while lst and lst[0][0] < b - g.keep_ns:
                     lst.pop(0)
-            rows = surface.smile_rows(self.session.options, bk.chain("bar"))
-            at = surface.atm_row(rows)
-            if at is not None:
-                g.atm.append(at)
         t1 = _time.perf_counter()
         g.timings["state"] = g.timings.get("state", 0.0) + t1 - t0
+        if g.cnatives is not None:
+            vb = self.session.bars.bar(g.cadence, VIX_SYMBOL, b)
+            if vb is not None:
+                g.cnatives.on_vix_bar(b, vb[4])                     # bar layout: [start, open, high, low, close, ...]
+            fut = self.session.bars.front_bar(g.cadence, b, self.session.day)
+            t_fut = ((pd.Timestamp(fut[1]).value + EXPIRY_NS - (b + g.td)) / YEAR_NS) if fut[1] is not None else math.nan
+            res = g.cnatives.run(b, bk.chain("bar"), bk.chain("live") if g.cnatives.needs_live else None, at, (fut[0], t_fut), g.since)
+            for sid, df in res.items():
+                part = _select(normalise_output(REGISTRY[sid][0], df, self.underlying), g.since, upto, self.day)
+                if part is not None:
+                    out.append(self._finish_rows(g, sid, part))
+            g.timings["chain_native"] = g.timings.get("chain_native", 0.0) + _time.perf_counter() - t1
+            t1 = _time.perf_counter()
+        if not g.windows:                                  # every signal of the group is native: no frames, no shared inputs
+            g.since = upto
+            g.buckets += 1
+            g.timings["total"] = g.timings.get("total", 0.0) + _time.perf_counter() - t0
+            return _concat(out)
         today = self._raw_today(g)
         shared = self._shared(g, today)
         t2 = _time.perf_counter()
@@ -403,7 +431,9 @@ class OperatorEngine:
             w["opt_1m"] = ho[pd.to_datetime(ho["ts"]) >= lo] if ho is not None and len(ho) else ho
             cw = [f for x, f in g.chain if x >= lo.value]
             lw = [f for x, f in g.chain_live if x >= lo.value]
-            aw = atm_all[atm_all["ts"] >= lo] if len(atm_all) else atm_all     # ATM rows within the lookback, like the chain
+            # today's ATM rows within the lookback, like the chain, plus the previous session's (day-over-day changes: skew d_skew)
+            today_atm = g.atm_df[g.atm_df["ts"] >= lo] if g.atm and g.atm_df is not None else pd.DataFrame()
+            aw = _cat(self.anchors.hist_atm, today_atm)
             cache = dict(self.anchors.fixed, **shared, atm=aw)
             cache["chain"] = pd.concat(cw, ignore_index=True) if cw else pd.DataFrame()
             cache["chain_live"] = pd.concat(lw, ignore_index=True) if lw else pd.DataFrame(columns=["ts"])
