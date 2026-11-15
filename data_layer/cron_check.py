@@ -39,7 +39,11 @@ class Entry:
 
 # ---------------------------------------------------------------------------------------------- parsing
 def normalise(command: str) -> str:
-    """The command without paths and log redirects, so a VPS that spells them differently still matches."""
+    """The command without paths and log redirects, so a VPS that spells them differently still matches.  The job heartbeat wrapper
+    (`jobrun run NAME --shell '...'`, SCRUM-142) is looked through, so a crontab that is not wrapped yet matches the wrapped template."""
+    w = re.match(r"^\s*(?:cd\s+\S+\s*&&\s*)?python3?\s+-m\s+data_layer\.jobrun\s+run\s+\S+\s+--shell\s+'(.*)'\s*$", command)
+    if w:
+        command = w.group(1)
     c = re.sub(r"\s*>>?\s*\S+(\s+2>&1)?", "", command)                 # log redirects
     c = re.sub(r"\bcd\s+\S+\s*&&\s*", "", c)                           # cd $JARVIS &&
     c = re.sub(r"\S*/python3?(?=\s)", "python", c)                      # .venv/bin/python, /usr/bin/python3
