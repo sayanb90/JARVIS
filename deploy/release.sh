@@ -8,7 +8,8 @@
 #   0. git pull (fast-forward only)                          stops if it fails
 #   1. pip install -r requirements.txt (adds xlrd, pypdf)    stops if it fails
 #   2. the full test suite                                   stops if any test fails: nothing on the server has changed yet
-#   3. .env: JARVIS_DEPTH5 (default fo: the 5-level book on the F&O feed), JARVIS_EXPIRED_STRIKES (default 10), JARVIS_LIVE_SIGNALS=1
+#   3. .env: JARVIS_DEPTH5 (default all: the 5-level book stored for futures and options and for equities; owner decision 15 Nov
+#      2026; DEPTH5=fo for F&O only), JARVIS_EXPIRED_STRIKES (default 10), JARVIS_LIVE_SIGNALS=1
 #      (order-book signals in the feed), JARVIS_TICK_BUS=1 (feeds publish ticks to the in-memory bus; cadences are per signal in
 #      signals/cadence.toml) and JARVIS_SIGNAL_ENGINE=operators (engine v2; "runner" falls back to the first engine).  It never sets
 #      JARVIS_LIVE_ORDERS: real orders stay off until the owner sets it by hand.  A backup is made
@@ -25,7 +26,7 @@ cd "$(dirname "$0")/.." || exit 1
 DAY="$(date -u +%F)"
 TAG="${DAY//-/}"
 PY="${PY:-.venv/bin/python}"
-DEPTH5="${DEPTH5:-fo}"
+DEPTH5="${DEPTH5:-all}"
 STRIKES="${STRIKES:-10}"
 mkdir -p logs
 LOG="logs/release-${TAG}.log"
