@@ -217,6 +217,21 @@ def test_expired_pulls_the_band_around_the_money_and_the_future(lake_dir):
     assert len(fake.calls) - n == 4                                # a second run only re-reads the lists: expiries, index, options, future
 
 
+def test_widening_the_strike_band_fetches_only_the_new_strikes(lake_dir):
+    """SCRUM-194: the band is configurable (--strikes / JARVIS_EXPIRED_STRIKES) and widening it later only adds the outer strikes."""
+    fake = expired_world()
+    bf.run_expired(fetcher(fake), ["NIFTY"], date(2024, 11, 25), date(2024, 11, 30), state(lake_dir), lake_dir, strikes=2, window_days=7)
+    narrow = pd.read_parquet(lake_dir / "instruments" / "fo_expired.parquet")
+    narrow_opts = set(narrow[narrow.instrument_type != "FUT"].symbol)
+    before = [p for p, _ in fake.calls if "/expired-instruments/historical-candle/" in p]
+    bf.run_expired(fetcher(fake), ["NIFTY"], date(2024, 11, 25), date(2024, 11, 30), state(lake_dir), lake_dir, strikes=5, window_days=7)
+    wide = pd.read_parquet(lake_dir / "instruments" / "fo_expired.parquet")
+    wide_opts = set(wide[wide.instrument_type != "FUT"].symbol)
+    assert narrow_opts < wide_opts and len(wide_opts) == 17 * 2
+    after = [p for p, _ in fake.calls if "/expired-instruments/historical-candle/" in p][len(before):]
+    assert len(after) == len(wide_opts - narrow_opts)                  # one candle call per new contract, none for those already stored
+
+
 def test_expired_dry_run_reads_lists_only_and_stores_nothing(lake_dir):
     fake = expired_world()
     st = bf.run_expired(fetcher(fake), ["NIFTY"], date(2024, 11, 25), date(2024, 11, 30), state(lake_dir), lake_dir, window_days=7, dry_run=True)

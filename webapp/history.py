@@ -26,6 +26,7 @@ from . import markets
 
 INSTRUMENT_RE = re.compile(r"^[A-Za-z0-9&._: -]{1,48}$")
 INDEX_PREFIX = "NSE_INDEX:"
+INDEX_PREFIXES = (INDEX_PREFIX, "BSE_INDEX:")      # SENSEX (SCRUM-195)
 TFS = ("1d", "1m", "5m", "15m", "60m")
 MINUTES = {"1m": 1, "5m": 5, "15m": 15, "60m": 60}
 MAX_SPAN_DAYS = {"1m": 30, "5m": 90, "15m": 180, "60m": 730}           # a longer request is clipped to this many calendar days
@@ -113,9 +114,9 @@ def instruments(lake: Path) -> list[dict]:
     for sym, rec in found.items():
         rec.setdefault("minute", False)
         name, sector = names.get(sym, ("", ""))
-        if sym.startswith(INDEX_PREFIX):
-            name, sector = sym[len(INDEX_PREFIX):], "Index"
-        kind = "index" if sym.startswith(INDEX_PREFIX) else "stock"
+        if sym.startswith(INDEX_PREFIXES):
+            name, sector = sym.split(":", 1)[1], "Index"
+        kind = "index" if sym.startswith(INDEX_PREFIXES) else "stock"
         out.append({**rec, "name": name, "sector": sector, "kind": kind, "group": "Indices" if kind == "index" else (sector or "Other")})
     return sorted(out, key=lambda r: (r["kind"] != "index", r["market"] != "IN", r["market"], r["symbol"]))
 
@@ -134,7 +135,7 @@ def _market_of(con, lake: Path, symbol: str) -> Optional[str]:
         r = con.execute(f"SELECT market FROM read_parquet('{glob}', hive_partitioning=false) WHERE symbol = ? LIMIT 1", [symbol]).fetchone()
         if r:
             return r[0]
-    return "IN" if symbol.startswith(INDEX_PREFIX) else None
+    return "IN" if symbol.startswith(INDEX_PREFIXES) else None
 
 
 def _parse_day(text: Optional[str], what: str) -> Optional[date]:
@@ -156,7 +157,7 @@ def get_bars(lake: Path, symbol: str, tf: str = "1d", start: Optional[str] = Non
     if s0 and e0 and s0 > e0:
         raise HistoryError("start is after end")
     con = _con()
-    is_index = symbol.startswith(INDEX_PREFIX)
+    is_index = symbol.startswith(INDEX_PREFIXES)
     clipped = False
     days = _bar_days(lake)
     if tf == "1d" and not is_index:

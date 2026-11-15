@@ -439,7 +439,7 @@ def status(lake_dir: Path | None = None) -> dict:
 def universe_symbols(markets: Optional[Iterable[str]] = None) -> dict[str, str]:
     from .universe_files import read_universe
     out: dict[str, str] = {}
-    for m in markets or lake_mod.MARKETS:
+    for m in markets or [m for m in lake_mod.MARKETS if m not in lake_mod.NO_FUNDAMENTALS]:
         for r in read_universe(m):
             out.setdefault(r["symbol"], m)
     return out

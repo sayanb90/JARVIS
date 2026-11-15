@@ -20,13 +20,15 @@
 #   trial-spot     3 stocks and the indices, last 40 days, from Upstox: proves the candle endpoint and the storage before the long run
 #   trial-expired  one expired NIFTY expiry from Upstox (needs the token, and Upstox Plus): proves the shapes of the expired-contract API
 #   spot           1-minute candles from 2022-01-01 for the 500 stocks, Nifty 50, Nifty Bank, India VIX and the other index keys (Upstox)
-#   expired        1-minute candles of expired NIFTY and BANKNIFTY options (5 strikes either side of the money) and futures (Upstox Plus)
+#   expired        1-minute candles of expired NIFTY and BANKNIFTY options (STRIKES either side of the money, default 5) and futures (Upstox Plus)
 #
 # Timing: start after 10:30 UTC (the feeds compact at 10:05) and the script stops long stages at STOP_BY (default 21:30 UTC), before the
 # 22:00 UTC cron jobs.  A long stage that is cut off is marked "partial": run the script again the next day.  It refuses to start inside
 # 21:30-10:30 UTC unless FORCE=1.  Upstox REST calls use BUDGET calls per 30 minutes (default 1500 of the 2000 allowed), leaving room for the
 # 12:50 UTC fundamentals job that shares the quota.  Each stage gets the time left until STOP_BY at the moment it starts, so a late stage cannot run past it.
 #
+# Strike band of the expired options (SCRUM-194): STRIKES (default 5 either side of the money's range) and WINDOW_DAYS (21 days before
+# expiry).  Widen in steps (STRIKES=10, then 15): contracts already stored are skipped, so a rerun fetches only the new strikes.
 # Environment: PY (default .venv/bin/python)  DAILY_YEARS (20)  STOP_BY (21:30)  BUDGET (1500)  FROM_UPSTOX (2022-01-01)  TO_UPSTOX (2026-11-02)  MIN_FREE_GB (40)  FORCE
 # Exit code: 0 everything done, 75 something partial (run again), 1 something failed.  Nothing is deleted.  Logs: logs/historical-run-<day>.log.
 set -u
@@ -36,7 +38,9 @@ DAILY_YEARS="${DAILY_YEARS:-20}"
 STOP_BY="${STOP_BY:-21:30}"
 BUDGET="${BUDGET:-1500}"
 FROM_UPSTOX="${FROM_UPSTOX:-2022-01-01}"
-TO_UPSTOX="${TO_UPSTOX:-2026-11-02}"           # the live feed has recorded India since 2026-11-03: REST candles must not replace those bars
+TO_UPSTOX="${TO_UPSTOX:-2026-11-02}"
+STRIKES="${STRIKES:-${JARVIS_EXPIRED_STRIKES:-5}}"
+WINDOW_DAYS="${WINDOW_DAYS:-${JARVIS_EXPIRED_WINDOW_DAYS:-21}}"           # the live feed has recorded India since 2026-11-03: REST candles must not replace those bars
 MIN_FREE_GB="${MIN_FREE_GB:-40}"
 STATE="logs/historical-run.state"
 ALL_STAGES="universe daily 1m fx fundamentals trial-spot trial-expired spot expired"
@@ -156,7 +160,7 @@ st_expired() {
     [ "$APPLY" = 0 ] || [ "$(state_of trial-expired)" = ok ] || { echo "trial-expired is not done (it needs the Upstox token and Upstox Plus): skipping"; return 1; }
     local limit; limit=$(limit_min)
     [ "$limit" -ge 1 ] || { echo "no time left before $STOP_BY UTC: run again tomorrow"; return 75; }
-    run "$PY" -m data_layer.upstox.backfill expired --from "$FROM_UPSTOX" --budget-30min "$BUDGET" --max-minutes "$limit"
+    run "$PY" -m data_layer.upstox.backfill expired --from "$FROM_UPSTOX" --strikes "$STRIKES" --window-days "$WINDOW_DAYS" --budget-30min "$BUDGET" --max-minutes "$limit"
 }
 
 PARTIAL=0; FAILED=0

@@ -19,6 +19,7 @@
       <button role="tab" id="tab-fo" data-tab="fo" aria-selected="false">Derivatives</button>
       <button role="tab" id="tab-candles" data-tab="candles" aria-selected="false">Session</button>
       <button role="tab" id="tab-history" data-tab="history" aria-selected="false">History</button>
+      <button role="tab" id="tab-signals" data-tab="signals" aria-selected="false">Signals</button>
       <button role="tab" id="tab-data" data-tab="data" aria-selected="false">Data</button>
     </nav>
     <div class="spacer"></div>
@@ -299,6 +300,28 @@
       <div class="panel"><header><h3 id="hv-title">Most traded</h3><span class="hint muted" id="hv-hint"></span></header><div class="body"><div id="hv-chart" class="plot" role="img" aria-label="The most traded tickers"></div><p class="muted" id="hv-msg" hidden></p></div></div>
       <div class="panel" style="margin-top:14px"><div class="table-wrap"><table id="hv-table" class="clickable"></table></div></div>
       <p class="note" id="hv-note"></p>
+    </div>
+  </section>
+
+  <!-- ===================== Signals (SCRUM-199) ===================== -->
+  <section id="view-signals" class="view" hidden>
+    <div class="page-head">
+      <div><h1>Signals</h1><p class="sub" id="sg-sub">Live values each bucket, beside the daily signals from the last close.</p></div>
+      <label class="field"><span>Underlying</span><select id="sg-underlying"><option>NIFTY</option><option>BANKNIFTY</option><option>SENSEX</option></select></label>
+    </div>
+    <div id="sg-cards" class="kpis"></div>
+    <nav class="subtabs" role="tablist" aria-label="Signal views" data-tab="signals">
+      <button role="tab" data-sub="live">Live</button>
+      <button role="tab" data-sub="daily">Daily</button>
+    </nav>
+    <div class="subview stack" data-sub="live">
+      <div class="panel"><header><h3>Latest bucket<span class="hint">z: against the same time of day in the last 20 sessions</span></h3></header>
+        <div class="table-wrap"><table id="sg-live"></table></div></div>
+      <p class="note" id="sg-note"></p>
+    </div>
+    <div class="subview stack" data-sub="daily" hidden>
+      <div class="panel"><header><h3>Daily signals<span class="hint">known at the last close</span></h3></header>
+        <div class="table-wrap"><table id="sg-daily"></table></div></div>
     </div>
   </section>
 

@@ -5,6 +5,8 @@ The universe files: which symbols the collectors work on.
   data/universe.local.csv    git-ignored, written by the admin upload page; when present it replaces universe.csv, so a `git pull` on the
                              server never conflicts with it
   data/universe_global.csv   git-ignored, built by `python -m data_layer.index_universe build`: the index constituents of every market but India
+  data/global_cues.csv       tracked: the "global cues" group (SCRUM-188) -- US index futures, VIX, the rupee, crude and the S&P 500 --
+                             under the market code GLOBAL, so the Yahoo daily and 1-minute jobs (and their gap healing) collect them
 
 `read_universe(market)` gives India from the active file and every other market from the global file when it covers that market, else from
 the active file's placeholder rows.
@@ -22,6 +24,7 @@ log = logging.getLogger(__name__)
 
 DATA_DIR = ROOT / "data"
 UNIVERSE_CSV = DATA_DIR / "universe.csv"
+CUES_MARKET = "GLOBAL"
 
 # the built-in India list used only when no universe file exists at all
 NIFTY_50: list[str] = [
@@ -68,6 +71,34 @@ def read_universe(market: str | None = None) -> list[dict]:
     Returns list of dicts with keys: symbol, name, market, exchange, isin, ...
     Falls back to NIFTY_50 if there is no universe file.
     """
+    if market == CUES_MARKET:
+        return cue_rows()
+    if market is None:                                        # every market, the cues once (an uploaded local file may already hold them)
+        rows = _read_universe_markets(None)
+        seen = {r.get("symbol") for r in rows}
+        return rows + [r for r in cue_rows() if r["symbol"] not in seen]
+    return _read_universe_markets(market)
+
+
+def global_cues_csv() -> Path:
+    return UNIVERSE_CSV.with_name("global_cues.csv")
+
+
+def cue_rows() -> list[dict]:
+    """The global cues (data/global_cues.csv, next to universe.csv): market GLOBAL."""
+    path = global_cues_csv()
+    if not path.exists():
+        return []
+    with path.open(newline="", encoding="utf-8") as f:
+        return [{k: (v or "").strip() for k, v in rec.items()} | {"market": CUES_MARKET}
+                for rec in csv.DictReader(r for r in f if not r.startswith("#")) if (rec.get("symbol") or "").strip()]
+
+
+def cue_symbols() -> set[str]:
+    return {r["symbol"] for r in cue_rows()}
+
+
+def _read_universe_markets(market: str | None) -> list[dict]:
     glob = _global_rows()
     if not glob or market == "IN":
         return _read_active_universe(market)

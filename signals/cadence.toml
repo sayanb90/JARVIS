@@ -1,0 +1,33 @@
+# Live signal cadence (owner decision 14 Nov 2026): 1s, 10s or 1min per signal, chosen from measurements
+# (python -m signals feasibility, synthetic 2,000-contract session; runbook sections 19.8, 19.9).  Engine v2, per bucket with every
+# live signal at that cadence (15 Nov 2026): 1 min 0.70 s (1 % of the cadence), 10 s 0.43 s (4 %), 1 s 0.38 s (38 % of a core);
+# the book-and-tape operators alone about 25 ms per 1 s bucket.  The first engine took 1.6 s, 1.35 s and 3.6 s.
+#   1s   (the default) book and tape, and every chain signal (owner decision 15 Nov 2026: 4-core VPS, one engine process per
+#        underlying).  With the native chain operators (signals/engine/chain_ops.py) a 1 s bucket of all 27 sub-minute signals takes
+#        about 0.10 s (10 % of a core per underlying; 0.38 s with the chain signals as adapters).  A group that keeps overrunning
+#        drops to 10 s by itself
+#   1min signals built on minute-of-day patterns of earlier sessions (their minimum, signals/cadence.py MIN_CADENCE)
+# A signal not listed runs at `default`.  JARVIS_SIGNAL_CADENCE in .env overrides `default` (not the lines below).  The engine refuses
+# to start on an invalid file, and moves a group that keeps overrunning to the next coarser cadence for the rest of the session.
+default = "1s"
+
+[signal]
+# 1 s: the book and the tape (fut_ofi and mlofi_future are also computed tick by tick inside the feed when JARVIS_LIVE_SIGNALS=1)
+fut_ofi = "1s"
+mlofi_future = "1s"
+book_pressure = "1s"
+depth_features = "1s"
+illiquidity = "1s"
+trade_size_flow = "1s"
+block_prints = "1s"
+opening_flow = "1s"
+# engine v2 native operators that also read the live chain's Greeks (one live snapshot per second, about 20 ms)
+signed_flow = "1s"
+fair_value_gap = "1s"
+spread_gate = "1s"
+# 1 min: minute-of-day patterns of earlier sessions
+noise_band = "1min"
+fair_straddle = "1min"
+vrp_intraday = "1min"
+volume_burst = "1min"
+residual_iv = "1min"

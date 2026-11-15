@@ -43,7 +43,9 @@ LAKE_DIR = Path(os.getenv("JARVIS_LAKE", ROOT / "lake"))
 
 # Daily OHLC universe.  IN = NSE (Upstox feed); US = S&P 500; UK = London listings (FTSE 100 and the UK part of STOXX 600);
 # EU = the rest of STOXX 600; JP = Nikkei 225; KR = KOSPI 200; TW = Taiwan 50; SG = STI; CN = CSI 300; HK = Hang Seng.
-MARKETS = ("IN", "US", "UK", "EU", "JP", "KR", "TW", "SG", "CN", "HK")
+# GLOBAL = the global cues (data/global_cues.csv: US index futures, VIX, USD/INR, crude, S&P 500; SCRUM-188), collected like a market.
+MARKETS = ("IN", "US", "UK", "EU", "JP", "KR", "TW", "SG", "CN", "HK", "GLOBAL")
+NO_FUNDAMENTALS = ("GLOBAL",)             # futures, indices and currencies have no company statements
 BARS_MARKETS = MARKETS                    # markets whose intraday bars can be collected from Yahoo (India first: verify.py reads [0])
 BARS_YF_DEFAULT = tuple(m for m in MARKETS if m != "IN")   # what `--market ALL` collects: India is recorded tick by tick by the Upstox feed
 

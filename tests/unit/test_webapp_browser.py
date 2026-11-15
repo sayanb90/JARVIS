@@ -26,8 +26,10 @@ def node_path():
 
 
 @pytest.mark.browser
-def test_viewer_in_a_real_browser(demo_lake_fo, monkeypatch):
+def test_viewer_in_a_real_browser(demo_lake_fo, monkeypatch, tmp_path):
     monkeypatch.setenv("ADMIN_USER", "admin"); monkeypatch.setenv("ADMIN_PASSWORD", "smoke-pass")
+    from tests.unit.test_webapp_signals import fill_store
+    monkeypatch.setenv("JARVIS_SIGNAL_STORE", str(fill_store(tmp_path / "store")))
     found = node_path()
     if not found:
         pytest.skip("Node + Playwright with Chromium not installed")

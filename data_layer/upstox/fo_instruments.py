@@ -45,6 +45,20 @@ log = logging.getLogger(__name__)
 
 MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 SEGMENT = "NSE_FO"
+# BSE derivatives (SENSEX options, SCRUM-195) are off unless JARVIS_FO_EXCHANGES includes BSE ("NSE,BSE"); BSE expiries fall on Thursdays
+EXCHANGE_URLS = {"NSE": MASTER_URL, "BSE": "https://assets.upstox.com/market-quote/instruments/exchange/BSE.json.gz"}
+EXCHANGE_SEGMENTS = {"NSE": "NSE_FO", "BSE": "BSE_FO"}
+
+
+def fo_exchanges(env=None) -> list[str]:
+    """Exchanges whose futures and options are imported: JARVIS_FO_EXCHANGES (default NSE)."""
+    raw = ((os.environ if env is None else env).get("JARVIS_FO_EXCHANGES") or "NSE").upper()
+    out = [x.strip() for x in raw.split(",") if x.strip() in EXCHANGE_SEGMENTS]
+    return out or ["NSE"]
+
+
+def fo_segments(env=None) -> set[str]:
+    return {EXCHANGE_SEGMENTS[x] for x in fo_exchanges(env)}
 FO_TYPES = ("FUT", "CE", "PE")
 IST = timezone(timedelta(hours=5, minutes=30))
 COLUMNS = ["instrument_key", "symbol", "underlying", "underlying_key", "instrument_type", "expiry", "strike",
@@ -79,11 +93,13 @@ def contract_symbol(rec: dict, underlying: str, itype: str, expiry: date, strike
     return f"{underlying}_{tail}_{expiry:%d_%b_%y}".upper()
 
 
-def parse_master(records: Iterable[dict]) -> pd.DataFrame:
-    """NSE instrument records -> one row per futures/options contract (see COLUMNS)."""
+def parse_master(records: Iterable[dict], segments: set[str] | None = None) -> pd.DataFrame:
+    """Instrument records -> one row per futures/options contract (see COLUMNS), for the F&O segments asked for (default NSE_FO, plus
+    BSE_FO when JARVIS_FO_EXCHANGES includes BSE)."""
+    segments = segments or fo_segments()
     rows, dropped = [], 0
     for r in records:
-        if r.get("segment") != SEGMENT or r.get("instrument_type") not in FO_TYPES:
+        if r.get("segment") not in segments or r.get("instrument_type") not in FO_TYPES:
             continue
         key, exp = r.get("instrument_key"), expiry_date(r.get("expiry"))
         under = (r.get("underlying_symbol") or r.get("asset_symbol") or r.get("name") or "").strip()
@@ -483,11 +499,15 @@ def main(argv: list[str] | None = None) -> None:
 
     if a.cmd == "import":
         path = a.file
+        records = []
         if a.download:
             path = download(lake_mod.DATA_DIR / "NSE.json.gz")
+            for ex in fo_exchanges():
+                if ex != "NSE":                                  # the BSE file adds SENSEX derivatives (SCRUM-195)
+                    records += read_records(download(lake_mod.DATA_DIR / f"{ex}.json.gz", EXCHANGE_URLS[ex]))
         if not path:
             raise SystemExit("give --file <NSE.json[.gz]> or --download")
-        records = read_records(path)
+        records = read_records(path) + records
         eq = parse_equities(records)
         if not eq.empty:
             save_eq_table(eq)

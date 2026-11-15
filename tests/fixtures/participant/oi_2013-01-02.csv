@@ -1,0 +1,7 @@
+"Participant wise Open Interest (no. of contracts) in Equity Derivatives as on January 02, 2013",,,,,,,,,,,,,,
+Client Type,Future Index Long,Future Index Short,Future Stock Long,Future Stock Short,Option Index Call Long,Option Index Put Long,Option Index Call Short,Option Index Put Short,Option Stock Call Long,Option Stock Put Long,Option Stock Call Short,Option Stock Put Short,Total Long Contracts,Total Short Contracts
+Client,165040,291324,810885,160911,408492,366817,608629,714441,103579,51354,74755,53881,1906167,1903941
+DII,5386,10684,11291,12930,152162,3146,0,0,0,0,0,0,171985,23614
+FII,219369,39172,154405,815397,328676,564654,278822,100574,15141,10611,18195,7114,1292856,1259274
+Pro,46607,95222,151211,138554,255085,188905,256964,308507,25208,24015,50978,24985,691031,875210
+TOTAL,436402,436402,1127792,1127792,1144415,1123522,1144415,1123522,143928,85980,143928,85980,4062039,4062039

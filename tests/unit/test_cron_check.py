@@ -15,7 +15,7 @@ MON = datetime(2026, 11, 2, 4, 0)                 # Monday 2026-11-02, 04:00 UTC
 def test_the_tracked_template_holds_the_production_and_fundamentals_jobs():
     keys = " ".join(e.key for e in cc.parse_crontab(TEMPLATE_TEXT))
     for part in ("fo_instruments import --download", "fo_instruments select --watchlist data/fo_watchlist.csv",
-                 "data_layer.upstox.feed --once --segment fo", "fundamentals run --set daily", "fundamentals run --set full --max-age-days 20"):
+                 "data_layer.upstox.feed --once --segment fo --shard 1/2", "data_layer.upstox.feed --once --segment fo --shard 2/2", "fundamentals run --set daily", "fundamentals run --set full --max-age-days 20"):
         assert part in keys, part
 
 

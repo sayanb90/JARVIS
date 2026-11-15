@@ -66,7 +66,7 @@ class Table:
     name: str
     title: str
     about: str
-    kind: str                  # days: lake/<dir>/date=YYYY-MM-DD/*.parquet | file: one parquet | years: ohlc | frame: CSV | derived | union: several vendors' files
+    kind: str                  # days: lake/<dir>/date=YYYY-MM-DD/*.parquet | file: one parquet | years: lake/<dir>/year=YYYY/*.parquet (ohlc: ohlc.parquet) | frame: CSV | derived | union: several vendors' files
     location: str = ""         # relative to the lake (days, file, years) or a loader key (frame)
     time_col: str | None = None
     width_s: int = 0           # derived bars width
@@ -103,12 +103,36 @@ CATALOG = [
           "file", "yf_fundamentals/profile.parquet", vendor="Yahoo"),
     Table("reference", "corporate_actions", "Dividends and splits", "Corporate actions per symbol and date: kind (dividend or split) and value.",
           "file", "yf_fundamentals/actions.parquet", vendor="Yahoo"),
+    Table("reference", "index_weights", "Index weights", "Members of the NSE option indices and their weights, as dated snapshots: official top ten and an approximate full list.",
+          "file", "reference/index_weights.parquet", "date", vendor="NSE"),
+    Table("reference", "rates", "Money-market rates", "Policy repo rate and corridor, call money range and T-bill cut-offs each day; overnight MIBOR when loaded from a file.",
+          "file", "reference/rates.parquet", "date", vendor="RBI · FBIL"),
     Table("reference", "fx_rates", "FX rates", "Daily closes of the currency pairs, as US dollars per unit of each currency, used to convert statements into the price's currency.",
           "file", "fx/rates.parquet", vendor="Yahoo"),
     Table("market", "ticks", "Ticks", "Every update from the live feed: last price, cumulative volume, best bid/ask and sizes, open interest.", "days", "ticks", "ts", vendor="Upstox"),
     Table("market", "candles_1m", "1-minute candles", "Stored one-minute candles: India from the exchange candle service, other markets from the daily bars job.", "days", "bars/interval=1m", "ts",
           vendor="Upstox · Yahoo", vendor_sql="CASE WHEN market = 'IN' THEN 'Upstox' ELSE 'Yahoo' END"),
     Table("market", "candles_5m", "5-minute candles", "Regular-session candles, one folder per UTC day, kept for about 60 days.", "days", "bars/interval=5m", "ts", vendor="Yahoo"),
+    Table("market", "participant_oi", "Participant open interest", "Contracts held long and short at the close by Client, DII, FII and Pro, per instrument type (index options for all indices together).",
+          "file", "positioning/participant_oi.parquet", "date", vendor="NSE"),
+    Table("market", "participant_volume", "Participant volume", "Contracts traded long and short in the day by Client, DII, FII and Pro, per instrument type.",
+          "file", "positioning/participant_volume.parquet", "date", vendor="NSE"),
+    Table("market", "fii_derivatives", "FII derivatives", "FII buying, selling and open interest each day: contracts and crores for index and stock futures and options, by index from 2023.",
+          "file", "positioning/fii_derivatives.parquet", "date", vendor="NSE"),
+    Table("market", "delivery", "Delivery", "Every NSE equity's daily OHLC, volume, trades and the quantity and share delivered (not squared off), from October 2019.",
+          "file", "market_files/delivery.parquet", "date", vendor="NSE"),
+    Table("market", "ban_list", "F&O ban list", "Stocks in the F&O ban period each trade date (open interest above 95 % of the market-wide limit).",
+          "file", "market_files/ban_list.parquet", "date", vendor="NSE"),
+    Table("market", "combined_oi", "Combined OI and MWPL", "Each F&O stock's combined open interest against its market-wide position limit, and the limit for the next day.",
+          "file", "market_files/combined_oi.parquet", "date", vendor="NSE"),
+    Table("market", "short_selling", "Short selling", "Shares sold short per stock and trade date, as disclosed by NSE (the report date is a few days later).",
+          "file", "market_files/short_selling.parquet", "date", vendor="NSE"),
+    Table("market", "bulk_deals", "Bulk deals", "Trades above 0.5 % of a company's shares: client, side, quantity and price.",
+          "file", "market_files/bulk_deals.parquet", "date", vendor="NSE"),
+    Table("market", "block_deals", "Block deals", "Block-window trades: client, side, quantity and price.",
+          "file", "market_files/block_deals.parquet", "date", vendor="NSE"),
+    Table("market", "eod_fo", "F&O end of day", "Every futures and options contract each trading day from 2015: OHLC, settlement, OI, contracts traded, turnover.",
+          "years", "eod_fo", "date", vendor="NSE"),
     Table("market", "bars_1s_legacy", "1-second bars (legacy)", "Bars written by the feed before it stored raw ticks.", "days", "bars/interval=1s", "ts", vendor="Upstox"),
     Table("aggregates", "ohlc_daily", "Daily OHLC", "Daily bars for every market, adjusted for splits and dividends by the vendor.", "years", "ohlc", "date", vendor="Yahoo"),
     Table("aggregates", "bars_1s", "1-second bars", "Derived from the day's ticks on read.", "derived", "ticks", "ts", 1, vendor="Upstox"),
@@ -189,7 +213,7 @@ class Catalog:
             p = self.lake / t.location
             return [p] if p.exists() else []
         if t.kind == "years":
-            return sorted((self.lake / t.location).glob("year=*/ohlc.parquet"))
+            return sorted((self.lake / t.location).glob("year=*/ohlc.parquet" if t.location == "ohlc" else "year=*/*.parquet"))
         if t.kind == "union":
             return [self.lake / loc for _, loc, _ in t.parts if (self.lake / loc).exists()]
         return []

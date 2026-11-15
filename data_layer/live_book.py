@@ -27,10 +27,15 @@ DEFAULT_PORTS = {"eq": 8771, "fo": 8772}
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9&_.\-]{1,64}$")
 
 
-def port_for(segment: str, env=None) -> int:
+SHARD_PORT_STEP = 10           # an F&O feed split over several connections (SCRUM-194): shard i serves on the segment's port + 10 x (i - 1)
+MAX_SHARDS = 4
+
+
+def port_for(segment: str, env=None, shard: int = 1) -> int:
     env = os.environ if env is None else env
     raw = (env.get(f"JARVIS_BOOK_PORT_{segment.upper()}") or "").strip()
-    return int(raw) if raw else DEFAULT_PORTS[segment]
+    base = int(raw) if raw else DEFAULT_PORTS[segment]
+    return base + SHARD_PORT_STEP * (shard - 1) if base else 0
 
 
 def _now() -> datetime:
@@ -104,7 +109,8 @@ def fetch(symbol: str, ports: Optional[list[int]] = None, timeout: float = 1.0) 
     """The live book from whichever collector holds the symbol, or None (feed not running, or symbol not subscribed)."""
     if not SYMBOL_RE.match(symbol):
         return None
-    for port in ports if ports is not None else [port_for("eq"), port_for("fo")]:
+    default = [port_for("eq")] + [port_for("fo", shard=i) for i in range(1, MAX_SHARDS + 1)]
+    for port in ports if ports is not None else default:
         if not port:
             continue
         try:
