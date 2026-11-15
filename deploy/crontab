@@ -67,10 +67,15 @@ JARVIS=/home/jarvis/JARVIS
 # Live signal engine (SCRUM-197, SCRUM-201): every live signal at its cadence from signals/cadence.toml (1s, 10s or 1min), from the
 # in-memory tick bus (JARVIS_TICK_BUS=1, published by the feeds) or the tick files when the bus is off; rows on the "signals" bus and in
 # <store>/live/date=D/; stops at 10:02 before the 10:05 compaction.  Low priority and a memory cap (JARVIS_SIGNAL_LIVE_MAX_MB).
-# One engine process per underlying: at the configured cadences one underlying uses about two thirds of a core, and Python runs a
-# process on one core at a time (feasibility, 14 Nov 2026).
+# One engine process per underlying (Python runs a process on one core at a time).  Engine v2 (JARVIS_SIGNAL_ENGINE=operators, the
+# default; =runner for the first engine): per-tick chain state, numpy smile and ATM, native book-and-tape operators, the chain signals
+# on frames cut from the state; final rows at each bucket close, provisional book-and-tape values every JARVIS_SIGNAL_TICK_MS (250);
+# heartbeat in <store>/live/engine-<U>.heartbeat.json, checked by the 11:40 health run.
 44 3 * * 1-5   cd $JARVIS && nice -n 10 python -m signals live --underlying NIFTY >> logs/signals-live-nifty.log 2>&1
 44 3 * * 1-5   cd $JARVIS && nice -n 10 python -m signals live --underlying BANKNIFTY >> logs/signals-live-banknifty.log 2>&1
+# Paper trader (SCRUM-154): the example strategy on the signal and tick bus, paper fills only (it has no real-order path); orders,
+# fills and P&L in logs/paper-<day>.jsonl, one latency record per order in logs/latency-<day>.jsonl (python -m signals latency DAY).
+45 3 * * 1-5   cd $JARVIS && nice -n 10 python -m trading paper --underlying NIFTY --until 10:00 >> logs/paper-nifty.log 2>&1
 40 11 * * 1-5  cd $JARVIS && python -m signals health >> logs/signals-health.log 2>&1
 15 12 * * 1-5  cd $JARVIS && nice -n 19 ionice -c3 python -m signals nightly >> logs/signals-nightly.log 2>&1
 # Weekly per-signal coverage report (SCRUM-190): rows, first and last day, missing days and sample per era, to <store>/reports/.

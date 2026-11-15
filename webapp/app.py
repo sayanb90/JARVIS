@@ -32,7 +32,7 @@ import os
 import re
 import secrets
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -291,7 +291,27 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             except ValueError:
                 raise HTTPException(400, "bad date")
         store = Path(os.getenv("JARVIS_SIGNAL_STORE") or "/srv/jarvis-research/store")
-        return JSONResponse(_json_safe(signals_view.summary(store, underlying, day)))
+        out = signals_view.summary(store, underlying, day)
+        if day is None or day == datetime.utcnow().date():
+            live = _signal_bus()
+            if live is not None:                          # engine v2 on the bus: the forming bucket, not only the stored rows
+                out = live.overlay(out)
+        return JSONResponse(_json_safe(out))
+
+    bus_state: dict = {}
+
+    def _signal_bus():
+        """One bus subscriber for the viewer's lifetime, only when the tick bus is on (JARVIS_TICK_BUS=1)."""
+        from data_layer import bus
+        if not bus.bus_enabled():
+            return None
+        if "sub" not in bus_state:
+            from . import signals_view
+            try:
+                bus_state["sub"] = signals_view.BusLatest()
+            except Exception:                                 # noqa: BLE001 -- the tab still works from the store
+                bus_state["sub"] = None
+        return bus_state["sub"]
 
     cov_cache: dict[str, tuple[float, object]] = {}
 

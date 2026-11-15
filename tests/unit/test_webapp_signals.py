@@ -56,3 +56,23 @@ def test_api_reads_the_store_and_validates(tmp_path, monkeypatch):
     assert sorted(p.name for p in (tmp_path / "store").rglob("*")) == before             # read only
     empty = c.get("/api/signals/live", params={"underlying": "BANKNIFTY"}).json()
     assert empty["signals"] == [] and empty["newest"] is None
+
+
+def test_bus_overlay_shows_the_forming_bucket(tmp_path):
+    import pandas as pd
+    from data_layer import bus
+    from webapp.signals_view import BusLatest
+    env = {"JARVIS_BUS_DIR": str(tmp_path / "bus")}
+    b = BusLatest(names=["signals-NIFTY"], env=env)
+    try:
+        ka = pd.Timestamp("2026-11-16 04:00:10")
+        b.ingest("provisional", {"cols": ["signal", "underlying", "bucket", "known_at", "qi", "symbol", "t_emit"],
+                                 "rows": [["book_pressure", "NIFTY", "1s", ka.value, 0.25, "NIFTY_FUT_24_NOV_26", 1],
+                                          ["book_pressure", "NIFTY", "1s", ka.value, 0.9, "NIFTY_24000_CE_17_NOV_26", 1]]})
+        out = b.overlay({"underlying": "NIFTY", "signals": [{"signal": "book_pressure", "bucket": "1s", "known_at": "2026-11-16T04:00:05"},
+                                                            {"signal": "fut_ofi", "bucket": "1s", "known_at": None}]})
+        now = out["signals"][0]["now"]
+        assert now["provisional"] and now["values"] == {"qi": 0.25} and now["known_at"].startswith("2026-11-16T04:00:10")
+        assert "now" not in out["signals"][1]
+    finally:
+        b.close()

@@ -28,6 +28,7 @@ HEADLINE = {"vrp": "vrp_diff", "vrp_intraday": "vrp_intraday", "rv_over_iv": "rv
             "fut_ofi": "ofi_norm", "mlofi_future": "mlofi", "book_pressure": "qi", "depth_features": "depth_imb", "signed_flow": "delta_flow",
             "residual_iv": "resid", "curvature": "curv", "cp_iv_gap": "gap", "event_variance": "event_var", "noise_band": "signal_value"}
 MAX_POINTS = 400
+BUS_ONLY = {"t_vendor", "t_recv", "t_emit", "provisional"}
 
 
 def _num(v) -> Optional[float]:
@@ -39,7 +40,8 @@ def _num(v) -> Optional[float]:
 
 
 def _values(row: pd.Series) -> dict:
-    return {c: _num(v) for c, v in row.items() if c not in SKIP and not c.endswith("_tod_z") and _num(v) is not None}
+    return {c: _num(v) for c, v in row.items() if c not in SKIP and c not in BUS_ONLY and not c.endswith("_tod_z")
+            and _num(v) is not None}
 
 
 def _headline(sid: str, df: pd.DataFrame) -> Optional[str]:
@@ -104,3 +106,55 @@ def _daily(store: Path, underlying: str, day: date) -> list[dict]:
         last = df.iloc[-1]
         rows.append({"signal": sid, "date": files[-1].parent.name.split("=", 1)[1], "values": _values(last)})
     return rows
+
+
+class BusLatest:
+    """The newest row of every live signal from the engine's bus (final at bucket close, provisional on the engine's timer), so the
+    tab shows the bucket as it forms instead of waiting for the store (written every 15 s).  A background thread subscribes to the
+    engines' publishers ("signals-<U>"); summary() overlays what it holds as `now` on each signal.  Read only."""
+
+    def __init__(self, names=None, env=None):
+        import threading
+        from data_layer import bus
+        self.sub = bus.Subscriber(names or bus.signal_names(), topics=["signal", "provisional"], env=env)
+        self.latest: dict = {}
+        self.lock = threading.Lock()
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True, name="signals-bus")
+        self.thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            for topic, m in self.sub.poll(timeout_ms=200):
+                self.ingest(topic, m)
+
+    def ingest(self, topic: str, m: dict) -> None:
+        cols = m.get("cols", [])
+        with self.lock:
+            for r in m.get("rows", []):
+                row = dict(zip(cols, r))
+                sym = row.get("symbol")
+                if sym is not None and "_FUT_" not in str(sym):         # per contract: the futures only (as the series does)
+                    continue
+                key = (row.get("underlying"), row.get("signal"), row.get("bucket"))
+                old = self.latest.get(key)
+                if old is None or (row.get("known_at") or 0) >= (old[1].get("known_at") or 0):
+                    self.latest[key] = (topic, row)
+
+    def overlay(self, out: dict) -> dict:
+        with self.lock:
+            for s in out.get("signals", []):
+                hit = self.latest.get((out["underlying"], s["signal"], s["bucket"]))
+                if hit is None:
+                    continue
+                topic, row = hit
+                ka = pd.Timestamp(row["known_at"], unit="ns") if isinstance(row.get("known_at"), int) else pd.Timestamp(row.get("known_at"))
+                if s.get("known_at") and ka <= pd.Timestamp(s["known_at"]) and topic == "signal":
+                    continue
+                s["now"] = {"known_at": ka.isoformat(), "provisional": topic == "provisional", "values": _values(pd.Series(row))}
+        return out
+
+    def close(self) -> None:
+        self._stop.set()
+        self.thread.join(timeout=1)
+        self.sub.close()

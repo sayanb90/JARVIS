@@ -9,8 +9,9 @@
 #   1. pip install -r requirements.txt (adds xlrd, pypdf)    stops if it fails
 #   2. the full test suite                                   stops if any test fails: nothing on the server has changed yet
 #   3. .env: JARVIS_DEPTH5 (default fo: the 5-level book on the F&O feed), JARVIS_EXPIRED_STRIKES (default 10), JARVIS_LIVE_SIGNALS=1
-#      (order-book signals in the feed) and JARVIS_TICK_BUS=1 (feeds publish ticks to the in-memory bus; cadences are per signal in
-#      signals/cadence.toml).  A backup is made
+#      (order-book signals in the feed), JARVIS_TICK_BUS=1 (feeds publish ticks to the in-memory bus; cadences are per signal in
+#      signals/cadence.toml) and JARVIS_SIGNAL_ENGINE=operators (engine v2; "runner" falls back to the first engine).  It never sets
+#      JARVIS_LIVE_ORDERS: real orders stay off until the owner sets it by hand.  A backup is made
 #      first.  DEPTH5=off leaves the depth switch out; STRIKES=15 widens further.
 #   4. crontab: the current one is saved to logs/crontab-backup-<time>.txt, then deploy/crontab is installed.  It adds the second F&O
 #      feed connection, the daily NSE/RBI collectors, and the signals health check (11:40 UTC) and nightly run (12:15 UTC).
@@ -53,7 +54,7 @@ step "2. tests"
 $PY -m pytest -q -p no:cacheprovider || stop "tests failed: nothing was changed on the server"
 
 step "3. settings in .env"
-pairs="JARVIS_EXPIRED_STRIKES=${STRIKES} JARVIS_LIVE_SIGNALS=1 JARVIS_TICK_BUS=1"
+pairs="JARVIS_EXPIRED_STRIKES=${STRIKES} JARVIS_LIVE_SIGNALS=1 JARVIS_TICK_BUS=1 JARVIS_SIGNAL_ENGINE=operators"
 [ "$DEPTH5" != "off" ] && pairs="$pairs JARVIS_DEPTH5=${DEPTH5}"
 # shellcheck disable=SC2086
 $PY -m data_layer.envfile set $pairs || stop "could not update .env"
@@ -77,4 +78,5 @@ $PY -m signals list | tail -n +1 | wc -l | xargs -I{} echo "{} signal outputs re
 step "done"
 echo "finished $(date -u '+%F %H:%M:%S') UTC.  Next, in tmux:  bash deploy/data-backfill.sh --apply"
 echo "The F&O feed starts with two connections and the 5-level book at the next session (cron, 03:40 UTC)."
+echo "Engine v2 and the paper trader start from cron at 03:44 / 03:45 UTC; after the session:  $PY -m signals latency \$(date -u +%F)"
 echo "After that session:  $PY -m data_layer.tick_store size \$(date -u +%F) --segment fo"

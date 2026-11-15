@@ -1380,8 +1380,11 @@ function renderSignals() {
     ['Daily signals', fmtInt(j.daily.length), 'from the last close'],
   ]);
   const rows = j.signals.map((s) => {
-    const v = s.headline != null ? s.values[s.headline] : null;
-    return `<tr><td>${escHtml(s.signal)}</td><td>${escHtml(s.bucket)}</td><td>${timeIst(s.known_at)}</td><td>${escHtml(s.headline || '')}</td>
+    // engine v2 on the bus: the forming bucket (provisional) or a final row newer than the store
+    const now = s.now && s.headline != null && s.now.values[s.headline] != null ? s.now : null;
+    const v = now ? now.values[s.headline] : (s.headline != null ? s.values[s.headline] : null);
+    const asOf = now ? `${timeIst(now.known_at)}${now.provisional ? ' <span class="muted">forming</span>' : ''}` : timeIst(s.known_at);
+    return `<tr><td>${escHtml(s.signal)}</td><td>${escHtml(s.bucket)}</td><td>${asOf}</td><td>${escHtml(s.headline || '')}</td>
       <td class="num">${fmt(v, 4)}</td><td class="num">${zCell(s.headline != null ? s.z[s.headline] : null)}</td><td>${spark(s.series)}</td></tr>`;
   }).join('');
   $('sg-live').innerHTML = `<thead><tr><th>Signal</th><th>Bucket</th><th>As of (IST)</th><th>Value</th><th class="num"></th><th class="num">z</th><th>Today</th></tr></thead><tbody>${rows ||
