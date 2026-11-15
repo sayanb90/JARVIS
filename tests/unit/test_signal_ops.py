@@ -113,3 +113,20 @@ def test_check_day_on_recorded_ticks(lake):
     res = check_day(lake, "NIFTY", DAY, minutes=20, log=lambda *a: None)
     assert res and all(v == "ok" or v.startswith("no rows") for v in res.values()), res
     assert sum(v == "ok" for v in res.values()) >= 3
+
+
+def test_nightly_replay_streams_and_matches_the_in_memory_replay(lake, tmp_path):
+    """The nightly replay reads ticks 30 minutes at a time and stages rows per window; the stored rows equal one in-memory replay."""
+    from signals.engine.core import read_tick_window, replay, replay_day
+    from signals.framework import REGISTRY
+    from signals.live_runner import history_for
+    cad = {"book_pressure": "1min", "pcr_full": "1min", "skew": "1min"}
+    n = replay_day(lake, tmp_path, "NIFTY", DAY, cad, log=lambda *a: None)
+    assert n > 0 and not (tmp_path / "_staging").exists() or not any((tmp_path / "_staging").iterdir())
+    d = pd.Timestamp(DAY)
+    t = read_tick_window(lake, d, "NIFTY", d + pd.Timedelta(hours=3, minutes=30), d + pd.Timedelta(hours=10, minutes=30))
+    ref = replay("NIFTY", history_for(lake, "NIFTY", DAY), t, cad, step="5min")
+    for sid in cad:
+        f = tmp_path / "signals" / sid / f"v{REGISTRY[sid][0].version}" / "intraday" / "bucket=1m" / "underlying=NIFTY" / f"date={DAY}" / "part.parquet"
+        got = pd.read_parquet(f)
+        assert len(got) == (ref["signal"] == sid).sum() > 0, sid

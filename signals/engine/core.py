@@ -801,30 +801,102 @@ def supervise(start_fn, until: pd.Timestamp, max_restarts: int = 20, wait_s: flo
 
 
 
-def replay_day(lake, store, underlying: str, day, cadence: dict) -> int:
-    """After the close: replay the day's recorded ticks through engine v2 (every cadence group at once) and write the per-bucket rows
-    to the signal store, so the history of the live era is what the live engine computed.  About 0.1 s per 1 s bucket on 2,000
-    contracts (the first engine needed 3.6 s, too slow for a day of 1 s buckets).  Returns rows written."""
+def read_tick_window(lake, day, underlying: str, t0: pd.Timestamp, t1: pd.Timestamp) -> pd.DataFrame:
+    """This underlying's option and future ticks and its index and India VIX ticks with event time in [t0, t1), from the day's tick
+    files (both segments, the older single folder too), ordered by event then arrival time.  DuckDB reads only the matching rows, so
+    memory follows the window, not the day (a whole day of every symbol is 15 to 20 million rows)."""
+    import duckdb
     from pathlib import Path
-    from signals.framework import write_output
-    from signals.live_runner import day_ticks, history_for, load_baselines, slot_volume_history
-    ticks = day_ticks(Path(lake), day)
-    if ticks is None:
-        return 0
-    day = pd.Timestamp(day).date()
+    from data_layer.tick_store import day_folders
+    files = [str(f) for d in day_folders(Path(lake), pd.Timestamp(day).date()) for f in sorted(Path(d).glob("*.parquet"))
+             if not f.name.endswith(".tmp")]
+    if not files:
+        return pd.DataFrame()
+    con = duckdb.connect()
+    con.execute("SET memory_limit='1GB'")
+    q = "[" + ", ".join("'" + f.replace("'", "''") + "'" for f in files) + "]"
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q}, union_by_name=true)").fetchall()}
+    tcol = "fts" if "fts" in cols else "ts"
+    order = ", ".join(c for c in ("fts", "rts", "ts") if c in cols)
+    df = con.execute(f"SELECT * FROM read_parquet({q}, union_by_name=true) WHERE (regexp_matches(symbol, ?) OR symbol IN (?, ?)) "
+                     f"AND {tcol} >= ? AND {tcol} < ? ORDER BY {order}",
+                     [f"^{underlying}_", INDEX_SYMBOL[underlying], VIX_SYMBOL, t0.to_pydatetime(), t1.to_pydatetime()]).df()
+    con.close()
+    if "fts" not in df.columns and "ts" in df.columns:
+        df["fts"] = df["ts"]
+    return df
+
+
+SESSION_WINDOW_UTC = (pd.Timedelta(hours=3, minutes=30), pd.Timedelta(hours=10, minutes=30))
+
+
+def replay_day(lake, store, underlying: str, day, cadence: dict, window: pd.Timedelta = pd.Timedelta(minutes=30), log=print) -> int:
+    """After the close: replay the day's recorded ticks through engine v2 (every cadence group at once) and write the per-bucket rows
+    to the signal store, so the history of the live era is what the live engine computed.  Memory stays bounded: ticks are read
+    `window` at a time, and rows are written to a staging folder per window, then combined per signal by DuckDB.  About 0.1 s of
+    engine time per 1 s bucket on 2,000 contracts.  Returns rows written."""
+    import shutil
+    import duckdb
+    from pathlib import Path
+    from signals.framework import output_dir
+    from signals.live_runner import history_for, load_baselines, slot_volume_history
+    d = pd.Timestamp(day).normalize()
     groups = cadence_mod.groups(cadence)
-    base = {c: load_baselines(Path(store), underlying, day, ids, c) for c, ids in groups.items()}
-    rows = replay(underlying, history_for(Path(lake), underlying, day), ticks, cadence, step="5min", baselines=base,
-                  volume_slot_daily=slot_volume_history(Path(lake), underlying, day))
-    if rows.empty:
+    base = {c: load_baselines(Path(store), underlying, d.date(), ids, c) for c, ids in groups.items()}
+    eng = OperatorEngine(underlying, history_for(Path(lake), underlying, d.date()), cadence, d, baselines=base,
+                         volume_slot_daily=slot_volume_history(Path(lake), underlying, d.date()))
+    staging = Path(store) / "_staging" / f"replay-{underlying}-{d.date()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staged: dict = defaultdict(list)                      # (signal, bucket) -> staged files
+    k = 0
+
+    def stage(rows: pd.DataFrame) -> None:
+        nonlocal k
+        if rows is None or not len(rows):
+            return
+        for (sid, b), g in rows.groupby(["signal", "bucket"]):
+            g = g.drop(columns=["signal"]).assign(underlying=underlying)
+            if "ts" not in g.columns and "date" in g.columns:
+                g["ts"] = pd.to_datetime(g["known_at"]) - pd.Timedelta(b)
+            f = staging / f"{sid}--{b}" / f"part-{k:05d}.parquet"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            g.to_parquet(f, index=False)
+            staged[(sid, b)].append(f)
+            k += 1
+
+    t, ticks_seen = d + SESSION_WINDOW_UTC[0], 0
+    while t < d + SESSION_WINDOW_UTC[1]:
+        w = read_tick_window(lake, d, underlying, t, t + window)
+        ticks_seen += len(w)
+        if len(w):
+            w["fts"] = pd.to_datetime(w["fts"])
+            for _, part in w.groupby(w["fts"].dt.floor("5min"), sort=True):
+                stage(eng.on_ticks(part))
+        t += window
+    stage(eng.finish())
+    if not ticks_seen:
         return 0
     n = 0
-    for (sid, b), g in rows.groupby(["signal", "bucket"]):
+    for (sid, b), files in staged.items():
         spec = REGISTRY[sid][0]
-        g = g.drop(columns=["signal"]).assign(underlying=underlying)
-        if "ts" not in g.columns and "date" in g.columns:
-            g["ts"] = pd.to_datetime(g["known_at"]) - pd.Timedelta(b)
-        n += write_output(store, spec, g, layer=f"intraday/bucket={ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
+        folder = output_dir(Path(store), spec, underlying, d.date(), f"intraday/bucket={ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
+        folder.mkdir(parents=True, exist_ok=True)
+        tmp = folder / "part.parquet.tmp"
+        q = "[" + ", ".join("'" + str(f).replace("'", "''") + "'" for f in files) + "]"
+        try:
+            con = duckdb.connect()
+            con.execute("SET memory_limit='1GB'")
+            con.execute(f"COPY (SELECT * FROM read_parquet({q}, union_by_name=true)) TO '{tmp}' (FORMAT PARQUET)")
+            n += con.execute(f"SELECT count(*) FROM read_parquet('{tmp}')").fetchone()[0]
+            con.close()
+        except Exception:                                   # noqa: BLE001 -- mixed column types across windows: combine in pandas
+            df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+            df.to_parquet(tmp, index=False)
+            n += len(df)
+        tmp.replace(folder / "part.parquet")
+    shutil.rmtree(staging, ignore_errors=True)
+    log(f"replay {underlying} {d.date()}: {ticks_seen:,} ticks, {n:,} rows, {len(staged)} signal layers")
     return n
 
 
@@ -833,17 +905,13 @@ def check_day(lake, underlying: str, day, minutes: int = 60, bucket: str = "1min
     with the batch functions run on the same ticks all at once (the whole-day reference of the parity tests).  Returns
     {signal: "ok" | (problem)}; nothing is written."""
     from pathlib import Path
-    from signals.live_runner import LiveRunner, day_ticks, history_for
+    from signals.live_runner import LiveRunner, history_for
     d = pd.Timestamp(day)
-    t = day_ticks(Path(lake), d.date())
-    if t is None:
-        return {"_": f"no ticks recorded on {d.date()}"}
-    t = t.copy()
-    t["fts"] = pd.to_datetime(t["fts"] if "fts" in t.columns else t["ts"])
     start = d.normalize() + MARKET_UTC[0]
-    t = t[(t["fts"] >= start - pd.Timedelta(minutes=10)) & (t["fts"] < start + pd.Timedelta(minutes=minutes))]
-    sym = t["symbol"].astype(str)
-    t = t[sym.str.startswith(underlying + "_") | sym.isin([INDEX_SYMBOL[underlying], VIX_SYMBOL])]
+    t = read_tick_window(lake, d, underlying, start - pd.Timedelta(minutes=10), start + pd.Timedelta(minutes=minutes))
+    if not len(t):
+        return {"_": f"no ticks recorded on {d.date()}"}
+    t["fts"] = pd.to_datetime(t["fts"])
     hist = history_for(Path(lake), underlying, d.date())
     ids = ids or [s for s in live_signal_ids() if cadence_mod.ORDER.index(cadence_mod.MIN_CADENCE.get(s, ("1s", ""))[0])
                   <= cadence_mod.ORDER.index(bucket)]
