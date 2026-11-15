@@ -826,3 +826,57 @@ def replay_day(lake, store, underlying: str, day, cadence: dict) -> int:
             g["ts"] = pd.to_datetime(g["known_at"]) - pd.Timedelta(b)
         n += write_output(store, spec, g, layer=f"intraday/bucket={ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
     return n
+
+
+def check_day(lake, underlying: str, day, minutes: int = 60, bucket: str = "1min", ids: Optional[list] = None, log=print) -> dict:
+    """Real-data check before going live: replay the first `minutes` of a recorded session through engine v2 and compare every row
+    with the batch functions run on the same ticks all at once (the whole-day reference of the parity tests).  Returns
+    {signal: "ok" | (problem)}; nothing is written."""
+    from pathlib import Path
+    from signals.live_runner import LiveRunner, day_ticks, history_for
+    d = pd.Timestamp(day)
+    t = day_ticks(Path(lake), d.date())
+    if t is None:
+        return {"_": f"no ticks recorded on {d.date()}"}
+    t = t.copy()
+    t["fts"] = pd.to_datetime(t["fts"] if "fts" in t.columns else t["ts"])
+    start = d.normalize() + MARKET_UTC[0]
+    t = t[(t["fts"] >= start - pd.Timedelta(minutes=10)) & (t["fts"] < start + pd.Timedelta(minutes=minutes))]
+    sym = t["symbol"].astype(str)
+    t = t[sym.str.startswith(underlying + "_") | sym.isin([INDEX_SYMBOL[underlying], VIX_SYMBOL])]
+    hist = history_for(Path(lake), underlying, d.date())
+    ids = ids or [s for s in live_signal_ids() if cadence_mod.ORDER.index(cadence_mod.MIN_CADENCE.get(s, ("1s", ""))[0])
+                  <= cadence_mod.ORDER.index(bucket)]
+    log(f"check {underlying} {d.date()}: {len(t):,} ticks, {minutes} minutes, {len(ids)} signals at {bucket}")
+    r = LiveRunner(underlying, hist, bucket=bucket, ids=ids, tick_window=pd.Timedelta(days=1), windowed=False)
+    r.ingest(t)
+    r.watermark = r.watermark.floor(bucket) + pd.Timedelta(bucket)
+    ref = r.cycle()
+    got = replay(underlying, hist, t, {s: bucket for s in ids}, step="1min")
+    out = {}
+    for sid in ids:
+        a = ref[ref["signal"] == sid].dropna(axis=1, how="all") if len(ref) else pd.DataFrame()
+        b = got[got["signal"] == sid].dropna(axis=1, how="all") if len(got) else pd.DataFrame()
+        if not len(a) and not len(b):
+            out[sid] = "no rows (inputs absent in this window)"
+            continue
+        if len(a) != len(b):
+            out[sid] = f"rows differ: batch {len(a)}, engine {len(b)}"
+            continue
+        keys = [k for k in ("ts", "known_at", "expiry", "symbol", "strike", "cp", "snap", "date") if k in a.columns]
+        a = a.sort_values(keys, kind="stable").reset_index(drop=True)
+        b = b.sort_values(keys, kind="stable").reset_index(drop=True)
+        bad = []
+        for c in sorted(set(a.columns) | set(b.columns)):
+            if c not in a.columns or c not in b.columns:
+                bad.append(f"{c} (missing on one side)")
+                continue
+            x, y = a[c], b[c]
+            if pd.api.types.is_numeric_dtype(x) and pd.api.types.is_numeric_dtype(y):
+                ok = np.isclose(x.astype(float), y.astype(float), rtol=1e-9, atol=1e-12) | (x.isna() & y.isna())
+            else:
+                ok = (x.astype(str) == y.astype(str)) | (x.isna() & y.isna())
+            if not ok.all():
+                bad.append(f"{c} ({int((~ok).sum())} rows)")
+        out[sid] = "ok" if not bad else "differs: " + ", ".join(bad[:4])
+    return out

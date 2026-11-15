@@ -78,6 +78,9 @@ JARVIS=/home/jarvis/JARVIS
 45 3 * * 1-5   cd $JARVIS && nice -n 10 python -m trading paper --underlying NIFTY --until 10:00 >> logs/paper-nifty.log 2>&1
 40 11 * * 1-5  cd $JARVIS && python -m signals health >> logs/signals-health.log 2>&1
 15 12 * * 1-5  cd $JARVIS && nice -n 19 ionice -c3 python -m signals nightly >> logs/signals-nightly.log 2>&1
+# Storage by dataset (lake, signal store, research snapshots, logs; hard links counted once), growth per session and runway; one JSON
+# line a day in logs/storage.jsonl.  Raw tick days older than 30 days are flagged as offload candidates (Backblaze B2 or similar).
+20 13 * * 1-5  cd $JARVIS && nice -n 19 python -m data_layer.storage report >> logs/storage.log 2>&1
 # Weekly per-signal coverage report (SCRUM-190): rows, first and last day, missing days and sample per era, to <store>/reports/.
 20 12 * * 6    cd $JARVIS && nice -n 19 python -m signals coverage >> logs/signals-coverage.log 2>&1
 # Market calendar: Upstox's holiday list, so every check knows whether a day should have produced data (before the 03:15 health report)

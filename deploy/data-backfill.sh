@@ -18,7 +18,9 @@
 #   expired       expired NIFTY/BANKNIFTY option candles widened to STRIKES either side (default 10; Upstox Plus, hours).  Contracts
 #                 already stored are skipped, so this fetches only the new strikes.  Run again later with STRIKES=15.
 #   signals       the signal store from 2022-11 to yesterday, per underlying, only if `python -m signals validate-iv` passes on the
-#                 live sessions (our candle IV against Upstox IV).  A failed gate skips that underlying and says so.
+#                 live sessions (our candle IV against Upstox IV).  A failed gate skips that underlying and says so.  Then the
+#                 per-minute history of the 13 snapshot signals from candles (--every-bucket; layer intraday/source=candles/bucket=1m)
+#                 to 2026-11-02 (from 2026-11-03 the live engine's tick-based rows cover every bucket).
 #
 # Not possible as history (they build forward from the first nightly run): index weights beyond today's snapshot, RBI rates, bulk and
 # block deals (NSE's history API refuses requests from outside India), and every live-only signal (ticks, depth) before 2026-11-03.
@@ -55,11 +57,13 @@ if want signals; then
         if [ "$APPLY" != 1 ]; then
             echo "+ $PY -m signals validate-iv --lake lake --root $STORE --underlying $U --from 2026-11-03 --to $YDAY   (gate)"
             echo "+ $PY -m signals run --lake lake --root $STORE --underlying $U --from 2022-11-01 --to $YDAY   (if the gate passes)"
+            echo "+ $PY -m signals run --lake lake --root $STORE --underlying $U --from 2022-11-01 --to 2026-11-02 --every-bucket   (if the gate passes)"
             continue
         fi
         if "$PY" -m signals validate-iv --lake lake --root "$STORE" --underlying "$U" --from 2026-11-03 --to "$YDAY" \
                 2>&1 | tee -a logs/data-backfill.log; [ "${PIPESTATUS[0]}" = 0 ]; then
             run nice -n 19 "$PY" -m signals run --lake lake --root "$STORE" --underlying "$U" --from 2022-11-01 --to "$YDAY"
+            run nice -n 19 "$PY" -m signals run --lake lake --root "$STORE" --underlying "$U" --from 2022-11-01 --to 2026-11-02 --every-bucket
         else
             echo "IV gate FAILED for $U: its signal history is not computed (see logs/data-backfill.log)" | tee -a logs/data-backfill.log
         fi

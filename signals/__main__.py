@@ -81,6 +81,59 @@ def _read_derived(root: Path, name: str, underlying: str, d0: date, d1: date) ->
     return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True) if files else pd.DataFrame()
 
 
+CANDLE_LAYER = "intraday/source=candles/bucket=1m"
+SHARED = ("contract_table", "spot", "vix", "futures", "fut_front", "expiries", "eras", "chain", "smile", "atm", "daily", "tod")
+
+
+def every_bucket_ids(ids: Optional[list[str]] = None) -> list[str]:
+    """Snapshot signals that can be computed at every 1-minute bar from candles (option, future and index minutes): every
+    non-live-only signal on the snapshot grid.  Live-only ones need quotes, vendor Greeks or the 5-level book (ticks, from 2026-11-03);
+    signals already on the 1-minute grid have per-minute history in the normal run."""
+    return [s.id for s in specs() if s.grid == "snap" and s.kind == "signal" and not s.live_only and (not ids or s.id in ids)]
+
+
+def run_every_bucket(lake: Path, root: Path, underlying: str, d0: date, d1: date, ids: Optional[list[str]] = None,
+                     log=print) -> dict:
+    """Per-minute history of the snapshot signals from 1-minute candles (the batch history keeps them at 09:20, 12:00 and 15:15 only),
+    month by month, into <store>/signals/<id>/v<n>/intraday/source=candles/bucket=1m/.  Resumable by month (a rerun rewrites the
+    days it covers).  The live era's tick-based per-bucket rows are a different layer (intraday/bucket=...), never mixed with these."""
+    from signals.lakeio import load_raw
+    lake, root = Path(lake).resolve(), Path(root).resolve()
+    if root == lake or lake in root.parents:
+        raise SystemExit("the store must be outside the lake")
+    chosen = every_bucket_ids(ids)
+    stats: dict[str, int] = {}
+    warm = max([CHAIN_WARMUP.get(s, DEFAULT_WARMUP) for s in chosen] + [DEFAULT_WARMUP])
+    # the daily realised measures, HAR forecasts and time-of-day profile need years of index minutes (as pass 2 of the normal run);
+    # every row is known at a close before the day it is used on, so computing them once on the whole range is point in time
+    long = load_raw(lake, underlying, min(d0, INDEX_HISTORY_FROM), d1, option_from=d1 + timedelta(days=1), ticks=False)
+    lc = Context(underlying, long)
+    anchors = {"daily": lc.get("daily"), "tod": lc.get("tod")}
+    del long, lc
+    for a, b in months(d0, d1):
+        raw = load_raw(lake, underlying, a - timedelta(days=warm + 10), b, option_from=a - timedelta(days=warm), ticks=False)
+        if raw["opt_1m"] is None or not len(raw["opt_1m"]):
+            log(f"every bucket {underlying} {a}..{b}: no option minutes, skipped")
+            continue
+        base = Context(underlying, raw, cache=dict(anchors))
+        cache = {k: base.get(k) for k in SHARED}                      # the chain is built once per month, shared by every signal
+        ctx = Context(underlying, raw, snaps="all", cache=cache)
+        for sid in chosen:
+            spec = REGISTRY[sid][0]
+            try:
+                out = _within(ctx.compute(sid), "date", a, b)
+            except Exception as exc:                                  # noqa: BLE001 -- one signal must not stop the month
+                log(f"every bucket {underlying} {a}..{b} {sid} failed: {exc!r}")
+                continue
+            if out is not None and len(out) and "ts" not in out.columns:
+                out = out.assign(ts=pd.to_datetime(out["known_at"]) - pd.Timedelta(minutes=1))
+            stats[sid] = stats.get(sid, 0) + write_output(root, spec, out, layer=CANDLE_LAYER)
+        log(f"every bucket {underlying} {a}..{b}: {sum(stats.values()):,} rows so far")
+    for sid in chosen:
+        log_trial(root, REGISTRY[sid][0], underlying, d0, d1, stats.get(sid, 0), {"layer": CANDLE_LAYER})
+    return stats
+
+
 def run(lake: Path, root: Path, underlying: str, d0: date, d1: date, ids: Optional[list[str]] = None, family: Optional[str] = None,
         chain_store: bool = True, live: bool = True, provenance: Optional[dict] = None, log=print) -> dict:
     from signals.lakeio import load_raw
@@ -247,6 +300,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             r.add_argument("--family")
             r.add_argument("--no-chain-store", action="store_true")
             r.add_argument("--no-live", action="store_true")
+            r.add_argument("--every-bucket", action="store_true",
+                           help="instead: per-minute history of the snapshot signals from candles (layer intraday/source=candles/bucket=1m)")
     rp = sub.add_parser("report")
     rp.add_argument("what", choices=("day-night",))
     rp.add_argument("--root", type=Path, required=True)
@@ -275,6 +330,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     hl = sub.add_parser("health", add_help=False)
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] == "check-day":
+        import argparse as _ap
+        from data_layer.lake import LAKE_DIR
+        from signals.engine.core import check_day
+        p = _ap.ArgumentParser(prog="python -m signals check-day")
+        p.add_argument("day")
+        p.add_argument("--underlying", default="NIFTY")
+        p.add_argument("--minutes", type=int, default=60)
+        p.add_argument("--bucket", default="1min")
+        p.add_argument("--lake", type=Path, default=None)
+        x = p.parse_args(argv[1:])
+        res = check_day(x.lake or LAKE_DIR, x.underlying, x.day, x.minutes, x.bucket)
+        for k, v in res.items():
+            print(f"{k:<24} {v}")
+        bad = [k for k, v in res.items() if not (v == "ok" or str(v).startswith("no rows"))]
+        print(f"{'OK' if not bad else 'DIFFERENCES'}: {len(res) - len(bad)} of {len(res)} signals agree")
+        return 1 if bad else 0
     if argv and argv[0] == "watch":
         from signals.watch import main as watch_main
         return watch_main(argv[1:])
@@ -335,6 +407,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         if snap.exists():
             from research.access import provenance_of
             prov = provenance_of(a.lake)
+        if a.every_bucket:
+            run_every_bucket(a.lake, a.root, a.underlying, a.d0, a.d1, [x for x in a.ids.split(",") if x] or None)
+            return 0
         run(a.lake, a.root, a.underlying, a.d0, a.d1, [x for x in a.ids.split(",") if x] or None, a.family, not a.no_chain_store,
             not a.no_live, prov)
         return 0

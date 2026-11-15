@@ -474,15 +474,28 @@ class Session:
         b, td, c = bk.b, bk.td, bk.cadence
         sub_minute = td < NS_MIN
         spot = self.bars.close(c, self.bars.index_symbol, b)
+        sl = bk.slice
         if not sub_minute and spot != spot:                       # at a minute and longer the index bars are the grid
-            return build_chain(self.options, _empty_slice(bk.slice), kind, self.r)
+            if self.bars.index_symbol in self.bars.last_ns:      # the index ticks today: a minute without an index bar has no rows
+                return build_chain(self.options, _empty_slice(bk.slice), kind, self.r)
+            # no index tick at all today (feed or subscription problem): the batch then uses each contract's own bars as the grid
+            # (signals.options.core._grid_fill, a day with no grid), so the chain still exists from the options alone
+            sl = _own_slice(bk.slice)
         if kind == "live" and sub_minute:
             fut, e = self.bars.front_mid(c, b)
             spot = math.nan
         else:
             fut, e = self.bars.front_bar(c, b, self.day)
         t_fut = (pd.Timestamp(e).value + EXPIRY_NS - (b + td)) / YEAR_NS if e is not None else math.nan
-        return build_chain(self.options, bk.slice, kind, self.r, fut_close=fut, t_fut=t_fut, spot_close=spot)
+        return build_chain(self.options, sl, kind, self.r, fut_close=fut, t_fut=t_fut, spot_close=spot)
+
+
+def _own_slice(sl: Slice) -> Slice:
+    """Rows only for contracts with a bar in this bucket, age 0: the batch grid when the day has no index bars."""
+    m = sl.has_bar
+    z = np.zeros(int(m.sum()))
+    return Slice(sl.cadence, sl.b, sl.td, sl.rows[m], z, sl.close_bar[m], sl.close_live[m], sl.volume_bar[m], sl.volume_live[m],
+                 {k: v[m] for k, v in sl.carried.items()}, sl.has_bar[m])
 
 
 def _empty_slice(sl: Slice) -> Slice:

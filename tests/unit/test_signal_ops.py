@@ -91,3 +91,25 @@ def test_nightly_replays_the_live_era_with_engine_v2(lake, tmp_path, monkeypatch
     monkeypatch.setattr(lr, "replay_day", lambda *a, **k: (_ for _ in ()).throw(AssertionError("first engine used")))
     res = nightly(lake, tmp_path, DAY, underlyings=("NIFTY",), log=lambda *a: None)
     assert res["intraday_rows"] == {"NIFTY": 7} and seen and seen[0][0] == "NIFTY" and "1s" in seen[0][1]
+
+
+def test_every_bucket_history_from_candles(lake, tmp_path):
+    """Snapshot signals at every 1-minute bar from candles, in their own layer (never mixed with the tick-based live-era rows)."""
+    from signals.__main__ import CANDLE_LAYER, every_bucket_ids, run_every_bucket
+    ids = every_bucket_ids()
+    assert "vrp" in ids and "skew" in ids and not {"rr25", "pcr_full", "gex_full"} & set(ids)        # live-only need ticks
+    st = run_every_bucket(lake, tmp_path, "NIFTY", DAY, DAY, ids=["skew", "term_slope", "vrp"], log=lambda *a: None)
+    assert st.get("skew", 0) > 100
+    files = list((tmp_path / "signals" / "skew").rglob("part.parquet"))
+    assert files and all(CANDLE_LAYER in str(f) for f in files)
+    s = pd.read_parquet(files[0])
+    assert s["known_at"].is_unique and (pd.to_datetime(s["known_at"]) - pd.to_datetime(s["ts"]) == pd.Timedelta("1min")).all()
+    assert read_output(tmp_path, "skew", "NIFTY").empty                # the batch layer is untouched
+
+
+def test_check_day_on_recorded_ticks(lake):
+    """python -m signals check-day: engine v2 against the batch on a recorded day of the lake."""
+    from signals.engine.core import check_day
+    res = check_day(lake, "NIFTY", DAY, minutes=20, log=lambda *a: None)
+    assert res and all(v == "ok" or v.startswith("no rows") for v in res.values()), res
+    assert sum(v == "ok" for v in res.values()) >= 3
