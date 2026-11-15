@@ -74,13 +74,34 @@ def test_every_admin_path_needs_the_admin_password(client):
     assert client.get("/admin/static/index.html", auth=A).status_code == 404
 
 
-def test_viewer_and_admin_credentials_are_separate(lake, monkeypatch):
+def test_one_login_covers_viewer_and_admin(lake, monkeypatch):
     monkeypatch.setenv("WEBAPP_USER", "viewer"); monkeypatch.setenv("WEBAPP_PASSWORD", "view")
     c = TestClient(create_app(lake.lakedir))
-    assert c.get("/api/meta", auth=("viewer", "view")).status_code == 200
-    assert c.get("/admin/api/catalog", auth=("viewer", "view")).status_code == 401      # viewer login is not enough
-    assert c.get("/admin/api/catalog", auth=A).status_code == 200                      # admin login, no viewer login
-    assert c.get("/api/meta", auth=A).status_code == 401
+    V = ("viewer", "view")
+    assert c.get("/api/meta").status_code == 401 and c.get("/admin/api/catalog").status_code == 401        # no login: neither
+    assert c.get("/api/meta", auth=V).status_code == 200 and c.get("/admin/api/catalog", auth=V).status_code == 200
+    assert c.get("/api/meta", auth=V).json()["admin"] is True
+    assert c.get("/admin/api/catalog", auth=A).status_code == 401 and c.get("/api/meta", auth=A).status_code == 401   # the shared login wins
+
+
+def test_admin_alone_keeps_working_with_the_older_admin_login(lake):
+    c = TestClient(create_app(lake.lakedir))                                    # fixture: ADMIN_* set, WEBAPP_* not
+    assert c.get("/api/meta").json()["admin"] is True                          # viewer open, as before
+    assert c.get("/admin/api/catalog").status_code == 401 and c.get("/admin/api/catalog", auth=A).status_code == 200
+
+
+def test_open_viewer_never_serves_admin(world, monkeypatch):
+    for k in ("ADMIN_USER", "ADMIN_PASSWORD", "WEBAPP_USER", "WEBAPP_PASSWORD"):
+        monkeypatch.delenv(k, raising=False)
+    c = TestClient(create_app(world.lakedir))
+    assert c.get("/api/meta").json()["admin"] is False
+    assert c.get("/admin").status_code == 404 and c.post("/admin/api/universe/apply", json={}).status_code == 404
+
+
+def test_half_a_login_does_not_enable_admin(world, monkeypatch):
+    monkeypatch.setenv("WEBAPP_USER", "viewer"); monkeypatch.delenv("WEBAPP_PASSWORD", raising=False)
+    monkeypatch.delenv("ADMIN_USER", raising=False); monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    assert TestClient(create_app(world.lakedir)).get("/admin").status_code == 404
 
 
 # -- catalog and paging ----------------------------------------------------------------------------

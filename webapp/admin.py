@@ -349,11 +349,20 @@ def validate_select(sql: str) -> str:
     return sql
 
 
-def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | None:
+def credentials() -> tuple[str | None, str | None]:
+    """The one login of the viewer and /admin (SCRUM-202): WEBAPP_USER/WEBAPP_PASSWORD; ADMIN_USER/ADMIN_PASSWORD only when those are
+    not both set (the older arrangement).  Both pairs empty: no login exists, so /admin is not served at all."""
     import os
-    user, password = os.getenv("ADMIN_USER"), os.getenv("ADMIN_PASSWORD")
+    u, p = os.getenv("WEBAPP_USER"), os.getenv("WEBAPP_PASSWORD")
+    if u and p:
+        return u, p
+    return os.getenv("ADMIN_USER"), os.getenv("ADMIN_PASSWORD")
+
+
+def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | None:
+    user, password = credentials()
     if not (user and password):
-        return None                                   # admin off: /admin is simply not there
+        return None                                   # admin off: /admin is simply not there (admin is never served without a login)
     data_dir = Path(data_dir or lake_mod.DATA_DIR)
     cat = Catalog(lake_dir, data_dir)
 
