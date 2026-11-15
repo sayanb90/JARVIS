@@ -177,3 +177,88 @@ def test_tail_returns_last_lines_redacted_and_refuses_other_paths(tmp_path):
     for bad in ("../.env", ".env", "logs/../.env", "/etc/passwd", "logs/j.log/../../.env"):
         with pytest.raises((ValueError, OSError)):
             jr.tail(bad, 5, tmp_path)
+
+
+# -- start and stop (SCRUM-204) -----------------------------------------------------------------
+import os
+import subprocess
+import time
+
+
+def control_root(tmp_path, body="sleep 30"):
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "deploy" / "crontab").write_text(
+        f"0 1 * * * cd $JARVIS && python -m data_layer.jobrun run slow --shell '{body} >> logs/slow.log 2>&1'\n"
+        "0 2 * * * cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1\n")
+    return tmp_path
+
+
+def wait_for(cond, secs=10):
+    end = time.time() + secs
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_start_runs_the_crontab_command_and_records_it(tmp_path, monkeypatch):
+    root = control_root(tmp_path, "echo hello")
+    monkeypatch.setenv("JARVIS_ROOT", str(root))
+    pid = jr.start_job("slow", root, by="tester")
+    assert pid > 0
+    assert wait_for(lambda: any(r["ev"] == "end" for r in jr.load_runs(root)))
+    recs = jr.load_runs(root)
+    assert recs[0]["by"] == "admin:tester" and recs[1]["code"] == 0
+    assert (root / "logs" / "slow.log").read_text().strip() == "hello"          # the cron line's own redirect worked
+
+
+def test_start_refuses_unknown_unwrapped_and_running_jobs(tmp_path, monkeypatch):
+    root = control_root(tmp_path)
+    monkeypatch.setenv("JARVIS_ROOT", str(root))
+    for name, msg in (("../../etc/passwd", "no such job"), ("fx", "not wrapped")):
+        with pytest.raises(jr.ControlError, match=msg):
+            jr.start_job(name, root)
+    jr.start_job("slow", root)
+    assert wait_for(lambda: jr.states(jr.load_crontab(root), jr.load_runs(root), root=root)[0].state == "running")
+    with pytest.raises(jr.ControlError, match="already running"):
+        jr.start_job("slow", root)
+    jr.stop_job("slow", root, force=True)
+    assert wait_for(lambda: jr.states(jr.load_crontab(root), jr.load_runs(root), root=root)[0].state != "running")
+
+
+def test_stop_terminates_the_whole_process_group_and_records_stopped(tmp_path, monkeypatch):
+    root = control_root(tmp_path)
+    monkeypatch.setenv("JARVIS_ROOT", str(root))
+    jr.start_job("slow", root)
+    assert wait_for(lambda: jr.states(jr.load_crontab(root), jr.load_runs(root), root=root)[0].state == "running")
+    st = jr.states(jr.load_crontab(root), jr.load_runs(root), root=root)[0]
+    pgid = jr.stop_job("slow", root)
+    assert pgid == st.pid                                                         # started detached: the wrapper leads its group
+    assert wait_for(lambda: jr.states(jr.load_crontab(root), jr.load_runs(root), root=root)[0].state == "stopped")
+    assert wait_for(lambda: not jr._pid_alive(st.pid))
+    with pytest.raises(jr.ControlError, match="not running"):
+        jr.stop_job("slow", root)
+
+
+def test_stop_never_signals_a_recycled_pid(tmp_path):
+    root = control_root(tmp_path)
+    other = subprocess.Popen(["sleep", "30"])                                   # a live process that is not a jobrun wrapper
+    try:
+        jr._append(jr.runs_path(root), {"ev": "start", "job": "slow", "id": "x", "at": jr._iso(jr._now()), "pid": other.pid, "pgid": other.pid})
+        sent = []
+        with pytest.raises(jr.ControlError, match="no longer a job wrapper"):
+            jr.stop_job("slow", root, killpg=lambda *a: sent.append(a))
+        assert sent == []
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_command_line_accepts_both_the_argv_form_and_the_shell_form(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_ROOT", str(tmp_path))
+    monkeypatch.setattr(jr.lake_mod, "ROOT", tmp_path)
+    assert jr.main(["run", "a", "--", sys.executable, "-c", "import sys; sys.exit(5)"]) == 5
+    assert jr.main(["run", "b", "--shell", "exit 6"]) == 6
+    assert [(r["job"], r["code"]) for r in jr.load_runs(tmp_path) if r["ev"] == "end"] == [("a", 5), ("b", 6)]

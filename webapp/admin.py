@@ -486,7 +486,33 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
         counts: dict[str, int] = {}
         for s in rows:
             counts[s["state"]] = counts.get(s["state"], 0) + 1
-        return JSONResponse({"now": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "counts": counts, "jobs": rows}, headers=noindex)
+        return JSONResponse({"now": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "counts": counts, "jobs": rows,
+                             "control": control_on()}, headers=noindex)
+
+    def control_on() -> bool:
+        import os
+        return os.getenv("JARVIS_JOB_CONTROL", "").strip().lower() in ("1", "true", "yes", "on")
+
+    def control(name: str, action: str, force: bool = False):
+        if not control_on():
+            raise HTTPException(403, "job control is off: set JARVIS_JOB_CONTROL=1 in .env and restart the viewer")
+        try:
+            if action == "start":
+                pid = jobrun.start_job(name, root, by=user)
+            else:
+                pid = jobrun.stop_job(name, root, force=force)
+        except jobrun.ControlError as exc:
+            raise HTTPException(404 if str(exc) == "no such job" else 409, str(exc))
+        log.warning("admin %s: job %s %s%s (pid/pgid %s)", user, name, action, " --force" if force else "", pid)
+        return JSONResponse({"ok": True, "name": name, "action": action, "pid": pid}, headers=noindex)
+
+    @r.post("/api/jobs/start", dependencies=[Depends(same_origin)])
+    def job_start(body: dict):
+        return control(str(body.get("name", ""))[:80], "start")
+
+    @r.post("/api/jobs/stop", dependencies=[Depends(same_origin)])
+    def job_stop(body: dict):
+        return control(str(body.get("name", ""))[:80], "stop", force=bool(body.get("force")))
 
     @r.get("/api/jobs/log")
     def job_log(name: str = Query(..., max_length=80), lines: int = Query(200, ge=1, le=jobrun.MAX_TAIL_LINES)):

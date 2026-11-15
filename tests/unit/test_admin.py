@@ -393,3 +393,69 @@ def test_job_log_tail_is_redacted_and_only_for_crontab_jobs(client, lake):
 
 def test_jobs_need_the_login(client):
     assert client.get("/admin/api/jobs").status_code == 401 and client.get("/admin/api/jobs/log", params={"name": "fx"}).status_code == 401
+
+
+# -- job control (SCRUM-204) ----------------------------------------------------------------------------
+H = {"x-jarvis-admin": "1"}
+
+
+def control_world(lake, monkeypatch, on=True):
+    root = lake.root
+    monkeypatch.setenv("JARVIS_ROOT", str(root))
+    if on:
+        monkeypatch.setenv("JARVIS_JOB_CONTROL", "1")
+    else:
+        monkeypatch.delenv("JARVIS_JOB_CONTROL", raising=False)
+    (root / "deploy").mkdir(exist_ok=True)
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "deploy" / "crontab").write_text(
+        "0 1 * * * cd $JARVIS && python -m data_layer.jobrun run quick --shell 'echo done >> logs/quick.log 2>&1'\n"
+        "0 2 * * * cd $JARVIS && python -m data_layer.jobrun run slow --shell 'sleep 30 >> logs/slow.log 2>&1'\n"
+        "0 3 * * * cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1\n")
+
+
+def wait_state(client, name, want, secs=10):
+    import time
+    end = time.time() + secs
+    while time.time() < end:
+        s = {j["name"]: j["state"] for j in client.get("/admin/api/jobs", auth=A).json()["jobs"]}
+        if s.get(name) in want:
+            return s[name]
+        time.sleep(0.2)
+    return s.get(name)
+
+
+def test_job_control_is_off_unless_enabled(client, lake, monkeypatch):
+    control_world(lake, monkeypatch, on=False)
+    assert client.get("/admin/api/jobs", auth=A).json()["control"] is False
+    r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H)
+    assert r.status_code == 403 and "JARVIS_JOB_CONTROL" in r.json()["detail"]
+
+
+def test_job_control_needs_login_and_the_admin_header(client, lake, monkeypatch):
+    control_world(lake, monkeypatch)
+    assert client.post("/admin/api/jobs/start", json={"name": "quick"}, headers=H).status_code == 401
+    assert client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A).status_code == 403          # no x-jarvis-admin header
+    assert client.post("/admin/api/jobs/stop", json={"name": "quick"}, auth=A).status_code == 403
+
+
+def test_start_a_job_from_the_api_and_refuse_bad_requests(client, lake, monkeypatch):
+    control_world(lake, monkeypatch)
+    assert client.get("/admin/api/jobs", auth=A).json()["control"] is True
+    r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H)
+    assert r.status_code == 200 and r.json()["action"] == "start"
+    assert wait_state(client, "quick", ("ok",)) == "ok"
+    assert (lake.root / "logs" / "quick.log").read_text().strip() == "done"
+    assert client.post("/admin/api/jobs/start", json={"name": "nope"}, auth=A, headers=H).status_code == 404
+    assert client.post("/admin/api/jobs/start", json={"name": "../../bin/sh"}, auth=A, headers=H).status_code == 404
+    assert client.post("/admin/api/jobs/start", json={"name": "fx"}, auth=A, headers=H).status_code == 409        # not wrapped
+    assert client.post("/admin/api/jobs/stop", json={"name": "quick"}, auth=A, headers=H).status_code == 409      # not running
+
+
+def test_start_then_stop_a_running_job(client, lake, monkeypatch):
+    control_world(lake, monkeypatch)
+    assert client.post("/admin/api/jobs/start", json={"name": "slow"}, auth=A, headers=H).status_code == 200
+    assert wait_state(client, "slow", ("running",)) == "running"
+    assert client.post("/admin/api/jobs/start", json={"name": "slow"}, auth=A, headers=H).status_code == 409      # already running
+    assert client.post("/admin/api/jobs/stop", json={"name": "slow"}, auth=A, headers=H).status_code == 200
+    assert wait_state(client, "slow", ("stopped",)) == "stopped"

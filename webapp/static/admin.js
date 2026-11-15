@@ -296,8 +296,8 @@ $('apply').onclick = async () => {
 $('paste').addEventListener('input', () => { $('apply').disabled = true; state.plan = null; });
 
 /* ---------------------------------------------------------------- jobs */
-const JOB_ORDER = ['failed', 'lost', 'late', 'running', 'ok', 'never', 'untracked'];
-const JOB_NOTE = { failed: 'the last run exited with an error', lost: 'started but never reported an end', late: 'should have started and did not',
+const JOB_ORDER = ['failed', 'lost', 'late', 'stopped', 'running', 'ok', 'never', 'untracked'];
+const JOB_NOTE = { failed: 'the last run exited with an error', lost: 'started but never reported an end', late: 'should have started and did not', stopped: 'the last run was stopped on purpose',
                    running: 'running now', ok: 'the last run succeeded', never: 'wrapped, no run recorded yet', untracked: 'not wrapped by the heartbeat yet' };
 const shortT = (t) => (t ? t.replace('T', ' ').slice(5, 16) : '–');
 const dur = (s) => (s == null ? '–' : s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h');
@@ -334,7 +334,8 @@ function renderJobs() {
 async function loadLog() {
   const j = jobsData && jobsData.jobs.find((x) => x.name === openJob);
   if (!j) return;
-  $('log-panel').hidden = false; $('log-title').textContent = j.name; $('log-hint').textContent = j.log || '';
+  $('log-panel').hidden = false; $('log-title').textContent = j.name; $('log-hint').textContent = (j.log || '') + (j.started_by ? ' · started by ' + j.started_by : '');
+  showActions(j);
   try {
     const r = await api('/admin/api/jobs/log', { name: j.name, lines: $('log-lines').value });
     const box = $('log-text'), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
@@ -343,6 +344,49 @@ async function loadLog() {
     box.dataset.shown = '1';
   } catch (e) { $('log-text').textContent = e.message; }
 }
+function showActions(j) {
+  const on = jobsData && jobsData.control, running = j.state === 'running';
+  $('job-actions').hidden = !on;
+  $('job-start').hidden = running; $('job-restart').hidden = !running; $('job-stop').hidden = !running; $('job-kill').hidden = !running;
+}
+async function jobAction(path, name, extra = {}) {
+  const r = await api(path, null, { name, ...extra });
+  return r;
+}
+async function waitNotRunning(name, secs = 20) {
+  for (let i = 0; i < secs * 2; i++) {
+    jobsData = await api('/admin/api/jobs');
+    const j = jobsData.jobs.find((x) => x.name === name);
+    if (!j || j.state !== 'running') return true;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+async function control(kind) {
+  const name = openJob; if (!name) return;
+  const ask = { start: `Run ${name} now?`, stop: `Stop ${name}? The running process is asked to finish (SIGTERM).`,
+                kill: `Force stop ${name}? It is killed at once (SIGKILL) and gets no chance to clean up.`,
+                restart: `Restart ${name}? It is stopped, then started again from the beginning.` }[kind];
+  if (!window.confirm(ask)) return;
+  try {
+    setStatus(`${kind} ${name}…`, 'busy');
+    if (kind === 'start') await jobAction('/admin/api/jobs/start', name);
+    else if (kind === 'stop') await jobAction('/admin/api/jobs/stop', name);
+    else if (kind === 'kill') await jobAction('/admin/api/jobs/stop', name, { force: true });
+    else {
+      await jobAction('/admin/api/jobs/stop', name);
+      if (!(await waitNotRunning(name))) throw new Error('it did not stop within 20 s: use Force stop, then Run now');
+      await jobAction('/admin/api/jobs/start', name);
+    }
+    await new Promise((r) => setTimeout(r, 800));
+    await loadJobs();
+    setStatus(`${name}: ${kind} done`);
+  } catch (e) { fail(e); loadJobs().catch(() => {}); }
+}
+$('job-start').onclick = () => control('start');
+$('job-restart').onclick = () => control('restart');
+$('job-stop').onclick = () => control('stop');
+$('job-kill').onclick = () => control('kill');
 $('jobs-filter').onchange = renderJobs;
 $('jobs-refresh').onclick = () => loadJobs().catch(fail);
 $('log-refresh').onclick = () => loadLog().catch(fail);

@@ -22,7 +22,7 @@ API (JSON):
 
 Admin (data browser, read-only SQL, subscription list) is at /admin, behind the same login as the viewer (WEBAPP_USER/WEBAPP_PASSWORD;
 ADMIN_USER/ADMIN_PASSWORD still work when those are not set); it is never served without a login;
-see webapp/admin.py.  The app never writes to the lake.  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
+see webapp/admin.py.  The app never writes to the lake (job control, off by default, only starts or stops the crontab's own jobs).  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
 for remote access, and/or set WEBAPP_USER and WEBAPP_PASSWORD to require HTTP Basic auth.
 """
 

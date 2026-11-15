@@ -13,6 +13,9 @@ Restart=always
 RestartSec=5
 # the viewer must never starve the collector: cap its memory
 MemoryMax=1500M
+# Jobs started from the Jobs tab (JARVIS_JOB_CONTROL=1, SCRUM-204) are children of the viewer: a restart of the viewer must not kill
+# them.  They still count against MemoryMax above, so a heavy job (the end-of-day compaction needs several GB) is better run from cron.
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

@@ -4,6 +4,7 @@ Job heartbeat (SCRUM-142): record when every cron job started, ended and how it 
   python -m data_layer.jobrun run NAME -- COMMAND ...        # run COMMAND, recording start, end, exit code and duration
   python -m data_layer.jobrun run NAME --shell 'a && b'      # the same for a shell line (chains with && or |)
   python -m data_layer.jobrun status [--json]                # every job of deploy/crontab and its state now
+  python -m data_layer.jobrun start NAME | stop NAME [--force]   # run a crontab job now / stop its running process (SCRUM-204)
 
 Why: cron says nothing when a job fails or never starts.  Wrapping the command in `jobrun run` leaves one line at the start and one at
 the end in logs/jobs/runs.jsonl (append-only, one small write each, so concurrent jobs cannot garble it).  The child's output and exit
@@ -12,6 +13,7 @@ code pass through unchanged, so the `>> logs/x.log 2>&1` redirect of the cron li
 States of a job, from its schedule and its records:
   running        started and not ended (and the process still exists, or it started less than MAX_RUNNING_HOURS ago)
   ok             the last run ended with exit code 0
+  stopped        the last run was stopped on purpose (from the Jobs tab or by `jobrun stop`)
   failed         the last run ended with a non-zero exit code (or died without an end line: "lost")
   late           the schedule says it should have started (more than GRACE_MINUTES ago) and no run started since
   never          wrapped, but no run recorded yet and none due yet
@@ -25,8 +27,10 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -66,21 +70,40 @@ def _append(path: Path, rec: dict) -> None:
 # ---------------------------------------------------------------------------------------------- the wrapper
 def run_job(name: str, argv: list[str] | None = None, shell: str | None = None, root: Path | None = None,
             now=_now) -> int:
-    """Run the command and record it.  Returns the command's exit code (127 when it cannot be started)."""
+    """Run the command and record it.  Returns the command's exit code (127 when it cannot be started).  A SIGTERM or SIGINT to this
+    process (or its process group) is passed to the command and the run is recorded as stopped."""
     path = runs_path(root)
     run_id = f"{now():%Y%m%dT%H%M%S}-{os.getpid()}"
     started = now()
-    _append(path, {"ev": "start", "job": name, "id": run_id, "at": _iso(started), "pid": os.getpid()})
+    trigger = os.environ.get("JARVIS_JOB_TRIGGER", "cron")
+    _append(path, {"ev": "start", "job": name, "id": run_id, "at": _iso(started), "pid": os.getpid(), "pgid": os.getpgrp(), "by": trigger})
     t0 = time.monotonic()
+    stopped = {"sig": None}
+    child: dict = {"p": None}
+
+    def on_signal(signum, _frame):
+        stopped["sig"] = signum
+        if child["p"] is not None and child["p"].poll() is None:
+            try:
+                child["p"].send_signal(signum)
+            except OSError:
+                pass
+
+    old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGINT)} if threading.current_thread() is threading.main_thread() else {}
     try:
-        code = subprocess.call(shell, shell=True, executable="/bin/bash") if shell else subprocess.call(argv)
-    except OSError as exc:                                    # command not found, not executable
-        print(f"jobrun: cannot start {name}: {exc}", file=sys.stderr)
-        code = 127
-    except BaseException:                                     # interrupted (SIGINT): record an end, then let it propagate
-        _append(path, {"ev": "end", "job": name, "id": run_id, "at": _iso(now()), "code": 130, "secs": round(time.monotonic() - t0, 1)})
-        raise
-    _append(path, {"ev": "end", "job": name, "id": run_id, "at": _iso(now()), "code": int(code), "secs": round(time.monotonic() - t0, 1)})
+        try:
+            child["p"] = subprocess.Popen(shell, shell=True, executable="/bin/bash") if shell else subprocess.Popen(argv)
+            code = child["p"].wait()
+        except OSError as exc:                                # command not found, not executable
+            print(f"jobrun: cannot start {name}: {exc}", file=sys.stderr)
+            code = 127
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+    end = {"ev": "end", "job": name, "id": run_id, "at": _iso(now()), "code": int(code), "secs": round(time.monotonic() - t0, 1)}
+    if stopped["sig"] is not None:
+        end["stopped"] = True
+    _append(path, end)
     return int(code)
 
 
@@ -264,6 +287,8 @@ class State:
     next_run: Optional[str] = None
     due_at: Optional[str] = None
     log_written: Optional[str] = None
+    started_by: Optional[str] = None
+    pid: Optional[int] = None                                # of the running wrapper, when state is running
     history: list = field(default_factory=list)              # newest first: {"start", "end", "code", "secs"}
 
     def as_dict(self) -> dict:
@@ -273,9 +298,12 @@ class State:
 def _pid_alive(pid) -> bool:
     try:
         os.kill(int(pid), 0)
-        return True
     except (OSError, TypeError, ValueError):
         return False
+    try:                                                      # a zombie (exited, not yet reaped by its parent) is not running
+        return Path(f"/proc/{int(pid)}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError, ValueError):
+        return True
 
 
 def _pair(runs: list[dict]) -> dict[str, list[dict]]:
@@ -283,11 +311,11 @@ def _pair(runs: list[dict]) -> dict[str, list[dict]]:
     by_job: dict[str, dict[str, dict]] = {}
     for r in runs:
         run = by_job.setdefault(r["job"], {}).setdefault(r.get("id", ""), {"id": r.get("id", ""), "start": None, "end": None,
-                                                                          "code": None, "secs": None, "pid": None})
+                                                                          "code": None, "secs": None, "pid": None, "pgid": None, "by": "", "stopped": False})
         if r["ev"] == "start":
-            run["start"], run["pid"] = r.get("at"), r.get("pid")
+            run["start"], run["pid"], run["pgid"], run["by"] = r.get("at"), r.get("pid"), r.get("pgid"), r.get("by", "")
         else:
-            run["end"], run["code"], run["secs"] = r.get("at"), r.get("code"), r.get("secs")
+            run["end"], run["code"], run["secs"], run["stopped"] = r.get("at"), r.get("code"), r.get("secs"), bool(r.get("stopped"))
     return {j: sorted((x for x in d.values() if x["start"]), key=lambda x: x["start"]) for j, d in by_job.items()}
 
 
@@ -308,15 +336,17 @@ def states(jobs: Iterable[Job], runs: list[dict], now: datetime | None = None, r
                 s.log_written = _iso(datetime.fromtimestamp((root / j.log).stat().st_mtime, timezone.utc).replace(tzinfo=None))
             except OSError:
                 pass
-        s.history = [{"start": h["start"], "end": h["end"], "code": h["code"], "secs": h["secs"]} for h in reversed(hist[-10:])]
+        s.history = [{"start": h["start"], "end": h["end"], "code": h["code"], "secs": h["secs"], "stopped": h["stopped"]} for h in reversed(hist[-10:])]
         if hist:
             last = hist[-1]
             s.last_start, s.last_end, s.exit_code, s.secs = last["start"], last["end"], last["code"], last["secs"]
+            s.started_by = last["by"] or None
+            s.pid = last["pid"] if last["end"] is None else None
             age_h = (now - datetime.fromisoformat(last["start"])).total_seconds() / 3600
             if last["end"] is None:
                 s.state = "running" if age_h < MAX_RUNNING_HOURS and pid_alive(last["pid"]) else "lost"
             else:
-                s.state = "ok" if last["code"] == 0 else "failed"
+                s.state = "ok" if last["code"] == 0 else ("stopped" if last["stopped"] else "failed")
         elif j.wrapped:
             s.state = "never"
         if hist and s.state == "ok" and due:        # late: it should have started by now and nothing started since
@@ -325,6 +355,64 @@ def states(jobs: Iterable[Job], runs: list[dict], now: datetime | None = None, r
                 s.state = "late"
         out.append(s)
     return out
+
+
+# ---------------------------------------------------------------------------------------------- start and stop (SCRUM-204)
+class ControlError(Exception):
+    """A start or stop that cannot be done, with a message fit to show the user."""
+
+
+def _is_jobrun(pid) -> bool:
+    """Whether `pid` is still one of our wrappers (a recycled pid must never be signalled).  Without /proc, only that the pid exists."""
+    if not Path("/proc/self").exists():
+        return _pid_alive(pid)
+    try:
+        return b"jobrun" in Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _find(name: str, root: Path | None) -> tuple[Job, State]:
+    jobs = load_crontab(root)
+    job = next((j for j in jobs if j.name == name), None)
+    if job is None:
+        raise ControlError("no such job")                      # only a job named in deploy/crontab can be touched: the command is never from the caller
+    st = states([job], load_runs(root), root=root)[0]
+    return job, st
+
+
+def start_job(name: str, root: Path | None = None, by: str = "admin", popen=subprocess.Popen) -> int:
+    """Run a crontab job now, detached from the caller, exactly as cron would (same command, recorded by the heartbeat).  Returns the pid."""
+    root = root or lake_mod.ROOT
+    job, st = _find(name, root)
+    if st.state == "running":
+        raise ControlError("this job is already running")
+    m = _WRAP.search(job.command)
+    body = re.search(r"--shell\s+'(.*)'\s*$", job.command)
+    if not (m and body):
+        raise ControlError("this cron line is not wrapped by the heartbeat, so it cannot be controlled")
+    repo = str(Path(__file__).resolve().parent.parent)           # so `-m data_layer.jobrun` is found wherever the caller runs
+    env = {**os.environ, "JARVIS": os.environ.get("JARVIS") or str(root), "JARVIS_JOB_TRIGGER": f"admin:{by}"[:60],
+           "PYTHONPATH": repo + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else "")}
+    p = popen([sys.executable, "-m", "data_layer.jobrun", "run", name, "--shell", body.group(1)], cwd=str(root), env=env,
+              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    threading.Thread(target=p.wait, daemon=True, name=f"reap-{name}").start()      # reap it when it ends: no zombies in a long-lived viewer
+    return p.pid
+
+
+def stop_job(name: str, root: Path | None = None, force: bool = False, killpg=os.killpg) -> int:
+    """Stop the running process of a job: SIGTERM to its process group (SIGKILL with force).  Returns the group id signalled."""
+    job, st = _find(name, root)
+    if st.state != "running" or not st.pid:
+        raise ControlError("this job is not running")
+    if not _is_jobrun(st.pid):
+        raise ControlError("the recorded process is no longer a job wrapper: not touching it")
+    runs = [r for r in _pair(load_runs(root)).get(name, []) if r["end"] is None]
+    pgid = (runs[-1]["pgid"] if runs else None) or st.pid
+    if pgid in (os.getpgrp(), 0, 1):
+        raise ControlError("refusing to signal this process group")
+    killpg(int(pgid), signal.SIGKILL if force else signal.SIGTERM)
+    return int(pgid)
 
 
 # ---------------------------------------------------------------------------------------------- the log tail
@@ -362,16 +450,31 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="run a command and record it")
     r.add_argument("name")
     r.add_argument("--shell", default=None, help="a shell line instead of an argv")
-    r.add_argument("command", nargs=argparse.REMAINDER)
+    r.add_argument("command", nargs="*", help="argv of the command, after --")
     s = sub.add_parser("status", help="state of every job in deploy/crontab")
     s.add_argument("--json", action="store_true")
+    for c, h in (("start", "run a crontab job now"), ("stop", "stop a running crontab job")):
+        x = sub.add_parser(c, help=h)
+        x.add_argument("name")
+        if c == "stop":
+            x.add_argument("--force", action="store_true", help="SIGKILL instead of SIGTERM")
     sub.add_parser("compact", help=f"drop records older than {KEEP_DAYS} days")
     a = ap.parse_args(argv)
     if a.cmd == "run":
-        cmd = a.command[1:] if a.command[:1] == ["--"] else a.command
+        cmd = a.command[1:] if a.command[:1] == ["--"] else a.command            # argparse keeps or drops the "--"
         if not (cmd or a.shell):
             ap.error("no command given")
         return run_job(a.name, argv=cmd or None, shell=a.shell)
+    if a.cmd in ("start", "stop"):
+        try:
+            if a.cmd == "start":
+                print(f"started {a.name}, pid {start_job(a.name, by='cli')}")
+            else:
+                print(f"signalled process group {stop_job(a.name, force=a.force)}")
+        except ControlError as exc:
+            print(f"{a.cmd}: {exc}")
+            return 1
+        return 0
     if a.cmd == "compact":
         print(f"{compact()} records kept")
         return 0
