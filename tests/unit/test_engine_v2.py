@@ -216,9 +216,10 @@ def test_native_operators_equal_the_whole_day_batch(day, bucket, minutes):
     a = r.cycle()
     b = engine_replay("NIFTY", trim(hist), t, {s: bucket for s in ids}, step="1min")
     assert len(a) == len(b) > 50
-    assert {"block_prints", "opening_flow", "depth_features", "signed_flow"} <= set(b["signal"])
-    if bucket != "1s":                                   # one-second buckets rarely have the previous bucket's quote
-        assert "fair_value_gap" in set(b["signal"])
+    assert set(a["signal"]) == set(b["signal"])
+    assert {"opening_flow", "depth_features", "signed_flow"} <= set(b["signal"])
+    if bucket != "1s":            # a two-minute 1 s window may hold no block print or adjacent quoted bucket
+        assert {"block_prints", "fair_value_gap"} <= set(b["signal"])
     assert _compare(a, b, ids) == {}
 
 
