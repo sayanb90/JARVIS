@@ -53,7 +53,10 @@ def test_latest_day(lake):
     assert latest_day(lake) == DAY
 
 
-def test_nightly_and_coverage(lake, tmp_path):
+def test_nightly_and_coverage(lake, tmp_path, monkeypatch):
+    # the intraday replay of a whole day at 1 s has its own test (test_nightly_replay_streams_...): stubbed here to keep this fast
+    from signals.engine import core
+    monkeypatch.setattr(core, "replay_day", lambda *a, **k: 0)
     res = nightly(lake, tmp_path, DAY, underlyings=("NIFTY",), log=lambda *a: None)
     assert res["day"] == str(DAY) and res["rows"]["NIFTY"] > 0
     v = read_output(tmp_path, "vrp", "NIFTY")
