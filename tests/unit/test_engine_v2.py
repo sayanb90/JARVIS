@@ -254,7 +254,7 @@ def test_session_loop_closes_buckets_stores_rows_publishes_provisional_and_beats
     hb = tmp_path / "live" / "engine-NIFTY.heartbeat.json"
     pub = Pub()
     stats = run([eng], Src(), d + pd.Timedelta(hours=3, minutes=53), publisher=pub, store=tmp_path, tick_ms=1, clock=clock,
-                heartbeat=write_heartbeat(hb))
+                heartbeat=write_heartbeat(hb), status_s=0)
     assert stats["rows"] > 0 and stats["provisional"] > 0
     topics = {tp for tp, _, _ in pub.sent}
     assert topics == {"signal", "provisional"}
@@ -264,6 +264,8 @@ def test_session_loop_closes_buckets_stores_rows_publishes_provisional_and_beats
     assert len(stored) and "t_emit" not in stored.columns                          # ...but not in the store
     doc = json.loads(hb.read_text())
     assert doc["engines"]["NIFTY"]["buckets"]["10s"] > 10
+    last = doc["engines"]["NIFTY"]["last_status"]
+    assert last["underlying"] == "NIFTY" and last["groups"]["10s"]["signals"] == 1 and last["fallbacks"] == []
 
 
 def test_health_reads_the_engine_heartbeat(tmp_path):
@@ -277,6 +279,10 @@ def test_health_reads_the_engine_heartbeat(tmp_path):
     assert [c.status for c in engine_checks(tmp_path, d.date())] == ["OK"]
     f.write_text(json.dumps({"at": "2026-11-16 05:10:00", "engines": {"NIFTY": {"buckets": {"1s": 100}, "late": 0, "ticks": 10}}}))
     assert [c.status for c in engine_checks(tmp_path, d.date())] == ["FAIL"]                # stopped mid-session
+    f.write_text(json.dumps({"at": "2026-11-16 09:59:58", "engines": {"NIFTY": {"buckets": {"1s": 22000, "10s": 2200}, "late": 0,
+                                                                                  "ticks": 900000, "fallbacks": [["1s", "10s", 11, "x"]]}}}))
+    (c,) = engine_checks(tmp_path, d.date())
+    assert c.status == "WARN" and "coarser cadence" in c.detail
     f.unlink()
     assert [c.status for c in engine_checks(tmp_path, d.date())] == ["WARN"]
 
@@ -311,3 +317,75 @@ def test_native_term_slope_off_expiry_day():
         ref = c.compute(sid).drop(columns=["underlying"])
         g = got[sid][list(ref.columns)]
         assert len(g) == 1 and same_frames(ref, g, ["known_at"]) == []
+
+
+def test_overrunning_group_moves_to_the_next_coarser_cadence_with_exact_values(day):
+    """A 1 s group whose bucket closes take longer than allowed three times in a row moves to 10 s for the rest of the session;
+    from its next bucket on, the 10 s values equal an engine configured at 10 s from the start (the state keeps every coarser
+    cadence's buckets)."""
+    hist, ticks, d = day
+    t = _cut(dense_ticks(ticks), d, 4)
+    ids = ["book_pressure", "pcr_full"]
+    eng = OperatorEngine("NIFTY", trim(hist), {s: "1s" for s in ids}, d)
+    assert list(eng.groups) == ["1s", "10s", "1min"] and eng.groups["10s"].ids == []
+    eng.groups["1s"].budget_s = 0.0                                      # every close "overruns"
+    parts = [eng.on_ticks(g) for _, g in t.groupby(t["fts"].dt.floor("1min"), sort=True)] + [eng.finish()]
+    got = pd.concat([p for p in parts if len(p)], ignore_index=True)
+    assert len(eng.fallbacks) == 1 and eng.fallbacks[0][:2] == ("1s", "10s") and set(eng.fallbacks[0][2]) == set(ids)
+    assert eng.groups["1s"].ids == [] and set(eng.groups["10s"].ids) == set(ids)
+    switched = pd.Timestamp(eng.fallbacks[0][3])
+    late = got[(got["bucket"] == "10s") & (pd.to_datetime(got["known_at"]) > switched + pd.Timedelta("10s"))]
+    assert len(late) > 20 and not len(got[(got["bucket"] == "1s") & (pd.to_datetime(got["known_at"]) > switched + pd.Timedelta("1s"))])
+    ref = engine_replay("NIFTY", trim(hist), t, {s: "10s" for s in ids}, step="1min")
+    ref = ref[pd.to_datetime(ref["known_at"]) > switched + pd.Timedelta("10s")]
+    assert _compare(ref, late, ids) == {}
+    st = eng.status(pd.Timestamp(d) + pd.Timedelta(hours=4))
+    assert st["fallbacks"] and st["groups"]["10s"]["signals"] == 2
+
+
+def test_status_line_reports_every_cadence_and_fallbacks(day):
+    from signals.engine.core import status_line
+    hist, ticks, d = day
+    eng = OperatorEngine("NIFTY", trim(hist), {"book_pressure": "1s"}, d)
+    eng.on_ticks(_cut(ticks, d, 2))
+    line = status_line(eng.status(d + pd.Timedelta(hours=3, minutes=47), missed=3))
+    assert line.startswith("status NIFTY: ticks=") and "missed_on_bus=3" in line and "1s[sig=1" in line and "lag=" in line
+    assert "FALLBACKS" not in line
+
+
+def test_watch_flags_stale_behind_fallback_and_errors(tmp_path):
+    import json
+    from signals.watch import render
+    (tmp_path / "live").mkdir()
+    now = pd.Timestamp("2026-11-16 05:00:10")
+    ok = {"at": "2026-11-16 05:00:09.9", "engines": {"NIFTY": {"buckets": {"1s": 4500}, "late": 1, "ticks": 90000, "lag_s": 0.3,
+                                                              "errors": 0, "fallbacks": [],
+                                                              "last_status": {"rss_mb": 410, "groups": {"1s": {"signals": 27, "mean_ms": 95.0,
+                                                                                                              "max_ms": 180.0}}}}}}
+    bad = {"at": "2026-11-16 04:59:00", "engines": {"BANKNIFTY": {"buckets": {"1s": 4000}, "late": 900, "ticks": 90000, "lag_s": 12.0,
+                                                                 "errors": 2, "fallbacks": [["1s", "10s", 27, "x"]]}}}
+    (tmp_path / "live" / "engine-NIFTY.heartbeat.json").write_text(json.dumps(ok))
+    (tmp_path / "live" / "engine-BANKNIFTY.heartbeat.json").write_text(json.dumps(bad))
+    (tmp_path / "paper-nifty.log").write_text("x status paper: signal_rows=5 fills=0 kill=off\n")
+    out = render(tmp_path, tmp_path, now)
+    nifty = [ln for ln in out.splitlines() if ln.strip().startswith("NIFTY")][0]
+    bank = [ln for ln in out.splitlines() if ln.strip().startswith("BANKNIFTY")][0]
+    assert nifty.split()[-1] == "OK" and "1s mean 95.0 / max 180.0 ms" in out
+    assert "STALE" in bank and "BEHIND" in bank and "FALLBACK" in bank and "ERRORS 2" in bank and "LATE" in bank
+    assert "signal_rows=5" in out
+
+
+def test_supervise_restarts_after_an_error_and_stops_cleanly():
+    from signals.engine.core import supervise
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("boom")
+        return {"rows": 1}
+
+    res = supervise(flaky, pd.Timestamp("2099-01-01"), sleep=lambda s: None)
+    assert res == {"rows": 1, "restarts": 2} and calls["n"] == 3
+    res = supervise(lambda: (_ for _ in ()).throw(MemoryError()), pd.Timestamp("2099-01-01"), max_restarts=2, sleep=lambda s: None)
+    assert res["stopped"] == "too many restarts"

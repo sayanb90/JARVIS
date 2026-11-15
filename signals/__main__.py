@@ -157,12 +157,21 @@ def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDE
     out, intraday = {}, {}
     from signals import cadence as cadence_mod
     from signals.live_runner import live_signal_ids, replay_day
-    groups = cadence_mod.groups(cadence_mod.load(live_signal_ids()))
+    from signals.engine import core as engine_core
+    cad = cadence_mod.load(live_signal_ids())
+    groups = cadence_mod.groups(cad)
+    v2 = engine_core.engine_kind() == "operators"
     for u in underlyings:
         st = run(lake, root, u, day, day, provenance=prov, log=log)
         out[u] = sum(st.values())
         intraday[u] = 0
-        for c, ids in groups.items():           # the live era: each cadence group replayed by the live engine's own code
+        if v2:                                  # the live era, replayed by the live engine's own code (engine v2: all cadences at once)
+            try:
+                intraday[u] += engine_core.replay_day(lake, root, u, day, cad)
+            except Exception as exc:            # noqa: BLE001 -- the daily signals above are already written
+                log(f"intraday replay {u} {day} failed: {exc!r}")
+            continue
+        for c, ids in groups.items():           # the first engine: each cadence group replayed by the runner
             try:
                 intraday[u] += replay_day(lake, root, u, day, bucket=c, ids=ids)
             except Exception as exc:            # noqa: BLE001 -- the daily signals above are already written
@@ -266,6 +275,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     hl = sub.add_parser("health", add_help=False)
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] == "watch":
+        from signals.watch import main as watch_main
+        return watch_main(argv[1:])
     if argv and argv[0] == "health":
         from signals.health import main as health_main
         return health_main(argv[1:])
@@ -286,7 +298,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         kind = core.engine_kind()                                   # JARVIS_SIGNAL_ENGINE: operators (default) or runner
         logging.getLogger("signals.engine").info("engine %s", kind)
         start = core.start if kind == "operators" else engine.start
-        res = start(a.lake or LAKE_DIR, a.root or default_store(), a.underlying.split(","), a.until)
+        from datetime import datetime as _dt
+        until = pd.Timestamp(_dt.combine(_dt.utcnow().date(), _dt.strptime(a.until, "%H:%M").time()))
+        res = core.supervise(lambda: start(a.lake or LAKE_DIR, a.root or default_store(), a.underlying.split(","), a.until), until)
         print(json.dumps(res, default=str))
         return 0
     if a.cmd == "latency":

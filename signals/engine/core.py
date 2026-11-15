@@ -35,7 +35,7 @@ from signals import lookbacks, normalise
 from signals.engine import chain_ops, operators, surface
 from signals.engine.state import EXPIRY_NS, NS_MIN, YEAR_NS, Session, td_ns
 from signals.framework import REGISTRY, Context, normalise_output
-from signals.live_runner import CHAIN_FREE, LiveRunner, _last_sessions, bar_volume, daily_inputs, live_signal_ids
+from signals.live_runner import CHAIN_FREE, OVERRUNS_BEFORE_FALLBACK, LiveRunner, _last_sessions, bar_volume, daily_inputs, live_signal_ids
 from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
 
 log = logging.getLogger("signals.engine")
@@ -167,6 +167,8 @@ class Group:
     timings: dict = field(default_factory=dict)
     buckets: int = 0
     overruns: int = 0
+    interval: dict = field(default_factory=lambda: {"n": 0, "sum_s": 0.0, "max_s": 0.0})   # bucket closes since the last status
+    budget_s: Optional[float] = None                   # time a bucket close may take (default: the cadence)
 
     native: tuple = ()                                 # signals computed by native operators (signals/engine/operators.py)
     natives: object = None
@@ -197,22 +199,17 @@ class OperatorEngine:
         ids = sorted(self.cadence)
         self.anchors = Anchors(underlying, history, self.day, ids, volume_slot_daily=volume_slot_daily, daily_signals=daily_signals)
         groups = cadence_mod.groups(self.cadence)
-        nat = tuple(operators.NATIVE + chain_ops.CHAIN_NATIVE if native is None else native)
-        meta = operators.contract_meta(self.anchors.contract_table)
-        self.groups = {}
-        self.session = Session(underlying, history.get("contracts"), self.day, cadences=tuple(groups), r=r, rates=history.get("rates"))
-        for c, sids in groups.items():
-            g = Group(c, sids, native=tuple(s for s in sids if s in nat))
-            tape = [s for s in g.native if s in operators.NATIVE]
-            chain = [s for s in g.native if s in chain_ops.CHAIN_NATIVE]
-            g.natives = operators.Natives(tape, g.td, meta) if tape else None
-            g.cnatives = chain_ops.ChainNatives(chain, g.td, self.session.options, self.anchors.hist_atm, history.get("participant"),
-                                                daily=self.anchors.fixed.get("daily"),
-                                                vix_hist=self.anchors.providers(c).get("vix"),
-                                                events=history.get("events")) if chain else None
-            if g.cnatives is not None and g.cnatives.needs_live:
-                g.needs_live = True
-            self.groups[c] = g
+        self._nat = tuple(operators.NATIVE + chain_ops.CHAIN_NATIVE if native is None else native)
+        self._meta = operators.contract_meta(self.anchors.contract_table)
+        self._history = history
+        # every cadence from the finest configured to the coarsest is kept in the state, so a group that overruns can move to a
+        # coarser one mid-session with exact bucket volumes and bars (a cadence without signals only closes its buckets: cheap)
+        order = cadence_mod.ORDER
+        finest = min((order.index(c) for c in groups), default=len(order) - 1)
+        cads = order[finest:]
+        self.session = Session(underlying, history.get("contracts"), self.day, cadences=tuple(cads), r=r, rates=history.get("rates"))
+        self.groups = {c: self._group(c, groups.get(c, [])) for c in cads}
+        self.fallbacks: list = []                       # (from cadence, to cadence, signals, at)
         self.baselines = baselines or {}                # cadence -> signal -> baseline
         self.reorder_ns = int(reorder_ms) * 1_000_000
         self.pending = pd.DataFrame()                   # reorder buffer
@@ -225,6 +222,78 @@ class OperatorEngine:
         self.late = 0
         self.stats = defaultdict(float)
         self.trigger = (0, 0)                           # (vendor time, receive time) of the tick that closed the last buckets
+        self.last_tick_mono: Optional[float] = None
+        self.errors = 0                                 # batches or timer steps that raised (logged, the session continues)
+
+    def _group(self, c: str, sids: list) -> Group:
+        g = Group(c, list(sids), native=tuple(s for s in sids if s in self._nat))
+        self._attach(g)
+        return g
+
+    def _attach(self, g: Group) -> None:
+        """(Re)build a group's native operators for its signals, keeping the state of operators that already exist."""
+        tape = [s for s in g.native if s in operators.NATIVE]
+        chain = [s for s in g.native if s in chain_ops.CHAIN_NATIVE]
+        if tape:
+            if g.natives is None:
+                g.natives = operators.Natives(tape, g.td, self._meta)
+            else:
+                g.natives.ids = tape
+        if chain:
+            if g.cnatives is None:
+                h = self._history
+                g.cnatives = chain_ops.ChainNatives(chain, g.td, self.session.options, self.anchors.hist_atm, h.get("participant"),
+                                                    daily=self.anchors.fixed.get("daily"),
+                                                    vix_hist=self.anchors.providers(g.cadence).get("vix"), events=h.get("events"))
+            else:
+                g.cnatives.ids = chain
+        if g.cnatives is not None and g.cnatives.needs_live:
+            g.needs_live = True
+
+    def _coarsen(self, g: Group, at: int) -> None:
+        """Move an overrunning group's signals to the next coarser cadence for the rest of the session (logged, in the heartbeat and
+        the health check).  The coarser cadence's buckets and bars are already in the state, so its values are exact from its next
+        bucket on; operators with memory (skew smoothing, depth baseline, previous-bucket differences) warm up again there."""
+        order = cadence_mod.ORDER
+        if g.cadence == order[-1]:
+            log.warning("%s: %s buckets keep overrunning and it is already the coarsest cadence", self.underlying, g.cadence)
+            g.overruns = 0
+            return
+        nc = order[order.index(g.cadence) + 1]
+        t = self.groups[nc]
+        moved = list(g.ids)
+        log.warning("%s: %s buckets overran %d times in a row; moving %d signals to %s for the rest of the session: %s",
+                    self.underlying, g.cadence, OVERRUNS_BEFORE_FALLBACK, len(moved), nc, ", ".join(moved))
+        self.fallbacks.append((g.cadence, nc, moved, str(pd.Timestamp(at))))
+        t.ids = sorted(set(t.ids) | set(moved))
+        t.native = tuple(s for s in t.ids if s in self._nat)
+        nt = Group(nc, t.ids, native=t.native)                      # recompute windows, keep_ns and needs_* for the merged list
+        t.windows, t.keep_ns, t.needs_chain, t.needs_live = nt.windows, nt.keep_ns, nt.needs_chain, nt.needs_live
+        self._attach(t)
+        self.ticks.keep = max(self.ticks.keep, pd.Timedelta(t.keep_ns + 2 * NS_MIN, unit="ns"))
+        g.ids, g.native, g.windows, g.natives, g.cnatives = [], (), {}, None, None
+        g.needs_chain = g.needs_live = False
+        g.overruns = 0
+
+    def status(self, now: pd.Timestamp, missed: int = 0) -> dict:
+        """What the status line and the heartbeat report; resets the per-interval bucket timings."""
+        import resource
+        rss = 0.0
+        try:
+            with open("/proc/self/statm") as f:
+                rss = int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20
+        except OSError:
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        out = {"underlying": self.underlying, "ticks": int(self.stats.get("ticks", 0)), "late": self.late, "missed_on_bus": int(missed),
+               "errors": self.errors,
+               "rows": int(self.stats.get("rows", 0)), "lag_s": round((now.value - self.newest) / 1e9, 2) if self.newest else None,
+               "rss_mb": round(rss), "fallbacks": [list(f[:2]) + [len(f[2]), f[3]] for f in self.fallbacks], "groups": {}}
+        for c, g in self.groups.items():
+            iv = g.interval
+            out["groups"][c] = {"signals": len(g.ids), "buckets": g.buckets, "closed": iv["n"],
+                                "mean_ms": round(1000 * iv["sum_s"] / iv["n"], 1) if iv["n"] else None, "max_ms": round(1000 * iv["max_s"], 1)}
+            g.interval = {"n": 0, "sum_s": 0.0, "max_s": 0.0}
+        return out
 
     # ------------------------------------------------------------------------------------------ input
     def on_ticks(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -239,6 +308,7 @@ class OperatorEngine:
         df["fts"] = pd.to_datetime(df["fts"] if "fts" in df.columns else df["ts"])
         newest = int(df["fts"].max().value)
         self.newest = newest if self.newest is None else max(self.newest, newest)
+        self.last_tick_mono = _time.monotonic()
         buf = pd.concat([self.pending, df], ignore_index=True) if len(self.pending) else df
         cut = self.newest - self.reorder_ns
         ready = buf["fts"].astype("int64") <= cut if self.reorder_ns else pd.Series(True, index=buf.index)
@@ -308,12 +378,24 @@ class OperatorEngine:
             end = min(e for e, _, _ in due)
             for e, _, g in sorted(due, key=lambda x: x[1]):          # finer cadences first at a shared boundary
                 if e == end:
+                    c0 = _time.perf_counter()
                     out.append(self._close(g, g.b_open))
+                    secs = _time.perf_counter() - c0
                     g.b_open += g.td
+                    iv = g.interval
+                    iv["n"] += 1
+                    iv["sum_s"] += secs
+                    iv["max_s"] = max(iv["max_s"], secs)
+                    if g.ids:
+                        g.overruns = g.overruns + 1 if secs > (g.budget_s if g.budget_s is not None else g.td / 1e9) else 0
+                        if g.overruns >= OVERRUNS_BEFORE_FALLBACK:
+                            self._coarsen(g, end)
             self.closed_to = end if self.closed_to is None else max(self.closed_to, end)
         if self.closed_to is not None:
             self.ticks.trim(pd.Timestamp(self.closed_to))
-        return _concat(out)
+        res = _concat(out)
+        self.stats["rows"] += len(res)
+        return res
 
     def _today_bars(self, g: Group, b: int) -> None:
         """Today's index, VIX and future bars of bucket b, appended to the group's raw frames."""
@@ -534,9 +616,25 @@ def stamp(rows: pd.DataFrame, eng: OperatorEngine) -> pd.DataFrame:
     return rows
 
 
+STATUS_EVERY_S = 60
+LAG_WARN_S = 5.0                                    # newest tick more than this behind the wall clock
+SILENCE_WARN_S = 30.0                               # no tick for this long during market hours
+MARKET_UTC = (pd.Timedelta(hours=3, minutes=45), pd.Timedelta(hours=10))
+
+
+def status_line(st: dict) -> str:
+    """One log line per engine and minute: ticks, late, missed on the bus, rows, lag, memory, per cadence buckets closed and the
+    mean / slowest close in the last minute, and any fallback."""
+    gs = " ".join(f"{c}[sig={g['signals']} closed={g['closed']} mean={g['mean_ms']}ms max={g['max_ms']}ms]" for c, g in st["groups"].items())
+    fb = f" FALLBACKS={st['fallbacks']}" if st["fallbacks"] else ""
+    return (f"status {st['underlying']}: ticks={st['ticks']} late={st['late']} missed_on_bus={st['missed_on_bus']} "
+            f"errors={st.get('errors', 0)} rows={st['rows']} "
+            f"lag={st['lag_s']}s rss={st['rss_mb']}MB {gs}{fb}")
+
+
 def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, tick_ms: Optional[int] = None,
         clock=lambda: pd.Timestamp.utcnow().tz_localize(None), grace: pd.Timedelta = pd.Timedelta(milliseconds=500),
-        heartbeat=None) -> dict:
+        heartbeat=None, status_s: float = STATUS_EVERY_S) -> dict:
     """The session loop of engine v2: poll ticks, apply them, every tick_ms close due buckets (wall clock minus grace) and publish
     provisional values; final rows go to the bus ("signal") and to the store every 15 s."""
     from signals.engine.runner import WRITE_EVERY_S, signal_rows
@@ -544,6 +642,8 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
     tick_ms = tick_ms or TICK_MS_DEFAULT
     stats = {"loops": 0, "rows": 0, "provisional": 0, "max_close_s": 0.0}
     pending, last_write, last_timer = [], _time.monotonic(), 0.0
+    last_status, start_mono, warned_missed = _time.monotonic(), _time.monotonic(), 0
+    statuses: dict = {}
 
     def publish(rows, topic):
         if publisher is None or not len(rows):
@@ -556,20 +656,44 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
         df = source.poll(timeout_ms=tick_ms)
         out = []
         for e in engines:
-            out.append(stamp(e.on_ticks(df), e))
+            try:
+                out.append(stamp(e.on_ticks(df), e))
+            except Exception:                                           # noqa: BLE001 -- one bad batch must not stop the session
+                e.errors += 1
+                log.exception("%s: applying a tick batch failed (%d errors so far); continuing", e.underlying, e.errors)
         if _time.monotonic() - last_timer >= tick_ms / 1000:
             last_timer = _time.monotonic()
             now = clock()
             for e in engines:
                 t0 = _time.perf_counter()
                 e.trigger = (now.value, now.value)
-                out.append(stamp(e.advance(now, grace), e))
-                stats["max_close_s"] = max(stats["max_close_s"], _time.perf_counter() - t0)
-                prov = stamp(provisional(e, now), e)
-                stats["provisional"] += len(prov)
-                publish(prov, "provisional")
+                try:
+                    out.append(stamp(e.advance(now, grace), e))
+                    stats["max_close_s"] = max(stats["max_close_s"], _time.perf_counter() - t0)
+                    prov = stamp(provisional(e, now), e)
+                    stats["provisional"] += len(prov)
+                    publish(prov, "provisional")
+                except Exception:                                       # noqa: BLE001
+                    e.errors += 1
+                    log.exception("%s: the timer step failed (%d errors so far); continuing", e.underlying, e.errors)
+            if _time.monotonic() - last_status >= status_s:
+                last_status = _time.monotonic()
+                missed = int(getattr(source, "missed", 0) or 0)
+                in_market = MARKET_UTC[0] <= now - now.normalize() < MARKET_UTC[1]
+                for e in engines:
+                    st = e.status(now, missed)
+                    statuses[e.underlying] = st
+                    log.info(status_line(st))
+                    if st["lag_s"] is not None and st["lag_s"] > LAG_WARN_S and in_market:
+                        log.warning("%s: newest tick is %.1fs behind the clock (feed slow or engine behind)", e.underlying, st["lag_s"])
+                    quiet = _time.monotonic() - (e.last_tick_mono or start_mono)
+                    if in_market and quiet > SILENCE_WARN_S:
+                        log.warning("%s: no tick for %.0fs during market hours (feed down, bus off or not publishing?)", e.underlying, quiet)
+                if missed > warned_missed:
+                    log.warning("%d tick messages missed on the bus so far (subscriber too slow)", missed)
+                    warned_missed = missed
             if heartbeat is not None:
-                heartbeat(now, engines)
+                heartbeat(now, engines, statuses)
         rows = _concat(out)
         stats["loops"] += 1
         if len(rows):
@@ -590,6 +714,9 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
         for (u, b), g in allr.groupby(["underlying", "bucket"]):
             write_rows(g.to_dict("records"), store, prefix=f"engine-{u}-{ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
     stats["late"] = sum(e.late for e in engines)
+    stats["fallbacks"] = {e.underlying: e.fallbacks for e in engines}
+    for e in engines:
+        log.info("end of session " + status_line(e.status(clock(), int(getattr(source, "missed", 0) or 0))))
     return stats
 
 
@@ -600,9 +727,13 @@ def write_heartbeat(path) -> callable:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
 
-    def beat(now, engines):
+    def beat(now, engines, statuses=None):
+        statuses = statuses or {}
         doc = {"at": str(now), "engines": {e.underlying: {"buckets": {c: g.buckets for c, g in e.groups.items()}, "late": e.late,
-                                                          "ticks": int(e.stats.get("ticks", 0))} for e in engines}}
+                                                          "ticks": int(e.stats.get("ticks", 0)), "errors": e.errors,
+                                                          "lag_s": round((now.value - e.newest) / 1e9, 2) if e.newest else None,
+                                                          "fallbacks": [list(f[:2]) + [len(f[2]), f[3]] for f in e.fallbacks],
+                                                          "last_status": statuses.get(e.underlying)} for e in engines}}
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(doc))
         tmp.replace(p)
@@ -637,4 +768,61 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
     log.info("engine v2: %s; cadence groups %s; tick %d ms; source %s", list(underlyings),
              {c: len(v) for c, v in cadence_mod.groups(cad).items()}, tick_ms(env), type(src).__name__)
     hb = write_heartbeat(Path(store) / "live" / f"engine-{'-'.join(underlyings)}.heartbeat.json")
-    return run(engines, src, until, publisher=pub, store=Path(store), tick_ms=tick_ms(env), heartbeat=hb)
+    try:
+        return run(engines, src, until, publisher=pub, store=Path(store), tick_ms=tick_ms(env), heartbeat=hb)
+    finally:                                            # free the bus endpoints, so a restart can bind them again
+        for x in (pub, getattr(src, "sub", None)):
+            if x is not None:
+                try:
+                    x.close()
+                except Exception:                       # noqa: BLE001
+                    pass
+
+
+def supervise(start_fn, until: pd.Timestamp, max_restarts: int = 20, wait_s: float = 5.0,
+              clock=lambda: pd.Timestamp.utcnow().tz_localize(None), sleep=_time.sleep) -> dict:
+    """Run the engine; if it stops with an error before `until`, log it and start it again (history reloaded, state rebuilt from
+    the ticks that arrive after the restart), at most `max_restarts` times.  A clean return ends the session."""
+    restarts = 0
+    while True:
+        try:
+            res = start_fn()
+            res = dict(res or {}, restarts=restarts)
+            return res
+        except Exception:                                           # noqa: BLE001 -- MemoryError included
+            log.exception("engine stopped with an error (restart %d of %d)", restarts + 1, max_restarts)
+            if clock() >= until:
+                return {"restarts": restarts, "stopped": "error after the end of the session"}
+            restarts += 1
+            if restarts > max_restarts:
+                log.error("engine failed %d times; giving up for today", restarts)
+                return {"restarts": restarts, "stopped": "too many restarts"}
+            sleep(wait_s)
+
+
+
+def replay_day(lake, store, underlying: str, day, cadence: dict) -> int:
+    """After the close: replay the day's recorded ticks through engine v2 (every cadence group at once) and write the per-bucket rows
+    to the signal store, so the history of the live era is what the live engine computed.  About 0.1 s per 1 s bucket on 2,000
+    contracts (the first engine needed 3.6 s, too slow for a day of 1 s buckets).  Returns rows written."""
+    from pathlib import Path
+    from signals.framework import write_output
+    from signals.live_runner import day_ticks, history_for, load_baselines, slot_volume_history
+    ticks = day_ticks(Path(lake), day)
+    if ticks is None:
+        return 0
+    day = pd.Timestamp(day).date()
+    groups = cadence_mod.groups(cadence)
+    base = {c: load_baselines(Path(store), underlying, day, ids, c) for c, ids in groups.items()}
+    rows = replay(underlying, history_for(Path(lake), underlying, day), ticks, cadence, step="5min", baselines=base,
+                  volume_slot_daily=slot_volume_history(Path(lake), underlying, day))
+    if rows.empty:
+        return 0
+    n = 0
+    for (sid, b), g in rows.groupby(["signal", "bucket"]):
+        spec = REGISTRY[sid][0]
+        g = g.drop(columns=["signal"]).assign(underlying=underlying)
+        if "ts" not in g.columns and "date" in g.columns:
+            g["ts"] = pd.to_datetime(g["known_at"]) - pd.Timedelta(b)
+        n += write_output(store, spec, g, layer=f"intraday/bucket={ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
+    return n

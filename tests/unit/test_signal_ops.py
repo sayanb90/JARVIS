@@ -79,3 +79,15 @@ def test_release_and_backfill_scripts():
     assert "crontab deploy/crontab" in rel and "JARVIS_DEPTH5" in rel and "pytest" in rel
     out = subprocess.run(["bash", "deploy/data-backfill.sh"], cwd=root, capture_output=True, text=True).stdout
     assert out.index("validate-iv") < out.index("signals run") and "--only expired" in out
+
+
+def test_nightly_replays_the_live_era_with_engine_v2(lake, tmp_path, monkeypatch):
+    """With engine v2 (the default), the after-close replay runs once per underlying with every cadence group, through engine v2
+    (the first engine would need about 3.6 s per 1 s bucket, a day of them in under a day is not possible)."""
+    from signals.engine import core
+    import signals.live_runner as lr
+    seen = []
+    monkeypatch.setattr(core, "replay_day", lambda lake_, root, u, day, cad: seen.append((u, set(cad.values()))) or 7)
+    monkeypatch.setattr(lr, "replay_day", lambda *a, **k: (_ for _ in ()).throw(AssertionError("first engine used")))
+    res = nightly(lake, tmp_path, DAY, underlyings=("NIFTY",), log=lambda *a: None)
+    assert res["intraday_rows"] == {"NIFTY": 7} and seen and seen[0][0] == "NIFTY" and "1s" in seen[0][1]

@@ -528,19 +528,24 @@ def cap_memory(env=None) -> int:
     return mb
 
 
-def replay_day(lake: Path, store: Path, underlying: str, day: date, bucket: str = "1min", ids: Optional[list[str]] = None) -> int:
-    """After the close: replay the day's recorded ticks through the runner and write the per-bucket rows to the signal store, so the
-    history of the live era is exactly what the runner computed (or would have).  Returns rows written."""
-    from signals.framework import write_output
+def day_ticks(lake: Path, day: date) -> Optional[pd.DataFrame]:
+    """Every recorded tick of a day (both segments, the compacted day files included), or None."""
     files = TickFiles(lake, day)
     files.folders = [f.parent / f"date={day}" for f in files.folders]                  # all files, including the compacted day file
     parts = []
     for f in files.folders:
         if f.is_dir():
             parts += [pd.read_parquet(p) for p in sorted(f.glob("*.parquet"))]
-    if not parts:
+    return pd.concat(parts, ignore_index=True) if parts else None
+
+
+def replay_day(lake: Path, store: Path, underlying: str, day: date, bucket: str = "1min", ids: Optional[list[str]] = None) -> int:
+    """After the close: replay the day's recorded ticks through the runner and write the per-bucket rows to the signal store, so the
+    history of the live era is exactly what the runner computed (or would have).  Returns rows written."""
+    from signals.framework import write_output
+    ticks = day_ticks(lake, day)
+    if ticks is None:
         return 0
-    ticks = pd.concat(parts, ignore_index=True)
     ids = ids or live_signal_ids()
     rows = replay(underlying, history_for(lake, underlying, day), ticks, bucket=bucket, step="5min", ids=ids,
                   baselines=load_baselines(store, underlying, day, ids, bucket),

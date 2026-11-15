@@ -104,14 +104,31 @@ def run(underlying: str, until: pd.Timestamp, logs: Path, env=None, poll_ms: int
     strat = VrpSkewGate(underlying=underlying, strike_step=50.0 if underlying == "NIFTY" else 100.0,
                         lot_size=65 if underlying == "NIFTY" else 30)
     tr = PaperTrader(strat, PaperExecution(risk=RiskGate(Limits.from_env(env)), day=day), logs, day)
+    last_status, n_sig = time.monotonic(), 0
     while pd.Timestamp.utcnow().tz_localize(None) < until:
         now = time.time_ns()
-        for _, m in ticks.poll(timeout_ms=poll_ms):
-            tr.on_tick_rows(m["cols"], m["rows"], now)
-        for _, m in sig.poll(timeout_ms=1):
-            tr.on_signal_rows(m, time.time_ns())
-        tr.poll(time.time_ns())
+        try:
+            for _, m in ticks.poll(timeout_ms=poll_ms):
+                tr.on_tick_rows(m["cols"], m["rows"], now)
+            for _, m in sig.poll(timeout_ms=1):
+                n_sig += len(m.get("rows", []))
+                tr.on_signal_rows(m, time.time_ns())
+            tr.poll(time.time_ns())
+        except Exception:                                   # noqa: BLE001 -- one bad message must not stop the paper session
+            log.exception("paper: processing a bus message failed; continuing")
+        if time.monotonic() - last_status >= 60:
+            last_status = time.monotonic()
+            log.info(status_line(tr, n_sig, ticks.missed + sig.missed))
+    log.info(status_line(tr, n_sig, ticks.missed + sig.missed))
     return tr.close()
+
+
+def status_line(tr: "PaperTrader", n_signal_rows: int, missed: int) -> str:
+    """One line a minute: signal rows received, orders, fills, refusals, open positions, P&L after costs, kill switch."""
+    ex = tr.ex
+    pos = {s: p.lots for s, p in ex.positions.items() if p.lots}
+    return (f"status paper: signal_rows={n_signal_rows} missed_on_bus={missed} open_orders={len(ex.open)} fills={len(ex.fills)} "
+            f"refused={len(ex.refused)} positions={pos} pnl={ex.pnl():.0f} costs={ex.costs:.0f} kill={ex.risk.killed or 'off'}")
 
 
 def main(argv: Optional[list] = None) -> int:

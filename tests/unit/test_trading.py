@@ -119,3 +119,14 @@ def test_paper_trader_records_latency_per_order(tmp_path):
     rep = latency.report(tmp_path / "logs", "2026-11-16").set_index("leg")
     assert rep.loc["engine", "n"] == 2 and rep.loc["engine", "p50_ms"] == pytest.approx(200.0)
     assert {"vendor", "bus", "strategy", "order", "tick_to_trade"} <= set(rep.index)
+
+
+def test_paper_status_line(tmp_path):
+    from trading.paper import status_line
+    ex = PaperExecution(risk=gate(tmp_path), delay_ms=0)
+    ex.on_quote("X", 99.0, 101.0, T0)
+    ex.submit(Order("X", +1, 1, 65), T0)
+    ex.poll(T0 + S)
+    tr = PaperTrader(VrpSkewGate(), ex, tmp_path / "logs", "2026-11-16")
+    line = status_line(tr, 12, 0)
+    assert line.startswith("status paper: signal_rows=12") and "fills=1" in line and "positions={'X': 1}" in line and "kill=off" in line

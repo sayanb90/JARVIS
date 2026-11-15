@@ -160,7 +160,10 @@ def engine_checks(store: Path, day: date) -> list[Check]:
             late, ticks = e.get("late", 0), max(1, e.get("ticks", 0))
             st = status if all(v > 0 for v in buckets.values()) else "FAIL"
             st = "WARN" if st == "OK" and late / ticks > 0.001 else st
-            out.append(Check("engine", st, f"{u}: last beat {at:%H:%M:%S} UTC, buckets {buckets}, late ticks {late} of {ticks}"))
+            fb = e.get("fallbacks") or []
+            st = "WARN" if st == "OK" and fb else st
+            extra = f"; fell back to a coarser cadence: {fb}" if fb else ""
+            out.append(Check("engine", st, f"{u}: last beat {at:%H:%M:%S} UTC, buckets {buckets}, late ticks {late} of {ticks}{extra}"))
     return out
 
 
