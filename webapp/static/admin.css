@@ -74,3 +74,9 @@ pre.log{margin:0;padding:12px 14px;max-height:55vh;overflow:auto;font:12px/1.5 u
 .job-actions{display:inline-flex;gap:8px;margin-left:auto}.job-actions .btn{padding:5px 14px;font-size:13px}
 .btn.danger{border-color:rgba(255,69,58,.5);color:#ff6961}
 .pill.stopped{background:rgba(255,159,10,.14);color:#ffb340}
+
+dialog.confirm{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:var(--r);padding:20px 22px;width:min(380px,calc(100vw - 32px))}
+dialog.confirm::backdrop{background:rgba(0,0,0,.6)}
+dialog.confirm h3{margin:0 0 6px}dialog.confirm .field{display:block;margin-top:12px}dialog.confirm input{width:100%;box-sizing:border-box}
+dialog.confirm .err{color:#ff6961;font-size:13px;margin:10px 0 0}dialog.confirm .qbar{justify-content:flex-end;margin-top:16px}
+dialog.confirm input{font:inherit;font-size:14px;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:var(--r2);padding:8px 12px}dialog.confirm input:focus{border-color:var(--accent);outline:none}

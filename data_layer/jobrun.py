@@ -412,6 +412,10 @@ def stop_job(name: str, root: Path | None = None, force: bool = False, killpg=os
     if pgid in (os.getpgrp(), 0, 1):
         raise ControlError("refusing to signal this process group")
     killpg(int(pgid), signal.SIGKILL if force else signal.SIGTERM)
+    if force and runs:                                        # SIGKILL leaves the wrapper no chance to write its end line: write it here
+        started = datetime.fromisoformat(runs[-1]["start"])
+        _append(runs_path(root), {"ev": "end", "job": name, "id": runs[-1]["id"], "at": _iso(_now()), "code": -9, "stopped": True,
+                                  "secs": round((_now() - started).total_seconds(), 1)})
     return int(pgid)
 
 

@@ -225,7 +225,7 @@ def test_start_refuses_unknown_unwrapped_and_running_jobs(tmp_path, monkeypatch)
     with pytest.raises(jr.ControlError, match="already running"):
         jr.start_job("slow", root)
     jr.stop_job("slow", root, force=True)
-    assert wait_for(lambda: jr.states(jr.load_crontab(root), jr.load_runs(root), root=root)[0].state != "running")
+    assert wait_for(lambda: jr.states(jr.load_crontab(root), jr.load_runs(root), root=root)[0].state == "stopped")      # not "lost": SIGKILL is recorded
 
 
 def test_stop_terminates_the_whole_process_group_and_records_stopped(tmp_path, monkeypatch):

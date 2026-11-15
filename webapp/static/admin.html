@@ -107,7 +107,7 @@ ORDER BY ticks DESC</textarea>
         <button id="log-refresh" class="btn">Reload</button><button id="log-close" class="btn">Close</button></header>
       <pre id="log-text" class="log" tabindex="0"></pre>
     </div>
-    <p class="note">State comes from <code>logs/jobs/runs.jsonl</code>, written by <code>data_layer.jobrun</code> around each cron command. <b>untracked</b> means the cron line is not wrapped yet, so only the log's last write time is known. <b>late</b> means the schedule says it should have started and nothing did. <b>stopped</b> means someone stopped the run. Run, stop and restart work only on wrapped jobs and only when <code>JARVIS_JOB_CONTROL=1</code> is set in <code>.env</code>; each action is written to the viewer's log with your user name. Secrets are hidden in the log tail.</p>
+    <p class="note">State comes from <code>logs/jobs/runs.jsonl</code>, written by <code>data_layer.jobrun</code> around each cron command. <b>untracked</b> means the cron line is not wrapped yet, so only the log's last write time is known. <b>late</b> means the schedule says it should have started and nothing did. <b>stopped</b> means someone stopped the run. Run, stop and restart work only on wrapped jobs and only when <code>JARVIS_JOB_CONTROL=1</code> is set in <code>.env</code>; each one asks for the admin password again and is written to the viewer's log with your user name. Secrets are hidden in the log tail.</p>
   </section>
 
   <section id="view-subs" class="view" hidden>
@@ -156,6 +156,16 @@ ORDER BY ticks DESC</textarea>
     </div>
   </section>
 </main>
+<dialog id="confirm-dlg" class="confirm">
+  <form method="dialog" id="confirm-form" autocomplete="off">
+    <h3 id="confirm-title">Confirm</h3>
+    <p id="confirm-text" class="muted"></p>
+    <label class="field"><span>Admin username</span><input id="confirm-user" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
+    <label class="field"><span>Admin password</span><input id="confirm-pass" type="password" autocomplete="new-password" required></label>
+    <p id="confirm-err" class="err" hidden></p>
+    <div class="qbar"><button type="button" id="confirm-cancel" class="btn">Cancel</button><button type="submit" id="confirm-ok" class="btn primary">Confirm</button></div>
+  </form>
+</dialog>
 <script src="/admin/static/admin.js"></script>
 </body>
 </html>

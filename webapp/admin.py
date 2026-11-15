@@ -493,9 +493,37 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
         import os
         return os.getenv("JARVIS_JOB_CONTROL", "").strip().lower() in ("1", "true", "yes", "on")
 
-    def control(name: str, action: str, force: bool = False):
+    # Re-entering the password for every start/stop (an accidental click, or a browser left logged in, must not run a job).  The
+    # browser sends it in the X-Jarvis-Confirm header as base64(user:password); 5 wrong tries in 5 minutes lock the actions for that time.
+    bad_confirms: list[float] = []
+    confirm_lock = threading.Lock()
+
+    def confirm_password(request: Request) -> None:
+        now = time.monotonic()
+        with confirm_lock:
+            bad_confirms[:] = [x for x in bad_confirms if now - x < 300]
+            if len(bad_confirms) >= 5:
+                raise HTTPException(429, "too many wrong passwords: job control is locked for a few minutes")
+        header = request.headers.get("x-jarvis-confirm", "")
+        ok = False
+        try:
+            u, _, p = base64.b64decode(header).decode().partition(":")
+            ok = bool(header) and secrets.compare_digest(u, user) & secrets.compare_digest(p, password)
+        except Exception:                                 # noqa: BLE001
+            ok = False
+        if not ok:
+            if header:                                    # a wrong password counts towards the lock; a missing one is a page bug, not a guess
+                with confirm_lock:
+                    bad_confirms.append(now)
+            log.warning("admin %s: job control refused, wrong or missing password confirmation", user)
+            time.sleep(0.5)
+            raise HTTPException(403, "password confirmation failed: enter the admin username and password")
+
+    def require_control() -> None:
         if not control_on():
             raise HTTPException(403, "job control is off: set JARVIS_JOB_CONTROL=1 in .env and restart the viewer")
+
+    def control(name: str, action: str, force: bool = False):
         try:
             if action == "start":
                 pid = jobrun.start_job(name, root, by=user)
@@ -506,11 +534,11 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
         log.warning("admin %s: job %s %s%s (pid/pgid %s)", user, name, action, " --force" if force else "", pid)
         return JSONResponse({"ok": True, "name": name, "action": action, "pid": pid}, headers=noindex)
 
-    @r.post("/api/jobs/start", dependencies=[Depends(same_origin)])
+    @r.post("/api/jobs/start", dependencies=[Depends(same_origin), Depends(require_control), Depends(confirm_password)])
     def job_start(body: dict):
         return control(str(body.get("name", ""))[:80], "start")
 
-    @r.post("/api/jobs/stop", dependencies=[Depends(same_origin)])
+    @r.post("/api/jobs/stop", dependencies=[Depends(same_origin), Depends(require_control), Depends(confirm_password)])
     def job_stop(body: dict):
         return control(str(body.get("name", ""))[:80], "stop", force=bool(body.get("force")))
 

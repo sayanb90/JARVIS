@@ -6,8 +6,8 @@ const state = { tab: 'data', catalog: [], service: null, vendor: '', table: null
                 qpage: 1, sql: '', subs: null, subSub: 'eq', eqFilter: '', eqPage: 1, plan: null };
 let req = 0;
 
-async function api(path, params, body) {
-  const opt = body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-jarvis-admin': '1' }, body: JSON.stringify(body) } : {};
+async function api(path, params, body, extraHeaders) {
+  const opt = body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-jarvis-admin': '1', ...(extraHeaders || {}) }, body: JSON.stringify(body) } : {};
   const r = await fetch(path + (params ? '?' + new URLSearchParams(params) : ''), opt);
   if (!r.ok) {
     let msg = r.statusText;
@@ -349,9 +349,23 @@ function showActions(j) {
   $('job-actions').hidden = !on;
   $('job-start').hidden = running; $('job-restart').hidden = !running; $('job-stop').hidden = !running; $('job-kill').hidden = !running;
 }
-async function jobAction(path, name, extra = {}) {
-  const r = await api(path, null, { name, ...extra });
-  return r;
+/* Every start or stop asks for the admin username and password again (an accidental click must not run a job).  The password is kept
+   only for the one action, sent in a header, and cleared. */
+function askCredentials(text, error) {
+  return new Promise((resolve) => {
+    const dlg = $('confirm-dlg'), user = $('confirm-user'), pass = $('confirm-pass'), err = $('confirm-err');
+    $('confirm-title').textContent = 'Confirm with your password';
+    $('confirm-text').textContent = text; err.hidden = !error; err.textContent = error || ''; pass.value = '';
+    const done = (v) => { dlg.close(); pass.value = ''; $('confirm-form').onsubmit = null; $('confirm-cancel').onclick = null; dlg.oncancel = null; resolve(v); };
+    $('confirm-form').onsubmit = (e) => { e.preventDefault(); done({ user: user.value, pass: pass.value }); };
+    $('confirm-cancel').onclick = () => done(null);
+    dlg.oncancel = (e) => { e.preventDefault(); done(null); };
+    dlg.showModal(); (user.value ? pass : user).focus();
+  });
+}
+const confirmHeader = (c) => ({ 'x-jarvis-confirm': btoa(unescape(encodeURIComponent(c.user + ':' + c.pass))) });
+async function jobAction(path, name, creds, extra = {}) {
+  return api(path, null, { name, ...extra }, confirmHeader(creds));
 }
 async function waitNotRunning(name, secs = 20) {
   for (let i = 0; i < secs * 2; i++) {
@@ -367,21 +381,30 @@ async function control(kind) {
   const ask = { start: `Run ${name} now?`, stop: `Stop ${name}? The running process is asked to finish (SIGTERM).`,
                 kill: `Force stop ${name}? It is killed at once (SIGKILL) and gets no chance to clean up.`,
                 restart: `Restart ${name}? It is stopped, then started again from the beginning.` }[kind];
-  if (!window.confirm(ask)) return;
-  try {
-    setStatus(`${kind} ${name}…`, 'busy');
-    if (kind === 'start') await jobAction('/admin/api/jobs/start', name);
-    else if (kind === 'stop') await jobAction('/admin/api/jobs/stop', name);
-    else if (kind === 'kill') await jobAction('/admin/api/jobs/stop', name, { force: true });
-    else {
-      await jobAction('/admin/api/jobs/stop', name);
-      if (!(await waitNotRunning(name))) throw new Error('it did not stop within 20 s: use Force stop, then Run now');
-      await jobAction('/admin/api/jobs/start', name);
-    }
-    await new Promise((r) => setTimeout(r, 800));
-    await loadJobs();
-    setStatus(`${name}: ${kind} done`);
-  } catch (e) { fail(e); loadJobs().catch(() => {}); }
+  let error = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let creds = await askCredentials(ask, error);
+    if (!creds) return;
+    try {
+      setStatus(`${kind} ${name}…`, 'busy');
+      if (kind === 'start') await jobAction('/admin/api/jobs/start', name, creds);
+      else if (kind === 'stop') await jobAction('/admin/api/jobs/stop', name, creds);
+      else if (kind === 'kill') await jobAction('/admin/api/jobs/stop', name, creds, { force: true });
+      else {
+        await jobAction('/admin/api/jobs/stop', name, creds);
+        if (!(await waitNotRunning(name))) throw new Error('it did not stop within 20 s: use Force stop, then Run now');
+        await jobAction('/admin/api/jobs/start', name, creds);
+      }
+      await new Promise((r) => setTimeout(r, 800));
+      await loadJobs();
+      setStatus(`${name}: ${kind} done`);
+      return;
+    } catch (e) {
+      if (/^password confirmation failed/.test(e.message || '')) { error = 'Wrong username or password. Try again.'; continue; }   // ask again
+      fail(e); loadJobs().catch(() => {}); return;
+    } finally { creds = null; }
+  }
+  fail(new Error('Too many wrong passwords.'));
 }
 $('job-start').onclick = () => control('start');
 $('job-restart').onclick = () => control('restart');

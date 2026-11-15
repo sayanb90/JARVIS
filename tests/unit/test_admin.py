@@ -21,7 +21,10 @@ from webapp.app import create_app
 DAY = date(2026, 10, 23)
 T0 = datetime(2026, 10, 23, 3, 45)
 A = ("boss", "s3cret")
-H = {"x-jarvis-admin": "1"}
+import base64 as _b64
+
+H = {"x-jarvis-admin": "1", "x-jarvis-confirm": _b64.b64encode(f"{A[0]}:{A[1]}".encode()).decode()}        # what the page sends after the password prompt
+H_NO_CONFIRM = {"x-jarvis-admin": "1"}
 EQ_RECORDS = [{"segment": "NSE_EQ", "instrument_type": "EQ", "trading_symbol": s, "name": f"{s} Ltd",
                "isin": isin, "instrument_key": f"NSE_EQ|{isin}", "tick_size": 5, "lot_size": 1}
               for s, isin in [("RELIANCE", "INE002A01018"), ("TCS", "INE467B01029"), ("INFY", "INE009A01021"),
@@ -396,7 +399,6 @@ def test_jobs_need_the_login(client):
 
 
 # -- job control (SCRUM-204) ----------------------------------------------------------------------------
-H = {"x-jarvis-admin": "1"}
 
 
 def control_world(lake, monkeypatch, on=True):
@@ -459,3 +461,32 @@ def test_start_then_stop_a_running_job(client, lake, monkeypatch):
     assert client.post("/admin/api/jobs/start", json={"name": "slow"}, auth=A, headers=H).status_code == 409      # already running
     assert client.post("/admin/api/jobs/stop", json={"name": "slow"}, auth=A, headers=H).status_code == 200
     assert wait_state(client, "slow", ("stopped",)) == "stopped"
+
+
+def test_every_job_action_needs_the_password_again(client, lake, monkeypatch):
+    control_world(lake, monkeypatch)
+    for path in ("/admin/api/jobs/start", "/admin/api/jobs/stop"):
+        r = client.post(path, json={"name": "quick"}, auth=A, headers=H_NO_CONFIRM)                # logged in, but no confirmation
+        assert r.status_code == 403 and "confirmation" in r.json()["detail"], path
+        bad = {**H_NO_CONFIRM, "x-jarvis-confirm": _b64.b64encode(f"{A[0]}:wrong".encode()).decode()}
+        assert client.post(path, json={"name": "quick"}, auth=A, headers=bad).status_code == 403
+        junk = {**H_NO_CONFIRM, "x-jarvis-confirm": "!!not base64!!"}
+        assert client.post(path, json={"name": "quick"}, auth=A, headers=junk).status_code == 403
+    assert not (lake.root / "logs" / "quick.log").exists()                                           # nothing ran
+    assert client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H).status_code == 200
+
+
+def test_wrong_passwords_lock_job_control_for_a_while(client, lake, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)                                                 # skip the 0.5 s brake
+    control_world(lake, monkeypatch)
+    bad = {**H_NO_CONFIRM, "x-jarvis-confirm": _b64.b64encode(f"{A[0]}:wrong".encode()).decode()}
+    for _ in range(5):
+        assert client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=bad).status_code == 403
+    r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H)              # even the right password is refused now
+    assert r.status_code == 429
+
+
+def test_control_off_answers_before_asking_for_a_password(client, lake, monkeypatch):
+    control_world(lake, monkeypatch, on=False)
+    r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H_NO_CONFIRM)
+    assert r.status_code == 403 and "JARVIS_JOB_CONTROL" in r.json()["detail"]
