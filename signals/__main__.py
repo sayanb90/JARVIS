@@ -229,7 +229,9 @@ def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDE
                 intraday[u] += replay_day(lake, root, u, day, bucket=c, ids=ids)
             except Exception as exc:            # noqa: BLE001 -- the daily signals above are already written
                 log(f"intraday replay {u} {day} {c} failed: {exc!r}")
-    return {"day": str(day), "rows": out, "intraday_rows": intraday}
+    from signals import retention                # the day's live table: compare with the history, compact, remove old days
+    live = retention.nightly(root, day, log=log)
+    return {"day": str(day), "rows": out, "intraday_rows": intraday, "live_table": live}
 
 
 def coverage(root: Path, underlyings=UNDERLYINGS) -> pd.DataFrame:
