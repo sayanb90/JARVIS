@@ -236,7 +236,7 @@ def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDE
         intraday[u] = 0
         if v2:                                  # the live era, replayed by the live engine's own code (engine v2: all cadences at once)
             try:
-                intraday[u] += engine_core.replay_day(lake, root, u, tick_day, cad) if tick_day else 0
+                intraday[u] += engine_core.replay_day(lake, root, u, tick_day, cad, log=log) if tick_day else 0
                 log(f"nightly: replay {u} {tick_day} done, {intraday[u]:,} rows")
             except Exception as exc:            # noqa: BLE001 -- the daily signals above are already written
                 log(f"intraday replay {u} {day} failed: {exc!r}")

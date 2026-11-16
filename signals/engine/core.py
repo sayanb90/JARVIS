@@ -902,14 +902,20 @@ def replay_day(lake, store, underlying: str, day, cadence: dict, window: pd.Time
             staged[(sid, b)].append(f)
             k += 1
 
-    t, ticks_seen = d + SESSION_WINDOW_UTC[0], 0
+    t, ticks_seen, rows_staged = d + SESSION_WINDOW_UTC[0], 0, 0
+    t_start = _time.perf_counter()
+    log(f"replay {underlying} {d.date()}: start, ticks read {int(window.total_seconds() // 60)} minutes at a time")
     while t < d + SESSION_WINDOW_UTC[1]:
         w = read_tick_window(lake, d, underlying, t, t + window)
         ticks_seen += len(w)
         if len(w):
             w["fts"] = pd.to_datetime(w["fts"])
-            for _, part in w.groupby(w["fts"].dt.floor("5min"), sort=True):
-                stage(eng.on_ticks(part))
+            for slot, part in w.groupby(w["fts"].dt.floor("5min"), sort=True):
+                out = eng.on_ticks(part)
+                rows_staged += len(out) if out is not None else 0
+                stage(out)
+                log(f"replay {underlying} {slot:%H:%M} UTC: {len(part):,} ticks, {ticks_seen:,} ticks and {rows_staged:,} rows so far, "
+                    f"{_time.perf_counter() - t_start:,.0f} s")
         t += window
     stage(eng.finish())
     if not ticks_seen:
