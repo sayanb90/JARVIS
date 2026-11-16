@@ -389,3 +389,65 @@ def test_supervise_restarts_after_an_error_and_stops_cleanly():
     assert res == {"rows": 1, "restarts": 2} and calls["n"] == 3
     res = supervise(lambda: (_ for _ in ()).throw(MemoryError()), pd.Timestamp("2099-01-01"), max_restarts=2, sleep=lambda s: None)
     assert res["stopped"] == "too many restarts"
+
+
+# ---------------------------------------------------------------------------------------------- the tick window (16 Nov 2026)
+class _RefTickWindow:
+    """The first version of TickWindow (a copy of the whole window on every call): the reference for the fast one."""
+
+    def __init__(self, keep):
+        self.keep, self.df, self._parts = keep, pd.DataFrame(), []
+
+    def add(self, df):
+        if len(df):
+            self._parts.append(df)
+
+    def _merge(self):
+        if self._parts:
+            self.df = pd.concat([self.df] + self._parts, ignore_index=True) if len(self.df) else pd.concat(self._parts, ignore_index=True)
+            self._parts = []
+
+    def trim(self, now):
+        self._merge()
+        if not len(self.df):
+            return
+        old = self.df["fts"] < now - self.keep
+        if old.any():
+            self.df = pd.concat([self.df[old].groupby("symbol").tail(1), self.df[~old]], ignore_index=True)
+
+    def window(self, lo, upto):
+        self._merge()
+        t = self.df
+        if not len(t):
+            return t
+        keep = (t["fts"] >= lo) & (t["fts"] < upto)
+        return pd.concat([t[t["fts"] < lo].groupby("symbol").tail(1), t[keep]], ignore_index=True)
+
+
+def test_tick_window_returns_what_the_whole_window_copy_returned_and_stays_on_the_fast_path():
+    import numpy as np
+    from signals.engine.core import TickWindow
+    rng = np.random.default_rng(7)
+    syms = np.array([f"S{i}" for i in range(60)])
+    t0 = pd.Timestamp("2026-11-16 03:45")
+    keep = pd.Timedelta(minutes=3)
+    fast, ref = TickWindow(keep), _RefTickWindow(keep)
+    for sec in range(600):                                         # ten minutes of one-second batches
+        n = int(rng.integers(0, 40))                               # some empty seconds, some busy ones
+        fts = t0 + pd.Timedelta(seconds=sec) + pd.to_timedelta(rng.integers(0, 1_000_000_000, n), unit="ns")
+        if sec % 7 == 0 and n:                                     # a batch that arrives out of time order
+            fts = fts[::-1]
+        df = pd.DataFrame({"symbol": rng.choice(syms, n), "ltp": rng.random(n), "fts": fts})
+        fast.add(df)
+        ref.add(df.copy())
+        now = t0 + pd.Timedelta(seconds=sec + 1)
+        for lo, upto in ((now - pd.Timedelta(seconds=1), now),                                   # the 1 s group
+                         (now - pd.Timedelta(seconds=2), now - pd.Timedelta(seconds=1)),
+                         (now - pd.Timedelta(minutes=1), now),                                  # a coarser group, reaching back
+                         (now - pd.Timedelta(minutes=5), now - pd.Timedelta(minutes=4))):       # before the trim point
+            a, b = fast.window(lo, upto), ref.window(lo, upto)
+            pd.testing.assert_frame_equal(a.reset_index(drop=True), b.reset_index(drop=True), check_dtype=False)
+        fast.trim(now)
+        ref.trim(now)
+    assert fast.fast > 1000                                        # the one-second windows are served without copying the window
+    assert len(fast.big) > 0 and len(fast.chunks) < 40             # the old ticks moved to the big frame; only the last seconds are chunks
