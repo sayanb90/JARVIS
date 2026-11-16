@@ -197,12 +197,26 @@ def default_store() -> Path:
     return DEFAULT_ROOT / "store"
 
 
+def newest_tick_day(lake: Path) -> Optional[date]:
+    """The newest day with a compacted tick file (the session is over and the feed has written ticks.parquet), in either segment."""
+    days = set()
+    for f in Path(lake).glob("ticks/segment=*/date=*/ticks.parquet"):
+        try:
+            days.add(date.fromisoformat(f.parent.name.split("=", 1)[1]))
+        except ValueError:
+            continue
+    return max(days) if days else None
+
+
 def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDERLYINGS, log=print) -> dict:
     """Compute every signal for the newest closed session (or `day`) for each underlying.  Idempotent: a rerun rewrites that day."""
     from signals.health import latest_day
-    day = day or latest_day(lake)
-    if day is None:
+    bars_day = day or latest_day(lake)               # the newest session with 1-minute bars: the daily (batch) signals
+    tick_day = day or newest_tick_day(lake) or bars_day   # the newest closed tick day: the live era's replay and the live table
+    if bars_day is None and tick_day is None:
         raise SystemExit("no 1-minute bars in the lake")
+    day = bars_day or tick_day
+    log(f"nightly: batch signals for {bars_day}, live-era replay and live table for {tick_day}")
     prov = {}
     if (Path(lake) / "manifest.json").exists():
         from research.access import provenance_of
@@ -215,23 +229,26 @@ def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDE
     groups = cadence_mod.groups(cad)
     v2 = engine_core.engine_kind() == "operators"
     for u in underlyings:
-        st = run(lake, root, u, day, day, provenance=prov, log=log)
+        # live=False: no tick files are loaded here (the live-only signals come from the engine replay below; loading the day's ticks
+        # into pandas took 13 GB and was killed on 16 Nov 2026)
+        st = run(lake, root, u, bars_day, bars_day, live=False, provenance=prov, log=log) if bars_day else {}
         out[u] = sum(st.values())
         intraday[u] = 0
         if v2:                                  # the live era, replayed by the live engine's own code (engine v2: all cadences at once)
             try:
-                intraday[u] += engine_core.replay_day(lake, root, u, day, cad)
+                intraday[u] += engine_core.replay_day(lake, root, u, tick_day, cad) if tick_day else 0
+                log(f"nightly: replay {u} {tick_day} done, {intraday[u]:,} rows")
             except Exception as exc:            # noqa: BLE001 -- the daily signals above are already written
                 log(f"intraday replay {u} {day} failed: {exc!r}")
             continue
         for c, ids in groups.items():           # the first engine: each cadence group replayed by the runner
             try:
-                intraday[u] += replay_day(lake, root, u, day, bucket=c, ids=ids)
+                intraday[u] += replay_day(lake, root, u, tick_day or day, bucket=c, ids=ids)
             except Exception as exc:            # noqa: BLE001 -- the daily signals above are already written
                 log(f"intraday replay {u} {day} {c} failed: {exc!r}")
     from signals import retention                # the day's live table: compare with the history, compact, remove old days
-    live = retention.nightly(root, day, log=log)
-    return {"day": str(day), "rows": out, "intraday_rows": intraday, "live_table": live}
+    live = retention.nightly(root, tick_day or day, log=log)
+    return {"day": str(day), "tick_day": str(tick_day), "rows": out, "intraday_rows": intraday, "live_table": live}
 
 
 def coverage(root: Path, underlyings=UNDERLYINGS) -> pd.DataFrame:
@@ -357,8 +374,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return health_main(argv[1:])
     a = ap.parse_args(argv)
     if a.cmd == "nightly":
-        res = nightly(a.lake or default_lake(), a.root or default_store(), a.date)
-        print(json.dumps(res))
+        from signals.live_runner import cap_memory
+        mb = cap_memory(var="JARVIS_SIGNAL_NIGHTLY_MAX_MB", default=10240)        # a runaway job fails with MemoryError, never OOM-kills the feeds
+        say = lambda *x: print(*x, flush=True)                                      # noqa: E731 -- a killed process must not lose its lines
+        say(f"nightly: memory cap {mb} MB")
+        res = nightly(a.lake or default_lake(), a.root or default_store(), a.date, log=say)
+        say(json.dumps(res))
         return 0
     if a.cmd == "live":
         import logging

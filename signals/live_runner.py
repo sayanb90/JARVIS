@@ -521,9 +521,9 @@ def slot_volume_history(lake: Path, underlying: str, day: date, sessions: int = 
 MAX_MB_DEFAULT = 2048
 
 
-def cap_memory(env=None) -> int:
-    """Limit this process's address space to JARVIS_SIGNAL_LIVE_MAX_MB (default 2048 MB); returns the cap in MB."""
-    mb = int((os.environ if env is None else env).get("JARVIS_SIGNAL_LIVE_MAX_MB", MAX_MB_DEFAULT))
+def cap_memory(env=None, var: str = "JARVIS_SIGNAL_LIVE_MAX_MB", default: int = MAX_MB_DEFAULT) -> int:
+    """Limit this process's address space to the variable `var` (default JARVIS_SIGNAL_LIVE_MAX_MB, 2048 MB); returns the cap in MB."""
+    mb = int((os.environ if env is None else env).get(var, default))
     resource.setrlimit(resource.RLIMIT_AS, (mb * 1024 * 1024, resource.getrlimit(resource.RLIMIT_AS)[1]))
     return mb
 
