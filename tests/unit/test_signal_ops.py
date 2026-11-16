@@ -90,7 +90,7 @@ def test_nightly_replays_the_live_era_with_engine_v2(lake, tmp_path, monkeypatch
     from signals.engine import core
     import signals.live_runner as lr
     seen = []
-    monkeypatch.setattr(core, "replay_day", lambda lake_, root, u, day, cad: seen.append((u, set(cad.values()))) or 7)
+    monkeypatch.setattr(core, "replay_day", lambda lake_, root, u, day, cad, **k: seen.append((u, set(cad.values()))) or 7)
     monkeypatch.setattr(lr, "replay_day", lambda *a, **k: (_ for _ in ()).throw(AssertionError("first engine used")))
     res = nightly(lake, tmp_path, DAY, underlyings=("NIFTY",), log=lambda *a: None)
     assert res["intraday_rows"] == {"NIFTY": 7} and seen and seen[0][0] == "NIFTY" and "1s" in seen[0][1]
@@ -124,8 +124,12 @@ def test_nightly_replay_streams_and_matches_the_in_memory_replay(lake, tmp_path)
     from signals.framework import REGISTRY
     from signals.live_runner import history_for
     cad = {"book_pressure": "1min", "pcr_full": "1min", "skew": "1min"}
-    n = replay_day(lake, tmp_path, "NIFTY", DAY, cad, log=lambda *a: None)
+    lines = []
+    n = replay_day(lake, tmp_path, "NIFTY", DAY, cad, log=lambda *a: lines.append(" ".join(str(x) for x in a)))
     assert n > 0 and not (tmp_path / "_staging").exists() or not any((tmp_path / "_staging").iterdir())
+    assert lines[0].startswith("replay NIFTY") and "start" in lines[0]            # progress: a line per five-minute slice, so a long replay is not silent
+    slices = [x for x in lines if " UTC: " in x]
+    assert slices and "rows so far" in slices[-1] and lines[-1].endswith("signal layers")
     d = pd.Timestamp(DAY)
     t = read_tick_window(lake, d, "NIFTY", d + pd.Timedelta(hours=3, minutes=30), d + pd.Timedelta(hours=10, minutes=30))
     ref = replay("NIFTY", history_for(lake, "NIFTY", DAY), t, cad, step="5min")
@@ -147,7 +151,7 @@ def test_nightly_replays_the_newest_closed_tick_day_and_loads_no_ticks_for_the_b
     f.write_bytes(b"")                                                  # only its presence counts: the feed writes it when the day is closed
     assert m.newest_tick_day(lake) == newer.date()
     seen, runs, kept = [], [], []
-    monkeypatch.setattr(core, "replay_day", lambda lake_, root, u, day, cad: seen.append((u, str(day.date() if hasattr(day, "date") else day))) or 0)
+    monkeypatch.setattr(core, "replay_day", lambda lake_, root, u, day, cad, **k: seen.append((u, str(day.date() if hasattr(day, "date") else day))) or 0)
     real_run = m.run
     monkeypatch.setattr(m, "run", lambda *a, **k: runs.append((a[3], a[4], k.get("live"))) or real_run(*a, **k))
     import signals.retention as ret
