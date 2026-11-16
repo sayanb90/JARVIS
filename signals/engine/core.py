@@ -59,34 +59,71 @@ def engine_kind(env=None) -> str:
 
 # ---------------------------------------------------------------------------------------------- ticks kept for tape windows
 class TickWindow:
-    """This underlying's ticks of the last `keep` (plus each symbol's last earlier tick as an anchor), for operators that read ticks."""
+    """This underlying's ticks of the last `keep` (plus each symbol's last earlier tick as an anchor), for operators that read ticks.
+
+    Cost per call does not depend on the length of the window (on 16 Nov 2026 the first version copied the whole window, some 300,000
+    rows, on every call, so a bucket took 280 ms at the start of the session and 520 ms twenty minutes later).  The ticks are kept in two
+    parts, both in arrival order: `big` (older ticks, trimmed to `keep`, with `big_last`, the last tick per symbol in it) and `chunks` (the
+    last few seconds, as they arrived).  A window that starts after every tick in `big` reads the chunks and takes its anchors from
+    `big_last` and the chunks; any other window reads both parts.  The result is the same either way: the anchors come first, in arrival
+    order, then the ticks of the window."""
+
+    MERGE_AFTER = pd.Timedelta(seconds=15)       # move chunks to `big` once the oldest is this old (event time) ...
+    MERGE_KEEP = pd.Timedelta(seconds=5)         # ... all but the last few seconds
 
     def __init__(self, keep: pd.Timedelta):
         self.keep = keep
-        self.df = pd.DataFrame()
-        self._parts: list = []
+        self.big = pd.DataFrame()
+        self.big_last = pd.DataFrame()
+        self.big_max: Optional[pd.Timestamp] = None
+        self.chunks: list = []
+        self._small: Optional[pd.DataFrame] = None
+        self.fast = 0                            # windows served from the chunks alone / from both parts (for the tests and the status)
+        self.slow = 0
+
+    @property
+    def df(self) -> pd.DataFrame:
+        parts = [x for x in (self.big, self._small_df()) if len(x)]
+        return pd.concat(parts, ignore_index=True) if len(parts) > 1 else (parts[0] if parts else pd.DataFrame())
 
     def add(self, df: pd.DataFrame) -> None:
         if len(df):
-            self._parts.append(df)
+            self.chunks.append(df)
+            self._small = None
 
-    def _merge(self) -> None:
-        if self._parts:
-            self.df = pd.concat([self.df] + self._parts, ignore_index=True) if len(self.df) else pd.concat(self._parts, ignore_index=True)
-            self._parts = []
+    def _small_df(self) -> pd.DataFrame:
+        if self._small is None:
+            self._small = (pd.concat(self.chunks, ignore_index=True) if len(self.chunks) > 1 else self.chunks[0]) if self.chunks else pd.DataFrame()
+        return self._small
 
     def trim(self, now: pd.Timestamp) -> None:
-        self._merge()
-        if not len(self.df):
+        if not self.chunks or not self.chunks[0]["fts"].max() < now - self.MERGE_AFTER:
             return
-        cutoff = now - self.keep
-        old = self.df["fts"] < cutoff
+        moved = []
+        while self.chunks and self.chunks[0]["fts"].max() < now - self.MERGE_KEEP:
+            moved.append(self.chunks.pop(0))
+        self._small = None
+        m = pd.concat(moved, ignore_index=True) if len(moved) > 1 else moved[0]
+        last = pd.concat([self.big_last, m], ignore_index=True) if len(self.big_last) else m
+        self.big_last = last.groupby("symbol").tail(1)
+        mx = m["fts"].max()
+        self.big_max = mx if self.big_max is None else max(self.big_max, mx)
+        self.big = pd.concat([self.big, m], ignore_index=True) if len(self.big) else m
+        old = self.big["fts"] < now - self.keep
         if old.any():
-            anchors = self.df[old].groupby("symbol").tail(1)
-            self.df = pd.concat([anchors, self.df[~old]], ignore_index=True)
+            anchors = self.big[old].groupby("symbol").tail(1)
+            self.big = pd.concat([anchors, self.big[~old]], ignore_index=True)
 
     def window(self, lo: pd.Timestamp, upto: pd.Timestamp) -> pd.DataFrame:
-        self._merge()
+        small = self._small_df()
+        if self.big_max is not None and self.big_max < lo:
+            self.fast += 1
+            before = small[small["fts"] < lo].groupby("symbol").tail(1) if len(small) else small
+            anchors = self.big_last[~self.big_last["symbol"].isin(before["symbol"])] if len(before) else self.big_last
+            inside = small[(small["fts"] >= lo) & (small["fts"] < upto)] if len(small) else small
+            parts = [x for x in (anchors, before, inside) if len(x)]
+            return pd.concat(parts, ignore_index=True) if parts else small
+        self.slow += 1
         t = self.df
         if not len(t):
             return t
