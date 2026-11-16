@@ -133,3 +133,26 @@ def test_nightly_replay_streams_and_matches_the_in_memory_replay(lake, tmp_path)
         f = tmp_path / "signals" / sid / f"v{REGISTRY[sid][0].version}" / "intraday" / "bucket=1m" / "underlying=NIFTY" / f"date={DAY}" / "part.parquet"
         got = pd.read_parquet(f)
         assert len(got) == (ref["signal"] == sid).sum() > 0, sid
+
+
+def test_nightly_replays_the_newest_closed_tick_day_and_loads_no_ticks_for_the_batch_signals(lake, tmp_path, monkeypatch):
+    """16 Nov 2026: the nightly took the newest day with 1-minute bars (13 Nov, today's candles were not in yet), so it would have replayed
+    the wrong day, and its batch run loaded the day's ticks into pandas (13 GB, killed).  Now the replay and the live table follow the newest
+    compacted tick day, and the batch signals are run without ticks."""
+    import signals.__main__ as m
+    from signals.engine import core
+    newer = pd.Timestamp(DAY) + pd.Timedelta(days=3)
+    f = Path(lake) / "ticks" / "segment=fo" / f"date={newer.date()}" / "ticks.parquet"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b"")                                                  # only its presence counts: the feed writes it when the day is closed
+    assert m.newest_tick_day(lake) == newer.date()
+    seen, runs, kept = [], [], []
+    monkeypatch.setattr(core, "replay_day", lambda lake_, root, u, day, cad: seen.append((u, str(day.date() if hasattr(day, "date") else day))) or 0)
+    real_run = m.run
+    monkeypatch.setattr(m, "run", lambda *a, **k: runs.append((a[3], a[4], k.get("live"))) or real_run(*a, **k))
+    import signals.retention as ret
+    monkeypatch.setattr(ret, "nightly", lambda root, day, **k: kept.append(day) or {})
+    res = m.nightly(lake, tmp_path, None, underlyings=("NIFTY",), log=lambda *a: None)
+    assert seen == [("NIFTY", str(newer.date()))]                      # the replay is for the tick day
+    assert runs and all(r[2] is False for r in runs)                   # no ticks for the batch signals
+    assert kept == [newer.date()] and res["tick_day"] == str(newer.date())
