@@ -6,8 +6,8 @@ const state = { tab: 'data', catalog: [], service: null, vendor: '', table: null
                 qpage: 1, sql: '', subs: null, subSub: 'eq', eqFilter: '', eqPage: 1, plan: null };
 let req = 0;
 
-async function api(path, params, body) {
-  const opt = body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-jarvis-admin': '1' }, body: JSON.stringify(body) } : {};
+async function api(path, params, body, extraHeaders) {
+  const opt = body ? { method: 'POST', headers: { 'content-type': 'application/json', 'x-jarvis-admin': '1', ...(extraHeaders || {}) }, body: JSON.stringify(body) } : {};
   const r = await fetch(path + (params ? '?' + new URLSearchParams(params) : ''), opt);
   if (!r.ok) {
     let msg = r.statusText;
@@ -58,13 +58,15 @@ function renderPager(el, page, pages, info, onGo) {
 /* ---------------------------------------------------------------- sections */
 function setTab(tab) {
   state.tab = tab;
-  for (const t of ['data', 'query', 'subs']) { $('tab-' + t).setAttribute('aria-selected', t === tab); $('view-' + t).hidden = t !== tab; }
+  for (const t of ['data', 'query', 'subs', 'jobs']) { $('tab-' + t).setAttribute('aria-selected', t === tab); $('view-' + t).hidden = t !== tab; }
   writeHash();
   if (tab === 'query' && !$('schema').dataset.loaded) loadSchema().catch(fail);
   if (tab === 'subs') loadSubs().catch(fail);
+  if (tab === 'jobs') loadJobs().catch(fail);
+  if (tab !== 'jobs') stopJobsTimer();
   if (tab === 'data') setStatus(state.table ? `${state.service}.${state.table}` : 'Pick a table');
 }
-for (const t of ['data', 'query', 'subs']) $('tab-' + t).onclick = () => setTab(t);
+for (const t of ['data', 'query', 'subs', 'jobs']) $('tab-' + t).onclick = () => setTab(t);
 
 /* ================================================================ Data */
 const svc = () => state.catalog.find((s) => s.service === state.service);
@@ -125,7 +127,7 @@ async function loadPage() {
     const info = d.total ? `Rows ${fmtInt(first)}–${fmtInt(first + d.rows.length - 1)} of ${fmtInt(d.total)} · ${d.elapsed_ms} ms` : 'No rows';
     renderPager($('pager'), d.page, d.total ? d.pages : 0, info, (p) => { state.page = p; loadPage(); $('grid').parentElement.scrollTop = 0; });
     writeHash();
-    setStatus(`${state.service}.${state.table}${state.day ? ' · ' + state.day : ''}${state.symbol ? ' · ' + state.symbol : ''} · page ${fmtInt(d.page)} of ${fmtInt(d.pages)}`);
+    if (state.tab === 'data') setStatus(`${state.service}.${state.table}${state.day ? ' · ' + state.day : ''}${state.symbol ? ' · ' + state.symbol : ''} · page ${fmtInt(d.page)} of ${fmtInt(d.pages)}`);
   } catch (e) { if (id === req) { fail(e); renderGrid($('grid'), [], []); $('pager').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; } }
 }
 
@@ -293,6 +295,128 @@ $('apply').onclick = async () => {
 ['csv', 'paste', 'mode'].forEach((id) => { $(id).addEventListener('change', () => { $('apply').disabled = true; state.plan = null; }); });
 $('paste').addEventListener('input', () => { $('apply').disabled = true; state.plan = null; });
 
+/* ---------------------------------------------------------------- jobs */
+const JOB_ORDER = ['failed', 'lost', 'late', 'stopped', 'running', 'ok', 'never', 'untracked'];
+const JOB_NOTE = { failed: 'the last run exited with an error', lost: 'started but never reported an end', late: 'should have started and did not', stopped: 'the last run was stopped on purpose',
+                   running: 'running now', ok: 'the last run succeeded', never: 'wrapped, no run recorded yet', untracked: 'not wrapped by the heartbeat yet' };
+const shortT = (t) => (t ? t.replace('T', ' ').slice(5, 16) : '–');
+const dur = (s) => (s == null ? '–' : s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : (s / 3600).toFixed(1) + ' h');
+let jobsTimer = null, jobsData = null, openJob = null;
+function stopJobsTimer() { if (jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; } }
+async function loadJobs() {
+  setStatus('Loading jobs…', 'busy');
+  jobsData = await api('/admin/api/jobs');
+  renderJobs();
+  setStatus(`${jobsData.jobs.length} jobs, ${jobsData.now} UTC`);
+  if (openJob) loadLog().catch(fail);
+}
+function renderJobs() {
+  const d = jobsData; if (!d) return;
+  const sel = $('jobs-filter'), want = sel.value;
+  fill(sel, [['', 'All'], ...JOB_ORDER.filter((s) => d.counts[s]).map((s) => [s, `${s} (${d.counts[s]})`])], want);
+  $('jobs-kpis').style.setProperty('--n', 4);
+  const bad = (d.counts.failed || 0) + (d.counts.lost || 0) + (d.counts.late || 0);
+  $('jobs-kpis').innerHTML = [['Jobs', d.jobs.length, 'in the crontab'], ['Need attention', bad, 'failed, lost or late'],
+    ['Running', d.counts.running || 0, 'right now'], ['Not tracked', d.counts.untracked || 0, 'cron line not wrapped']]
+    .map(([k, v, s]) => `<div class="kpi"><b>${k}</b><span>${v}</span><small>${s}</small></div>`).join('');
+  const rows = d.jobs.filter((j) => !sel.value || j.state === sel.value)
+    .sort((a, b) => JOB_ORDER.indexOf(a.state) - JOB_ORDER.indexOf(b.state) || a.name.localeCompare(b.name));
+  $('jobs-grid').innerHTML = '<thead><tr><th>Job</th><th>State</th><th>Schedule</th><th>Next run</th><th>Last start</th><th>Took</th><th>Exit</th><th>Recent</th></tr></thead><tbody>'
+    + rows.map((j) => `<tr data-job="${esc(j.name)}" class="${j.name === openJob ? 'sel' : ''}" title="${esc(j.command)}">
+      <td><b>${esc(j.name)}</b></td><td><span class="pill ${j.state}" title="${esc(JOB_NOTE[j.state] || '')}">${j.state}</span></td>
+      <td><code>${esc(j.schedule)}</code></td><td>${shortT(j.next_run)}</td>
+      <td>${j.last_start ? shortT(j.last_start) : (j.log_written ? 'log ' + shortT(j.log_written) : '–')}</td>
+      <td class="n">${dur(j.secs)}</td><td class="n">${j.exit_code == null ? '–' : j.exit_code}</td>
+      <td>${(j.history || []).map((h) => `<i class="dot-run ${h.code == null ? 'run' : h.code === 0 ? 'ok' : 'bad'}" title="${esc(shortT(h.start))} exit ${h.code == null ? '?' : h.code}"></i>`).join('')}</td></tr>`).join('')
+    + '</tbody>';
+  $('jobs-grid').querySelectorAll('tbody tr').forEach((tr) => { tr.onclick = () => { openJob = tr.dataset.job; renderJobs(); loadLog().catch(fail); }; });
+}
+async function loadLog() {
+  const j = jobsData && jobsData.jobs.find((x) => x.name === openJob);
+  if (!j) return;
+  $('log-panel').hidden = false; $('log-title').textContent = j.name; $('log-hint').textContent = (j.log || '') + (j.started_by ? ' · started by ' + j.started_by : '');
+  showActions(j);
+  try {
+    const r = await api('/admin/api/jobs/log', { name: j.name, lines: $('log-lines').value });
+    const box = $('log-text'), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+    box.textContent = r.text || '(the log is empty)';
+    if (atEnd || !box.dataset.shown) box.scrollTop = box.scrollHeight;
+    box.dataset.shown = '1';
+  } catch (e) { $('log-text').textContent = e.message; }
+}
+function showActions(j) {
+  const on = jobsData && jobsData.control, running = j.state === 'running';
+  $('job-actions').hidden = !on;
+  $('job-start').hidden = running; $('job-restart').hidden = !running; $('job-stop').hidden = !running; $('job-kill').hidden = !running;
+}
+/* Every start or stop asks for the admin username and password again (an accidental click must not run a job).  The password is kept
+   only for the one action, sent in a header, and cleared. */
+function askCredentials(text, error) {
+  return new Promise((resolve) => {
+    const dlg = $('confirm-dlg'), user = $('confirm-user'), pass = $('confirm-pass'), err = $('confirm-err');
+    $('confirm-title').textContent = 'Confirm with your password';
+    $('confirm-text').textContent = text; err.hidden = !error; err.textContent = error || ''; pass.value = '';
+    const done = (v) => { dlg.close(); pass.value = ''; $('confirm-form').onsubmit = null; $('confirm-cancel').onclick = null; dlg.oncancel = null; resolve(v); };
+    $('confirm-form').onsubmit = (e) => { e.preventDefault(); done({ user: user.value, pass: pass.value }); };
+    $('confirm-cancel').onclick = () => done(null);
+    dlg.oncancel = (e) => { e.preventDefault(); done(null); };
+    dlg.showModal(); (user.value ? pass : user).focus();
+  });
+}
+const confirmHeader = (c) => ({ 'x-jarvis-confirm': btoa(unescape(encodeURIComponent(c.user + ':' + c.pass))) });
+async function jobAction(path, name, creds, extra = {}) {
+  return api(path, null, { name, ...extra }, confirmHeader(creds));
+}
+async function waitNotRunning(name, secs = 20) {
+  for (let i = 0; i < secs * 2; i++) {
+    jobsData = await api('/admin/api/jobs');
+    const j = jobsData.jobs.find((x) => x.name === name);
+    if (!j || j.state !== 'running') return true;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+async function control(kind) {
+  const name = openJob; if (!name) return;
+  const ask = { start: `Run ${name} now?`, stop: `Stop ${name}? The running process is asked to finish (SIGTERM).`,
+                kill: `Force stop ${name}? It is killed at once (SIGKILL) and gets no chance to clean up.`,
+                restart: `Restart ${name}? It is stopped, then started again from the beginning.` }[kind];
+  let error = '';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let creds = await askCredentials(ask, error);
+    if (!creds) return;
+    try {
+      setStatus(`${kind} ${name}…`, 'busy');
+      if (kind === 'start') await jobAction('/admin/api/jobs/start', name, creds);
+      else if (kind === 'stop') await jobAction('/admin/api/jobs/stop', name, creds);
+      else if (kind === 'kill') await jobAction('/admin/api/jobs/stop', name, creds, { force: true });
+      else {
+        await jobAction('/admin/api/jobs/stop', name, creds);
+        if (!(await waitNotRunning(name))) throw new Error('it did not stop within 20 s: use Force stop, then Run now');
+        await jobAction('/admin/api/jobs/start', name, creds);
+      }
+      await new Promise((r) => setTimeout(r, 800));
+      await loadJobs();
+      setStatus(`${name}: ${kind} done`);
+      return;
+    } catch (e) {
+      if (/^password confirmation failed/.test(e.message || '')) { error = 'Wrong username or password. Try again.'; continue; }   // ask again
+      fail(e); loadJobs().catch(() => {}); return;
+    } finally { creds = null; }
+  }
+  fail(new Error('Too many wrong passwords.'));
+}
+$('job-start').onclick = () => control('start');
+$('job-restart').onclick = () => control('restart');
+$('job-stop').onclick = () => control('stop');
+$('job-kill').onclick = () => control('kill');
+$('jobs-filter').onchange = renderJobs;
+$('jobs-refresh').onclick = () => loadJobs().catch(fail);
+$('log-refresh').onclick = () => loadLog().catch(fail);
+$('log-lines').onchange = () => loadLog().catch(fail);
+$('log-close').onclick = () => { openJob = null; $('log-panel').hidden = true; renderJobs(); };
+$('jobs-auto').onchange = (e) => { stopJobsTimer(); if (e.target.checked) jobsTimer = setInterval(() => loadJobs().catch(fail), 15000); };
+
 /* ---------------------------------------------------------------- start-up */
 async function init() {
   const h = readHash();
@@ -308,6 +432,6 @@ async function init() {
   const service = state.catalog.find((s) => s.service === h.service) ? h.service : 'market';
   state.day = h.day || null; state.page = +h.page || 1;
   selectService(service, h.table || null);
-  setTab(['data', 'query', 'subs'].includes(h.tab) ? h.tab : 'data');
+  setTab(['data', 'query', 'subs', 'jobs'].includes(h.tab) ? h.tab : 'data');
 }
 init();

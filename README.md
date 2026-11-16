@@ -216,7 +216,11 @@ python -m data_layer.verify fo --date 2026-10-30
 
 Tested against a local fake server; not yet run against Upstox itself (runbook sections 13 and 17, Gate U1).
 
-**Admin:** set `ADMIN_USER` and `ADMIN_PASSWORD` to enable `/admin`, a password-protected data browser (tables grouped by service, paged), a read-only SQL console and the subscription list with ticker upload (runbook section 18).
+**Admin:** set `WEBAPP_USER` and `WEBAPP_PASSWORD` and the viewer and `/admin` share that one login (`/admin` is never served without a login; `ADMIN_USER`/`ADMIN_PASSWORD` still work when the viewer login is not set). `/admin` is a data browser (tables grouped by service, paged), a read-only SQL console and the subscription list with ticker upload (runbook section 18).
+
+**Jobs (SCRUM-142, SCRUM-203):** the *Jobs* tab of `/admin` lists every entry of `deploy/crontab` the way a scheduler console does: state (running, ok, failed, lost, late, never, untracked), schedule, next run, last start, duration, exit code, the last ten runs, and a tail of the job's log with secrets hidden. States come from `logs/jobs/runs.jsonl`, written by `python -m data_layer.jobrun run NAME --shell '...'`, which every crontab line runs through (it passes the exit code through unchanged). `python -m data_layer.jobrun status` prints the same table in a terminal and exits non-zero when a job failed, was lost or is late. A line added to the crontab without the wrapper shows as *untracked*.
+
+**Job control (SCRUM-204):** with `JARVIS_JOB_CONTROL=1` in `.env`, the Jobs tab gets *Run now*, *Restart*, *Stop* (SIGTERM to the job's process group) and *Force stop* (SIGKILL), each behind the login, the admin header and a prompt for the admin username and password again (so an accidental click, or a browser left logged in, cannot run a job; five wrong passwords lock the actions for five minutes), and written to the viewer log with the user name. Only a job named in `deploy/crontab` and wrapped by `jobrun` can be touched; the command always comes from that file, never from the request. A job started this way runs as the viewer's user and inside its `MemoryMax`, so leave heavy jobs (compaction, backfills) to cron. The same actions exist on the command line: `python -m data_layer.jobrun start NAME` and `stop NAME [--force]`.
 
 Go-live steps, daily ops, backups and the futures/options section are in [the JARVIS Runbook in Notion](https://app.notion.com/p/40a23f85984081c4bf1eff52ac4bfcd5).
 

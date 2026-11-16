@@ -204,6 +204,7 @@ async function init() {
   const h = readHash();
   try { state.meta = await api('/api/meta', {}); } catch (e) { fail(new Error('Cannot reach the API: ' + e.message)); return; }
   $('demo-banner').hidden = !state.meta.demo;
+  $('admin-links').hidden = !state.meta.admin;
   const widths = state.meta.widths.map((w) => [w, WIDTH_LABEL[w] || w + ' s']);
   const wins = state.meta.vol_windows.map((w) => [w, VOLWIN_LABEL[w] || w + ' s']);
   state.width = state.meta.widths.includes(+h.width) ? +h.width : 1;

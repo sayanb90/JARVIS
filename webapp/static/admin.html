@@ -12,13 +12,22 @@
 <header class="appbar">
   <div class="appbar-inner">
     <div class="brand">JARVIS <span>Admin</span></div>
+    <nav class="primary site-links" aria-label="Viewer">
+      <a href="/#tab=instrument">Equities</a>
+      <a href="/#tab=overview">Market</a>
+      <a href="/#tab=fo">Derivatives</a>
+      <a href="/#tab=candles">Session</a>
+      <a href="/#tab=history">History</a>
+      <a href="/#tab=signals">Signals</a>
+      <a href="/#tab=data">Data</a>
+    </nav>
     <nav class="primary" role="tablist" aria-label="Admin sections">
-      <button role="tab" id="tab-data" data-tab="data" aria-selected="true">Data</button>
+      <button role="tab" id="tab-data" data-tab="data" aria-selected="true">Browse</button>
       <button role="tab" id="tab-query" data-tab="query" aria-selected="false">Query</button>
-      <button role="tab" id="tab-subs" data-tab="subs" aria-selected="false">Subscriptions</button>
+      <button role="tab" id="tab-subs" data-tab="subs" aria-selected="false">Universe</button>
+      <button role="tab" id="tab-jobs" data-tab="jobs" aria-selected="false">Jobs</button>
     </nav>
     <div class="spacer"></div>
-    <a class="viewer-link" href="/">Viewer &rarr;</a>
   </div>
 </header>
 <div id="context" class="context busy" role="status" aria-live="polite"><i class="dot"></i><span id="status">Loading…</span></div>
@@ -78,6 +87,29 @@ ORDER BY ticks DESC</textarea>
   </section>
 
   <!-- ================= Subscriptions: what the feed collects, and changing it ================= -->
+  <!-- ================= Jobs: every cron job, its state, and its log ================= -->
+  <section id="view-jobs" class="view" hidden>
+    <div class="page-head">
+      <div><h1>Jobs</h1><p class="sub" id="jobs-sub">Every entry of the crontab, its state from the job heartbeat, and the tail of its log. Times are UTC.</p></div>
+      <div class="head-tools"><label class="field"><span>State</span><select id="jobs-filter"><option value="">All</option></select></label>
+        <label class="check"><input type="checkbox" id="jobs-auto"> refresh every 15 s</label>
+        <button id="jobs-refresh" class="btn">Refresh</button></div>
+    </div>
+    <div id="jobs-kpis" class="kpis"></div>
+    <div class="panel"><div class="grid-wrap"><table id="jobs-grid" class="grid jobs"></table></div></div>
+    <div class="panel" id="log-panel" hidden>
+      <header><h3 id="log-title">Log</h3><span class="hint" id="log-hint"></span>
+        <span class="job-actions" id="job-actions" hidden>
+          <button id="job-start" class="btn primary">Run now</button><button id="job-restart" class="btn">Restart</button>
+          <button id="job-stop" class="btn">Stop</button><button id="job-kill" class="btn danger" title="SIGKILL: the job gets no chance to clean up">Force stop</button>
+        </span>
+        <label class="field"><span>Lines</span><select id="log-lines"><option>100</option><option selected>200</option><option>500</option></select></label>
+        <button id="log-refresh" class="btn">Reload</button><button id="log-close" class="btn">Close</button></header>
+      <pre id="log-text" class="log" tabindex="0"></pre>
+    </div>
+    <p class="note">State comes from <code>logs/jobs/runs.jsonl</code>, written by <code>data_layer.jobrun</code> around each cron command. <b>untracked</b> means the cron line is not wrapped yet, so only the log's last write time is known. <b>late</b> means the schedule says it should have started and nothing did. <b>stopped</b> means someone stopped the run. Run, stop and restart work only on wrapped jobs and only when <code>JARVIS_JOB_CONTROL=1</code> is set in <code>.env</code>; each one asks for the admin password again and is written to the viewer's log with your user name. Secrets are hidden in the log tail.</p>
+  </section>
+
   <section id="view-subs" class="view" hidden>
     <div class="page-head">
       <div><h1>Subscriptions</h1><p class="sub" id="subs-sub"></p></div>
@@ -124,6 +156,16 @@ ORDER BY ticks DESC</textarea>
     </div>
   </section>
 </main>
+<dialog id="confirm-dlg" class="confirm">
+  <form method="dialog" id="confirm-form" autocomplete="off">
+    <h3 id="confirm-title">Confirm</h3>
+    <p id="confirm-text" class="muted"></p>
+    <label class="field"><span>Admin username</span><input id="confirm-user" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
+    <label class="field"><span>Admin password</span><input id="confirm-pass" type="password" autocomplete="new-password" required></label>
+    <p id="confirm-err" class="err" hidden></p>
+    <div class="qbar"><button type="button" id="confirm-cancel" class="btn">Cancel</button><button type="submit" id="confirm-ok" class="btn primary">Confirm</button></div>
+  </form>
+</dialog>
 <script src="/admin/static/admin.js"></script>
 </body>
 </html>

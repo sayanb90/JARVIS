@@ -43,7 +43,7 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from data_layer import tick_store, universe_files, universe as uni
+from data_layer import jobrun, tick_store, universe_files, universe as uni
 from data_layer import lake as lake_mod
 from data_layer.query import Lake
 from data_layer.upstox import fo_instruments as fo
@@ -349,11 +349,20 @@ def validate_select(sql: str) -> str:
     return sql
 
 
-def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | None:
+def credentials() -> tuple[str | None, str | None]:
+    """The one login of the viewer and /admin (SCRUM-202): WEBAPP_USER/WEBAPP_PASSWORD; ADMIN_USER/ADMIN_PASSWORD only when those are
+    not both set (the older arrangement).  Both pairs empty: no login exists, so /admin is not served at all."""
     import os
-    user, password = os.getenv("ADMIN_USER"), os.getenv("ADMIN_PASSWORD")
+    u, p = os.getenv("WEBAPP_USER"), os.getenv("WEBAPP_PASSWORD")
+    if u and p:
+        return u, p
+    return os.getenv("ADMIN_USER"), os.getenv("ADMIN_PASSWORD")
+
+
+def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | None:
+    user, password = credentials()
     if not (user and password):
-        return None                                   # admin off: /admin is simply not there
+        return None                                   # admin off: /admin is simply not there (admin is never served without a login)
     data_dir = Path(data_dir or lake_mod.DATA_DIR)
     cat = Catalog(lake_dir, data_dir)
 
@@ -465,6 +474,89 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
                              "size": size, "day": day, "elapsed_ms": round((time.perf_counter() - t0) * 1000)}, headers=noindex)
 
     # -- read-only SQL ----------------------------------------------------------
+    # -- jobs (Autosys style): the crontab, each job's state from its heartbeat records, and a log tail ---------------------------------
+    root = data_dir.parent
+
+    def job_states():
+        return jobrun.states(jobrun.load_crontab(root), jobrun.load_runs(root), root=root)
+
+    @r.get("/api/jobs")
+    def jobs():
+        rows = [s.as_dict() for s in job_states()]
+        counts: dict[str, int] = {}
+        for s in rows:
+            counts[s["state"]] = counts.get(s["state"], 0) + 1
+        return JSONResponse({"now": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "counts": counts, "jobs": rows,
+                             "control": control_on()}, headers=noindex)
+
+    def control_on() -> bool:
+        import os
+        return os.getenv("JARVIS_JOB_CONTROL", "").strip().lower() in ("1", "true", "yes", "on")
+
+    # Re-entering the password for every start/stop (an accidental click, or a browser left logged in, must not run a job).  The
+    # browser sends it in the X-Jarvis-Confirm header as base64(user:password); 5 wrong tries in 5 minutes lock the actions for that time.
+    bad_confirms: list[float] = []
+    confirm_lock = threading.Lock()
+
+    def confirm_password(request: Request) -> None:
+        now = time.monotonic()
+        with confirm_lock:
+            bad_confirms[:] = [x for x in bad_confirms if now - x < 300]
+            if len(bad_confirms) >= 5:
+                raise HTTPException(429, "too many wrong passwords: job control is locked for a few minutes")
+        header = request.headers.get("x-jarvis-confirm", "")
+        ok = False
+        try:
+            u, _, p = base64.b64decode(header).decode().partition(":")
+            ok = bool(header) and secrets.compare_digest(u, user) & secrets.compare_digest(p, password)
+        except Exception:                                 # noqa: BLE001
+            ok = False
+        if not ok:
+            if header:                                    # a wrong password counts towards the lock; a missing one is a page bug, not a guess
+                with confirm_lock:
+                    bad_confirms.append(now)
+            log.warning("admin %s: job control refused, wrong or missing password confirmation", user)
+            time.sleep(0.5)
+            raise HTTPException(403, "password confirmation failed: enter the admin username and password")
+
+    def require_control() -> None:
+        if not control_on():
+            raise HTTPException(403, "job control is off: set JARVIS_JOB_CONTROL=1 in .env and restart the viewer")
+
+    def control(name: str, action: str, force: bool = False):
+        try:
+            if action == "start":
+                pid = jobrun.start_job(name, root, by=user)
+            else:
+                pid = jobrun.stop_job(name, root, force=force)
+        except jobrun.ControlError as exc:
+            raise HTTPException(404 if str(exc) == "no such job" else 409, str(exc))
+        log.warning("admin %s: job %s %s%s (pid/pgid %s)", user, name, action, " --force" if force else "", pid)
+        return JSONResponse({"ok": True, "name": name, "action": action, "pid": pid}, headers=noindex)
+
+    @r.post("/api/jobs/start", dependencies=[Depends(same_origin), Depends(require_control), Depends(confirm_password)])
+    def job_start(body: dict):
+        return control(str(body.get("name", ""))[:80], "start")
+
+    @r.post("/api/jobs/stop", dependencies=[Depends(same_origin), Depends(require_control), Depends(confirm_password)])
+    def job_stop(body: dict):
+        return control(str(body.get("name", ""))[:80], "stop", force=bool(body.get("force")))
+
+    @r.get("/api/jobs/log")
+    def job_log(name: str = Query(..., max_length=80), lines: int = Query(200, ge=1, le=jobrun.MAX_TAIL_LINES)):
+        job = next((s for s in job_states() if s.name == name), None)          # only a log named in the crontab, never a path from the client
+        if job is None:
+            raise HTTPException(404, "no such job")
+        if not job.log:
+            raise HTTPException(404, "this job writes no log file")
+        try:
+            text = jobrun.tail(job.log, lines, root)
+        except FileNotFoundError:
+            raise HTTPException(404, "the log file does not exist yet")
+        except (ValueError, OSError):
+            raise HTTPException(404, "the log cannot be read")
+        return JSONResponse({"name": name, "log": job.log, "lines": lines, "text": text}, headers=noindex)
+
     @r.get("/api/schema")
     def schema():
         return JSONResponse(Sandbox(cat).views, headers=noindex)

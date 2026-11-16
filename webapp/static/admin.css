@@ -55,3 +55,28 @@ table.grid .rn{color:var(--muted);text-align:right;width:1%}
   .panel>header input[type=search]{width:100%}
   .grid-wrap{max-height:70vh}
 }
+
+/* jobs */
+.site-links a{color:var(--muted);padding:6px 12px;border-radius:999px;font-size:13.5px;text-decoration:none;white-space:nowrap}.site-links a:hover{color:var(--fg)}
+.head-tools{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap}.check{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.02em;background:var(--panel2);color:var(--muted)}
+.pill.ok{background:rgba(48,209,88,.16);color:#30d158}.pill.running{background:rgba(10,132,255,.18);color:#64a8ff}
+.pill.failed,.pill.lost{background:rgba(255,69,58,.18);color:#ff6961}.pill.late{background:rgba(255,159,10,.18);color:#ffb340}
+.pill.never,.pill.untracked{background:var(--panel2);color:var(--muted)}
+table.jobs tbody tr{cursor:pointer}table.jobs tbody tr.sel td{background:var(--panel2)}
+table.jobs td{white-space:nowrap}
+.dot-run{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:3px;background:var(--muted)}
+.dot-run.ok{background:#30d158}.dot-run.bad{background:#ff453a}.dot-run.run{background:#0a84ff}
+#log-panel{margin-top:14px}#log-panel header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+pre.log{margin:0;padding:12px 14px;max-height:55vh;overflow:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all;border-top:1px solid var(--line2)}
+@media (max-width:900px){.appbar-inner{flex-wrap:wrap;height:auto;padding-top:8px;padding-bottom:8px;gap:8px}.primary{overflow-x:auto;max-width:100%}}
+
+.job-actions{display:inline-flex;gap:8px;margin-left:auto}.job-actions .btn{padding:5px 14px;font-size:13px}
+.btn.danger{border-color:rgba(255,69,58,.5);color:#ff6961}
+.pill.stopped{background:rgba(255,159,10,.14);color:#ffb340}
+
+dialog.confirm{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:var(--r);padding:20px 22px;width:min(380px,calc(100vw - 32px))}
+dialog.confirm::backdrop{background:rgba(0,0,0,.6)}
+dialog.confirm h3{margin:0 0 6px}dialog.confirm .field{display:block;margin-top:12px}dialog.confirm input{width:100%;box-sizing:border-box}
+dialog.confirm .err{color:#ff6961;font-size:13px;margin:10px 0 0}dialog.confirm .qbar{justify-content:flex-end;margin-top:16px}
+dialog.confirm input{font:inherit;font-size:14px;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:var(--r2);padding:8px 12px}dialog.confirm input:focus{border-color:var(--accent);outline:none}

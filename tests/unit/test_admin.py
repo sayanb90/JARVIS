@@ -1,8 +1,9 @@
 """JARVIS /admin: access, the table catalog and paging, the read-only SQL sandbox, and the subscription list."""
 from __future__ import annotations
 
+import json
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -20,7 +21,10 @@ from webapp.app import create_app
 DAY = date(2026, 10, 23)
 T0 = datetime(2026, 10, 23, 3, 45)
 A = ("boss", "s3cret")
-H = {"x-jarvis-admin": "1"}
+import base64 as _b64
+
+H = {"x-jarvis-admin": "1", "x-jarvis-confirm": _b64.b64encode(f"{A[0]}:{A[1]}".encode()).decode()}        # what the page sends after the password prompt
+H_NO_CONFIRM = {"x-jarvis-admin": "1"}
 EQ_RECORDS = [{"segment": "NSE_EQ", "instrument_type": "EQ", "trading_symbol": s, "name": f"{s} Ltd",
                "isin": isin, "instrument_key": f"NSE_EQ|{isin}", "tick_size": 5, "lot_size": 1}
               for s, isin in [("RELIANCE", "INE002A01018"), ("TCS", "INE467B01029"), ("INFY", "INE009A01021"),
@@ -74,13 +78,34 @@ def test_every_admin_path_needs_the_admin_password(client):
     assert client.get("/admin/static/index.html", auth=A).status_code == 404
 
 
-def test_viewer_and_admin_credentials_are_separate(lake, monkeypatch):
+def test_one_login_covers_viewer_and_admin(lake, monkeypatch):
     monkeypatch.setenv("WEBAPP_USER", "viewer"); monkeypatch.setenv("WEBAPP_PASSWORD", "view")
     c = TestClient(create_app(lake.lakedir))
-    assert c.get("/api/meta", auth=("viewer", "view")).status_code == 200
-    assert c.get("/admin/api/catalog", auth=("viewer", "view")).status_code == 401      # viewer login is not enough
-    assert c.get("/admin/api/catalog", auth=A).status_code == 200                      # admin login, no viewer login
-    assert c.get("/api/meta", auth=A).status_code == 401
+    V = ("viewer", "view")
+    assert c.get("/api/meta").status_code == 401 and c.get("/admin/api/catalog").status_code == 401        # no login: neither
+    assert c.get("/api/meta", auth=V).status_code == 200 and c.get("/admin/api/catalog", auth=V).status_code == 200
+    assert c.get("/api/meta", auth=V).json()["admin"] is True
+    assert c.get("/admin/api/catalog", auth=A).status_code == 401 and c.get("/api/meta", auth=A).status_code == 401   # the shared login wins
+
+
+def test_admin_alone_keeps_working_with_the_older_admin_login(lake):
+    c = TestClient(create_app(lake.lakedir))                                    # fixture: ADMIN_* set, WEBAPP_* not
+    assert c.get("/api/meta").json()["admin"] is True                          # viewer open, as before
+    assert c.get("/admin/api/catalog").status_code == 401 and c.get("/admin/api/catalog", auth=A).status_code == 200
+
+
+def test_open_viewer_never_serves_admin(world, monkeypatch):
+    for k in ("ADMIN_USER", "ADMIN_PASSWORD", "WEBAPP_USER", "WEBAPP_PASSWORD"):
+        monkeypatch.delenv(k, raising=False)
+    c = TestClient(create_app(world.lakedir))
+    assert c.get("/api/meta").json()["admin"] is False
+    assert c.get("/admin").status_code == 404 and c.post("/admin/api/universe/apply", json={}).status_code == 404
+
+
+def test_half_a_login_does_not_enable_admin(world, monkeypatch):
+    monkeypatch.setenv("WEBAPP_USER", "viewer"); monkeypatch.delenv("WEBAPP_PASSWORD", raising=False)
+    monkeypatch.delenv("ADMIN_USER", raising=False); monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    assert TestClient(create_app(world.lakedir)).get("/admin").status_code == 404
 
 
 # -- catalog and paging ----------------------------------------------------------------------------
@@ -327,3 +352,141 @@ def test_the_catalog_lists_each_tables_vendors_and_works_with_one_vendor_missing
     (lake.lakedir / "yf_fundamentals" / "versions.parquet").unlink()                           # only Upstox has stored anything
     one = client.get("/admin/api/table", params={"service": "fundamentals", "name": "items"}, auth=A).json()
     assert one["total"] == 1 and one["rows"][0][0] == "Upstox"
+
+
+# -- jobs (Autosys style) ---------------------------------------------------------------------------
+def jobs_world(lake):
+    root = lake.root
+    (root / "deploy").mkdir(exist_ok=True)
+    (root / "deploy" / "crontab").write_text(
+        "0 1 * * * cd $JARVIS && python -m data_layer.jobrun run fx -- python -m data_layer.fx refresh >> logs/fx.log 2>&1\n"
+        "30 2 * * * cd $JARVIS && python -m data_layer.health >> logs/health.log 2>&1\n"
+        "0 3 * * * cd $JARVIS && python -m data_layer.rates daily\n")
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "logs" / "fx.log").write_text("ok line\ntoken=SECRETVALUE\n")
+    (root / ".env").write_text("UPSTOX_FEED_TOKEN=abc\n")
+    from data_layer import jobrun
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    t = (now - timedelta(minutes=30)).isoformat(timespec="seconds")
+    p = jobrun.runs_path(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"ev": "start", "job": "fx", "id": "a", "at": t, "pid": 1}) + "\n"
+                 + json.dumps({"ev": "end", "job": "fx", "id": "a", "at": t, "code": 2, "secs": 4.0}) + "\n")
+
+
+def test_jobs_listing_states_and_counts(client, lake):
+    jobs_world(lake)
+    body = client.get("/admin/api/jobs", auth=A).json()
+    by = {j["name"]: j for j in body["jobs"]}
+    assert set(by) == {"fx", "health", "rates"}
+    assert by["fx"]["state"] == "failed" and by["fx"]["exit_code"] == 2 and by["fx"]["next_run"]
+    assert by["health"]["state"] == "untracked" and by["rates"]["log"] is None
+    assert body["counts"]["failed"] == 1 and body["counts"]["untracked"] == 2
+
+
+def test_job_log_tail_is_redacted_and_only_for_crontab_jobs(client, lake):
+    jobs_world(lake)
+    r = client.get("/admin/api/jobs/log", params={"name": "fx", "lines": 5}, auth=A)
+    assert r.status_code == 200 and "ok line" in r.json()["text"] and "SECRETVALUE" not in r.json()["text"]
+    assert client.get("/admin/api/jobs/log", params={"name": "../.env"}, auth=A).status_code == 404       # not a crontab job
+    assert client.get("/admin/api/jobs/log", params={"name": "rates"}, auth=A).status_code == 404         # writes no log
+    assert client.get("/admin/api/jobs/log", params={"name": "health"}, auth=A).status_code == 404         # log file not there yet
+    assert client.get("/admin/api/jobs/log", params={"name": "fx", "lines": 100000}, auth=A).status_code == 422
+
+
+def test_jobs_need_the_login(client):
+    assert client.get("/admin/api/jobs").status_code == 401 and client.get("/admin/api/jobs/log", params={"name": "fx"}).status_code == 401
+
+
+# -- job control (SCRUM-204) ----------------------------------------------------------------------------
+
+
+def control_world(lake, monkeypatch, on=True):
+    root = lake.root
+    monkeypatch.setenv("JARVIS_ROOT", str(root))
+    if on:
+        monkeypatch.setenv("JARVIS_JOB_CONTROL", "1")
+    else:
+        monkeypatch.delenv("JARVIS_JOB_CONTROL", raising=False)
+    (root / "deploy").mkdir(exist_ok=True)
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "deploy" / "crontab").write_text(
+        "0 1 * * * cd $JARVIS && python -m data_layer.jobrun run quick --shell 'echo done >> logs/quick.log 2>&1'\n"
+        "0 2 * * * cd $JARVIS && python -m data_layer.jobrun run slow --shell 'sleep 30 >> logs/slow.log 2>&1'\n"
+        "0 3 * * * cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1\n")
+
+
+def wait_state(client, name, want, secs=10):
+    import time
+    end = time.time() + secs
+    while time.time() < end:
+        s = {j["name"]: j["state"] for j in client.get("/admin/api/jobs", auth=A).json()["jobs"]}
+        if s.get(name) in want:
+            return s[name]
+        time.sleep(0.2)
+    return s.get(name)
+
+
+def test_job_control_is_off_unless_enabled(client, lake, monkeypatch):
+    control_world(lake, monkeypatch, on=False)
+    assert client.get("/admin/api/jobs", auth=A).json()["control"] is False
+    r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H)
+    assert r.status_code == 403 and "JARVIS_JOB_CONTROL" in r.json()["detail"]
+
+
+def test_job_control_needs_login_and_the_admin_header(client, lake, monkeypatch):
+    control_world(lake, monkeypatch)
+    assert client.post("/admin/api/jobs/start", json={"name": "quick"}, headers=H).status_code == 401
+    assert client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A).status_code == 403          # no x-jarvis-admin header
+    assert client.post("/admin/api/jobs/stop", json={"name": "quick"}, auth=A).status_code == 403
+
+
+def test_start_a_job_from_the_api_and_refuse_bad_requests(client, lake, monkeypatch):
+    control_world(lake, monkeypatch)
+    assert client.get("/admin/api/jobs", auth=A).json()["control"] is True
+    r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H)
+    assert r.status_code == 200 and r.json()["action"] == "start"
+    assert wait_state(client, "quick", ("ok",)) == "ok"
+    assert (lake.root / "logs" / "quick.log").read_text().strip() == "done"
+    assert client.post("/admin/api/jobs/start", json={"name": "nope"}, auth=A, headers=H).status_code == 404
+    assert client.post("/admin/api/jobs/start", json={"name": "../../bin/sh"}, auth=A, headers=H).status_code == 404
+    assert client.post("/admin/api/jobs/start", json={"name": "fx"}, auth=A, headers=H).status_code == 409        # not wrapped
+    assert client.post("/admin/api/jobs/stop", json={"name": "quick"}, auth=A, headers=H).status_code == 409      # not running
+
+
+def test_start_then_stop_a_running_job(client, lake, monkeypatch):
+    control_world(lake, monkeypatch)
+    assert client.post("/admin/api/jobs/start", json={"name": "slow"}, auth=A, headers=H).status_code == 200
+    assert wait_state(client, "slow", ("running",)) == "running"
+    assert client.post("/admin/api/jobs/start", json={"name": "slow"}, auth=A, headers=H).status_code == 409      # already running
+    assert client.post("/admin/api/jobs/stop", json={"name": "slow"}, auth=A, headers=H).status_code == 200
+    assert wait_state(client, "slow", ("stopped",)) == "stopped"
+
+
+def test_every_job_action_needs_the_password_again(client, lake, monkeypatch):
+    control_world(lake, monkeypatch)
+    for path in ("/admin/api/jobs/start", "/admin/api/jobs/stop"):
+        r = client.post(path, json={"name": "quick"}, auth=A, headers=H_NO_CONFIRM)                # logged in, but no confirmation
+        assert r.status_code == 403 and "confirmation" in r.json()["detail"], path
+        bad = {**H_NO_CONFIRM, "x-jarvis-confirm": _b64.b64encode(f"{A[0]}:wrong".encode()).decode()}
+        assert client.post(path, json={"name": "quick"}, auth=A, headers=bad).status_code == 403
+        junk = {**H_NO_CONFIRM, "x-jarvis-confirm": "!!not base64!!"}
+        assert client.post(path, json={"name": "quick"}, auth=A, headers=junk).status_code == 403
+    assert not (lake.root / "logs" / "quick.log").exists()                                           # nothing ran
+    assert client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H).status_code == 200
+
+
+def test_wrong_passwords_lock_job_control_for_a_while(client, lake, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)                                                 # skip the 0.5 s brake
+    control_world(lake, monkeypatch)
+    bad = {**H_NO_CONFIRM, "x-jarvis-confirm": _b64.b64encode(f"{A[0]}:wrong".encode()).decode()}
+    for _ in range(5):
+        assert client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=bad).status_code == 403
+    r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H)              # even the right password is refused now
+    assert r.status_code == 429
+
+
+def test_control_off_answers_before_asking_for_a_password(client, lake, monkeypatch):
+    control_world(lake, monkeypatch, on=False)
+    r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H_NO_CONFIRM)
+    assert r.status_code == 403 and "JARVIS_JOB_CONTROL" in r.json()["detail"]

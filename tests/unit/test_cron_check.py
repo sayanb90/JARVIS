@@ -97,3 +97,10 @@ def test_system_state_helpers_degrade_without_systemd(monkeypatch):
     monkeypatch.setattr(cc, "_run", lambda cmd: "inactive")
     assert cc.cron_daemon_state() == "not running"
     assert cc.clock_is_utc(datetime(2026, 1, 1, tzinfo=timezone.utc)) and not cc.clock_is_utc(datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=5, minutes=30))))
+
+
+def test_wrapped_and_unwrapped_lines_compare_equal():
+    wrapped = "30 0 * * * cd $JARVIS && python -m data_layer.jobrun run fx --shell 'python -m data_layer.fx refresh >> logs/fx.log 2>&1'\n"
+    plain = "30 0 * * * cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1\n"
+    cmp = cc.compare(cc.parse_crontab(wrapped), cc.parse_crontab(plain))
+    assert len(cmp["present"]) == 1 and not cmp["missing"]

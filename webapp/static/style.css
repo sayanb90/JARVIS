@@ -29,6 +29,7 @@ button,select{font:inherit;color:inherit}
 .primary button{background:none;border:0;color:var(--muted);padding:6px 16px;border-radius:999px;cursor:pointer;font-size:13.5px;white-space:nowrap;transition:background .2s,color .2s}
 .primary button:hover{color:var(--fg)}
 .primary button[aria-selected=true]{background:var(--raise);color:var(--fg);box-shadow:0 1px 2px rgba(0,0,0,.4)}
+.admin-links a{color:var(--muted);padding:6px 12px;border-radius:999px;font-size:13.5px;text-decoration:none;white-space:nowrap}.admin-links a:hover{color:var(--fg)}
 .appbar .spacer{flex:1}
 .day{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
 

@@ -20,8 +20,9 @@ API (JSON):
   GET /api/history/volume?market=&date=&sort=&n=   the most traded tickers on a day
   GET /api/signals/live?underlying=&date=          latest bucket of every live signal, today's series, the daily signals (Signals tab)
 
-Admin (data browser, read-only SQL, subscription list) is at /admin when ADMIN_USER and ADMIN_PASSWORD are set;
-see webapp/admin.py.  The app never writes to the lake.  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
+Admin (data browser, read-only SQL, subscription list) is at /admin, behind the same login as the viewer (WEBAPP_USER/WEBAPP_PASSWORD;
+ADMIN_USER/ADMIN_PASSWORD still work when those are not set); it is never served without a login;
+see webapp/admin.py.  The app never writes to the lake (job control, off by default, only starts or stops the crontab's own jobs).  It binds to 127.0.0.1 by default; put a reverse proxy with TLS in front of it
 for remote access, and/or set WEBAPP_USER and WEBAPP_PASSWORD to require HTTP Basic auth.
 """
 
@@ -95,8 +96,8 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     user, password = os.getenv("WEBAPP_USER"), os.getenv("WEBAPP_PASSWORD")
 
     def auth(request: Request) -> None:
-        if not (user and password) or request.url.path.startswith("/admin"):
-            return                                   # /admin has its own, separate credentials (webapp/admin.py)
+        if not (user and password):
+            return                                   # the viewer is open; /admin is then served only with ADMIN_USER/ADMIN_PASSWORD (webapp/admin.py)
         header = request.headers.get("authorization", "")
         ok = False
         if header.lower().startswith("basic "):
@@ -113,8 +114,9 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     app.state.lake_path = lake_path
     from .admin import admin_router
     admin = admin_router(lake_path)
-    if admin is not None:                            # only when ADMIN_USER and ADMIN_PASSWORD are set
+    if admin is not None:                            # only when a login exists: WEBAPP_USER/PASSWORD (also covers the viewer) or ADMIN_USER/PASSWORD
         app.include_router(admin)
+    app.state.admin_enabled = admin is not None
     overview_cache: dict[tuple, list] = {}
 
     def lake() -> Lake:
@@ -123,7 +125,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     @app.get("/api/meta")
     def meta():
         q = lake()
-        return {"demo": (lake_path / "DEMO").exists(), "interval": interval, "days": q.bar_days(interval), "candle_days": q.candle_days(interval),
+        return {"admin": app.state.admin_enabled, "demo": (lake_path / "DEMO").exists(), "interval": interval, "days": q.bar_days(interval), "candle_days": q.candle_days(interval),
                 "widths": list(WIDTHS), "vol_windows": list(VOL_WINDOWS), "candle_minutes": list(CANDLE_MINUTES), "profile_bins": list(PROFILE_BINS)}
 
     @app.get("/api/symbols")
