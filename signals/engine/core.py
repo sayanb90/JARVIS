@@ -553,6 +553,7 @@ class OperatorEngine:
         ts = pd.Timestamp(b)
         upto = ts + tdd
         out = []
+        rows1: list = []                                   # one-row native outputs as dicts, built into one frame at the end
         if g.natives is not None:
             n0 = _time.perf_counter()
             tp = operators.TapeTable(self.ticks.window(ts, upto), g.natives.meta, b, g.td)
@@ -563,10 +564,7 @@ class OperatorEngine:
                     self.shadow.check(g, tp, cl, self.session.options, res)
                 except Exception:                             # noqa: BLE001 -- a monitor must never stop the engine
                     log.exception("shadow parity check failed")
-            for sid, df in res.items():
-                part = self._emit(g, sid, df, upto)
-                if part is not None:
-                    out.append(part)
+            self._collect(g, res, upto, out, rows1)
             g.timings["native"] = g.timings.get("native", 0.0) + _time.perf_counter() - n0
         at = None
         if g.needs_chain or g.cnatives is not None:
@@ -589,17 +587,14 @@ class OperatorEngine:
             fut = self.session.bars.front_bar(g.cadence, b, self.session.day)
             t_fut = ((pd.Timestamp(fut[1]).value + EXPIRY_NS - (b + g.td)) / YEAR_NS) if fut[1] is not None else math.nan
             res = g.cnatives.run(b, bk.chain("bar"), bk.chain("live") if g.cnatives.needs_live else None, at, (fut[0], t_fut), g.since)
-            for sid, df in res.items():
-                part = self._emit(g, sid, df, upto)
-                if part is not None:
-                    out.append(part)
+            self._collect(g, res, upto, out, rows1)
             g.timings["chain_native"] = g.timings.get("chain_native", 0.0) + _time.perf_counter() - t1
             t1 = _time.perf_counter()
         if not g.windows:                                  # every signal of the group is native: no frames, no shared inputs
             g.since = upto
             g.buckets += 1
             g.timings["total"] = g.timings.get("total", 0.0) + _time.perf_counter() - t0
-            return _concat(out)
+            return _concat(out + ([pd.DataFrame(rows1)] if rows1 else []))
         today = self._raw_today(g)
         shared = self._shared(g, today)
         t2 = _time.perf_counter()
@@ -645,7 +640,7 @@ class OperatorEngine:
         g.since = upto
         g.buckets += 1
         g.timings["total"] = g.timings.get("total", 0.0) + _time.perf_counter() - t0
-        return _concat(out)
+        return _concat(out + ([pd.DataFrame(rows1)] if rows1 else []))
 
 
 def _finish(self, g: Group, sid: str, part: pd.DataFrame) -> pd.DataFrame:
@@ -663,7 +658,7 @@ def _finish(self, g: Group, sid: str, part: pd.DataFrame) -> pd.DataFrame:
 OperatorEngine._finish_rows = _finish
 
 
-def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timestamp) -> Optional[pd.DataFrame]:
+def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timestamp, as_row: bool = False):
     """A native operator's output as final rows: normalise, select the rows first known in (since, upto], add signal, bucket and underlying.
     Most signals give one row per bucket: that is built once as the final frame (the three steps copied it three times, about 0.4 ms of 1 ms per
     signal and bucket, 27 signals a second); several rows, a baseline to apply or an own `signal` column take the general path."""
@@ -675,6 +670,13 @@ def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timesta
             since, day = g.since, self.day
             if not ((ka <= upto) and ((ka > since) if since is not None else (ka >= day))):
                 return None
+            if as_row:                                    # one dict: the caller builds one frame for all the one-row signals of the close
+                row = {"signal": sid, "underlying": self.underlying, key: df[key].iat[0], "known_at": ka}
+                for c in df.columns:
+                    if c not in ("underlying", key, "known_at"):
+                        row[c] = df[c].iat[0]
+                row["bucket"] = g.cadence
+                return row
             data = {"signal": sid, "underlying": self.underlying, key: df[key].array, "known_at": df["known_at"].array}
             for c in df.columns:
                 if c not in ("underlying", key, "known_at"):
@@ -686,6 +688,19 @@ def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timesta
 
 
 OperatorEngine._emit = _emit
+
+
+def _collect(self, g: Group, res: dict, upto: pd.Timestamp, out: list, rows1: list) -> None:
+    """The final rows of a native operators' results: one-row outputs as dicts into `rows1`, others as frames into `out`."""
+    for sid, df in res.items():
+        part = self._emit(g, sid, df, upto, as_row=True)
+        if isinstance(part, dict):
+            rows1.append(part)
+        elif part is not None:
+            out.append(part)
+
+
+OperatorEngine._collect = _collect
 
 
 def _select(df: Optional[pd.DataFrame], since: Optional[pd.Timestamp], upto: pd.Timestamp, day: pd.Timestamp, own: bool = False) -> Optional[pd.DataFrame]:
@@ -704,6 +719,8 @@ def _select(df: Optional[pd.DataFrame], since: Optional[pd.Timestamp], upto: pd.
 
 def _concat(parts: Iterable[pd.DataFrame]) -> pd.DataFrame:
     parts = [p for p in parts if p is not None and len(p)]
+    if len(parts) == 1:                                   # nothing to join: the rows of one close pass up through four levels (close, advance, loop, write)
+        return parts[0] if isinstance(parts[0].index, pd.RangeIndex) else parts[0].reset_index(drop=True)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
