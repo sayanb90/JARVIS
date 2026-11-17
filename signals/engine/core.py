@@ -188,6 +188,17 @@ class Anchors:
             self.daily_signals = daily_inputs(self.underlying, h, self.ids)
         self.contract_table = Context(self.underlying, raw).get("contract_table")
 
+    @classmethod
+    def restore(cls, underlying: str, day, ids: list, hist: dict, fixed: dict, hist_atm: pd.DataFrame, daily_signals: dict,
+                contract_table: pd.DataFrame, hist_prov: dict, volume_slot_daily: Optional[pd.DataFrame] = None) -> "Anchors":
+        """The anchors of signals/anchors.py (saved by the pre-open job) without computing them: `history` is the trimmed `hist`, which holds
+        what the engine reads of it (contracts, participant, events)."""
+        a = object.__new__(cls)
+        a.underlying, a.day, a.ids, a.history, a.hist = underlying, pd.Timestamp(day).normalize(), list(ids), hist, hist
+        a.volume_slot_daily, a.daily_signals, a.index_sessions, a.option_sessions = volume_slot_daily, daily_signals, 30, 1
+        a.fixed, a.hist_atm, a.hist_prov, a.contract_table = fixed, hist_atm, hist_prov, contract_table
+        return a
+
     def providers(self, cadence: str) -> dict:
         if cadence not in self.hist_prov:
             c = Context(self.underlying, self.hist, bucket=cadence)
@@ -251,12 +262,13 @@ class OperatorEngine:
 
     def __init__(self, underlying: str, history: dict, cadence: dict, day, baselines: Optional[dict] = None,
                  volume_slot_daily: Optional[pd.DataFrame] = None, daily_signals: Optional[dict] = None, reorder_ms: int = 0,
-                 r: float = 0.065, native: Optional[Iterable[str]] = None):
+                 r: float = 0.065, native: Optional[Iterable[str]] = None, anchors: Optional["Anchors"] = None):
         self.underlying = underlying
         self.day = pd.Timestamp(day).normalize()
         self.cadence = dict(cadence)
         ids = sorted(self.cadence)
-        self.anchors = Anchors(underlying, history, self.day, ids, volume_slot_daily=volume_slot_daily, daily_signals=daily_signals)
+        self.anchors = anchors if anchors is not None else Anchors(underlying, history, self.day, ids, volume_slot_daily=volume_slot_daily,
+                                                                 daily_signals=daily_signals)       # ready (signals/anchors.py) or computed from the history
         groups = cadence_mod.groups(self.cadence)
         self._nat = tuple(operators.NATIVE + chain_ops.CHAIN_NATIVE if native is None else native)
         self._meta = operators.contract_meta(self.anchors.contract_table)
@@ -887,12 +899,22 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
     if not cad:
         raise ValueError(f"no live signal runs at {only}")
     engines = []
+    from signals import anchors as anchors_mod
     for u in underlyings:
-        hist = history_for(Path(lake), u, day)
         groups = cadence_mod.groups(cad)
+        reorder = int(env.get("JARVIS_SIGNAL_REORDER_MS", REORDER_MS_DEFAULT))
+        saved = None if env.get("JARVIS_ANCHORS", "1").strip().lower() in ("0", "false", "no", "off") else \
+            anchors_mod.load(Path(store), day, u, sorted(cad), list(groups), log=log.warning)
+        if saved is not None:                           # the pre-open job's tables (signals anchors): seconds, not 100 s of history loading
+            anc, base = saved
+            log.info("%s: anchors loaded from %s", u, anchors_mod.folder(Path(store), day, u))
+            engines.append(OperatorEngine(u, anc.hist, cad, day, baselines=base, anchors=anc, reorder_ms=reorder))
+            continue
+        log.warning("%s: no saved anchors for %s; computing them from the history (slow start)", u, day)
+        hist = history_for(Path(lake), u, day)
         base = {c: load_baselines(Path(store), u, day, s, c) for c, s in groups.items()}
         engines.append(OperatorEngine(u, hist, cad, day, baselines=base, volume_slot_daily=slot_volume_history(Path(lake), u, day),
-                                      reorder_ms=int(env.get("JARVIS_SIGNAL_REORDER_MS", REORDER_MS_DEFAULT))))
+                                      reorder_ms=reorder))
     for e in engines:
         e.trigger = (0, 0)
     pub = bus.Publisher("signals-" + "-".join(underlyings) + tag, env=env) if bus.bus_enabled(env) else None

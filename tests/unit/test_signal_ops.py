@@ -261,3 +261,26 @@ def test_bars_from_ticks_follow_the_engine_rules_and_the_vendor_wins_where_both_
     got = lakeio.read_bars(lake, day, day, "symbol = ?", ["NSE_INDEX:Nifty 50"]).set_index("ts")
     assert got.loc[t0]["close"] == 1.5 and len(got) == len(idx)                    # minute 1 from the vendor, the others from the ticks
     assert (got.drop(index=t0)["close"] == idx.drop(index=t0)["close"]).all()
+
+
+def test_anchors_job_saves_what_an_engine_loads_and_the_crontab_runs_it_before_the_engines(lake, tmp_path):
+    """17 Nov 2026: `python -m signals anchors` (cron 03:30 UTC) computes the engines' start-up numbers from the lake once and saves them; an engine
+    of the same day loads them (signals/anchors.load), another day's are not used."""
+    from pathlib import Path
+    from signals import anchors as an
+    import signals.__main__ as m
+    day = DAY + pd.Timedelta(days=1)
+    out = an.build(lake, tmp_path, "NIFTY", day, log=lambda *a: None)
+    assert (out / "manifest.json").exists() and (out / "contract_table.parquet").exists()
+    from signals.engine.core import live_signal_ids
+    from signals import cadence as cm
+    ids = live_signal_ids()
+    cad = cm.load(ids)
+    got = an.load(tmp_path, day, "NIFTY", sorted(cad), list(cm.groups(cad)))
+    assert got is not None and got[0].underlying == "NIFTY" and len(got[0].fixed["daily"]) > 0
+    assert an.load(tmp_path, DAY, "NIFTY", sorted(cad), list(cm.groups(cad))) is None
+    root = Path(__file__).resolve().parents[2]
+    lines = [l for l in (root / "deploy/crontab").read_text().splitlines() if l.strip() and not l.startswith("#")]
+    at = next(l for l in lines if "signals anchors" in l)
+    assert (int(at.split()[1]), int(at.split()[0])) < (3, 44) and (int(at.split()[1]), int(at.split()[0])) > (3, 25)
+    assert hasattr(m, "main")

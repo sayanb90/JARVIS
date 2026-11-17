@@ -486,6 +486,11 @@ def load_baselines(store: Path, underlying: str, day: date, ids: Iterable[str], 
         files = sorted(f for f in base.glob("date=*/part.parquet") if f.parent.name.split("=", 1)[1] < str(day))[-window:]
         if len(files) < normalise.MIN_SESSIONS:
             continue
+        # a signal with several rows per bucket (the per-contract ones, 285 MB a day at 1 s) has no baseline: its newest session's `ts` column says
+        # so, and the full files of twenty sessions are not read for it (they would take gigabytes at every engine start)
+        last_ts = pd.to_datetime(pd.read_parquet(files[-1], columns=["ts"])["ts"])
+        if last_ts.duplicated().any():
+            continue
         h = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
         if normalise.one_row_per_bucket(h[pd.to_datetime(h["ts"]).dt.normalize() == pd.to_datetime(h["ts"]).dt.normalize().max()]):
             out[sid] = normalise.baseline(h, normalise.numeric_cols(h), window)

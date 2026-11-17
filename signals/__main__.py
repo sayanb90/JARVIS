@@ -337,6 +337,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     nt.add_argument("--lake", type=Path, default=None, help="default: the latest research snapshot, else the lake")
     nt.add_argument("--root", type=Path, default=None, help="default: $JARVIS_SIGNAL_STORE or <research root>/store")
     nt.add_argument("--date", type=date.fromisoformat)
+    an = sub.add_parser("anchors", help="save the pre-open anchors the live engines load at their start (cron, 03:30 UTC)")
+    an.add_argument("--lake", type=Path, default=None)
+    an.add_argument("--root", type=Path, default=None)
+    an.add_argument("--underlying", default="NIFTY,BANKNIFTY")
+    an.add_argument("--day", type=date.fromisoformat, default=None, help="default: today (UTC)")
     lv = sub.add_parser("live", help="compute the live signals during the session (cron, 03:44 UTC)")
     lv.add_argument("--lake", type=Path, default=None, help="default: the production lake (live ticks are not in snapshots)")
     lv.add_argument("--root", type=Path, default=None)
@@ -389,6 +394,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         res = nightly(a.lake or default_lake(), a.root or default_store(), a.date, log=say)
         say(json.dumps(res))
         return 0
+    if a.cmd == "anchors":
+        from signals.live_runner import cap_memory
+        cap_memory(var="JARVIS_SIGNAL_NIGHTLY_MAX_MB", default=10240)
+        from signals import anchors
+        return anchors.main([x for kv in (("--underlying", a.underlying), ("--day", str(a.day) if a.day else None),
+                                          ("--lake", str(a.lake) if a.lake else None), ("--root", str(a.root) if a.root else None))
+                             for x in kv if x is not None])
     if a.cmd == "live":
         import logging
         from data_layer.lake import ENV_FILE, LAKE_DIR

@@ -84,6 +84,10 @@ JARVIS_SIGNAL_ENGINE=operators
 # default; =runner for the first engine): per-tick chain state, numpy smile and ATM, native book-and-tape operators, the chain signals
 # on frames cut from the state; final rows at each bucket close, provisional book-and-tape values every JARVIS_SIGNAL_TICK_MS (250);
 # heartbeat in <store>/live/engine-<U>.heartbeat.json, checked by the 11:40 health run.
+# Pre-open anchors (17 Nov 2026): the history numbers the engines compute at their start (400 days of index and VIX minutes, HAR forecast, time-of-day
+# profile, the previous session's ATM rows, the 20-session volume baseline, baselines) saved once as small tables in <store>/anchors, so the four engines
+# start in seconds and do not load the history at the same moment.  An engine without them computes them itself (slow start, logged).  After the 03:25 refresh.
+30 3 * * 1-5   cd $JARVIS && python -m data_layer.jobrun run signals-anchors --shell 'nice -n 10 python -m signals anchors >> logs/signals-anchors.log 2>&1'
 44 3 * * 1-5   cd $JARVIS && python -m data_layer.jobrun run signals-live-nifty --shell 'nice -n 10 python -m signals live --underlying NIFTY --cadences 1s,10s >> logs/signals-live-nifty.log 2>&1'
 47 3 * * 1-5   cd $JARVIS && python -m data_layer.jobrun run signals-live-nifty-1min --shell 'nice -n 10 python -m signals live --underlying NIFTY --cadences 1min >> logs/signals-live-nifty-1min.log 2>&1'
 44 3 * * 1-5   cd $JARVIS && python -m data_layer.jobrun run signals-live-banknifty --shell 'nice -n 10 python -m signals live --underlying BANKNIFTY --cadences 1s,10s >> logs/signals-live-banknifty.log 2>&1'

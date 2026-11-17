@@ -664,3 +664,44 @@ def test_the_one_minute_process_does_not_keep_ticks_and_its_rows_are_unchanged(d
     assert eng_slow.reads_ticks is False and eng_full.reads_ticks is True
     assert len(eng_slow.ticks.df) == 0 and len(eng_full.ticks.df) > 0              # nothing was kept for the process that never reads it
     assert len(got) > 0 and _compare(ref, got, sorted(slow)) == {}
+
+
+def test_an_engine_started_from_saved_anchors_gives_the_rows_of_one_that_computed_them(day, tmp_path):
+    """17 Nov 2026: the pre-open job saves what the engines computed at their start (400 days of history, HAR, profiles, ATM of the last session,
+    volume baseline); an engine loads the tables instead.  Its rows must be the same, and a saved set that does not fit (other day, other
+    signals, other signal versions, damaged) must not be used."""
+    import json
+    from signals import anchors as an
+    from signals.engine.core import Anchors, replay
+    hist, ticks, d = day
+    t = _cut(ticks, d, 6)
+    h = trim(hist)
+    cad = {"book_pressure": "10s", "pcr_full": "1min", "skew": "1min", "gex": "10s", "term_slope": "1min", "volume_burst": "1min",
+           "noise_band": "1min", "vrp": "1min", "spread_gate": "10s"}
+    ids = sorted(cad)
+    vsd = Context("NIFTY", hist).get("volume_slot_daily")
+    anc = Anchors("NIFTY", h, d, ids, volume_slot_daily=vsd)
+    groups = {"10s": [s for s in ids if cad[s] == "10s"], "1min": [s for s in ids if cad[s] == "1min"]}
+    an.save(anc, {}, tmp_path, d, ids, list(groups), history_through="2026-03-30", log=lambda *a: None)
+    meta = json.loads((an.folder(tmp_path, d, "NIFTY") / "manifest.json").read_text())
+    assert meta["day"] == str(d.date()) and meta["ids"] == ids and meta["history_through"] == "2026-03-30"
+    loaded = an.load(tmp_path, d, "NIFTY", ids, list(groups))
+    assert loaded is not None
+    anc2, base = loaded
+    ref = replay("NIFTY", h, t, cad, step="1min", volume_slot_daily=vsd)
+    got = replay("NIFTY", anc2.hist, t, cad, step="1min", anchors=anc2, baselines=base)
+    assert len(ref) == len(got) > 50
+    assert _compare(ref, got, ids) == {}
+    # a subset of the saved signals and cadences is fine; other days, signals, schema, versions or a damaged folder are refused
+    assert an.load(tmp_path, d, "NIFTY", ids[:3], ["10s"]) is not None
+    assert an.load(tmp_path, d + pd.Timedelta(days=1), "NIFTY", ids, list(groups)) is None
+    assert an.load(tmp_path, d, "BANKNIFTY", ids, list(groups)) is None
+    assert an.load(tmp_path, d, "NIFTY", ids + ["fair_straddle"], list(groups)) is None
+    assert an.load(tmp_path, d, "NIFTY", ids, ["1s"]) is None
+    mp = an.folder(tmp_path, d, "NIFTY") / "manifest.json"
+    for change in ({"schema": 99}, {"versions": {**meta["versions"], "gex": 99}}):
+        mp.write_text(json.dumps({**meta, **change}))
+        assert an.load(tmp_path, d, "NIFTY", ids, list(groups)) is None
+    mp.write_text(json.dumps(meta))
+    (an.folder(tmp_path, d, "NIFTY") / "contract_table.parquet").write_bytes(b"not parquet")
+    assert an.load(tmp_path, d, "NIFTY", ids, list(groups)) is None
