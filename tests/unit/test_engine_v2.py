@@ -646,3 +646,21 @@ def test_an_engine_without_adapters_keeps_a_short_tick_window_and_the_status_nam
     g = st["groups"]["1min"]
     assert g["closed"] >= 1 and g.get("signal_ms") and all(k in full for k in g["signal_ms"])         # slowest adapters of the interval
     assert "slowest:" in status_line(st)
+
+
+def test_the_one_minute_process_does_not_keep_ticks_and_its_rows_are_unchanged(day):
+    """17 Nov 2026: none of the five one-minute signals reads ticks (their inputs are the futures, ATM, chain and index frames), yet their process
+    copied a 7-minute window of ticks per lookback group at every close (about 2 of the 3.4 s).  Now it keeps and copies none; the rows are the
+    ones of an engine that has every signal (which keeps ticks)."""
+    from signals.engine.core import live_signal_ids, replay
+    import signals.cadence as cm
+    hist, ticks, d = day
+    t = _cut(ticks, d, 12)
+    full = cm.load(live_signal_ids(), env={})
+    slow = cm.only(full, ["1min"])
+    ref = replay("NIFTY", trim(hist), t, full, step="1min")
+    got = replay("NIFTY", trim(hist), t, slow, step="1min")
+    eng_slow, eng_full = got.attrs["engine"], ref.attrs["engine"]
+    assert eng_slow.reads_ticks is False and eng_full.reads_ticks is True
+    assert len(eng_slow.ticks.df) == 0 and len(eng_full.ticks.df) > 0              # nothing was kept for the process that never reads it
+    assert len(got) > 0 and _compare(ref, got, sorted(slow)) == {}

@@ -287,6 +287,19 @@ class OperatorEngine:
         self.trigger = (0, 0)                           # (vendor time, receive time) of the tick that closed the last buckets
         self.last_tick_mono: Optional[float] = None
         self.errors = 0                                 # batches or timer steps that raised (logged, the session continues)
+        self.reads_ticks = self._reads_ticks()          # does any signal of this process read ticks (the tape operators, a signal with ticks_fo)?
+
+    def _reads_ticks(self) -> bool:
+        """The tape operators read the bucket's ticks, and a signal that declares `ticks_fo` among its inputs reads them as a frame.  None of the five
+        one-minute signals does: their process (signals live --cadences 1min) used to copy a 7-minute window of ticks for each of their lookback
+        groups at every close, for nothing (about 2 of the 3.4 s of a close on 17 Nov 2026)."""
+        for g in self.groups.values():
+            if g.natives is not None:
+                return True
+            for sids in g.windows.values():
+                if any("ticks_fo" in REGISTRY[s][0].inputs for s in sids):
+                    return True
+        return False
 
     def _group(self, c: str, sids: list) -> Group:
         g = Group(c, list(sids), native=tuple(s for s in sids if s in self._nat))
@@ -333,6 +346,7 @@ class OperatorEngine:
         nt = Group(nc, t.ids, native=t.native)                      # recompute windows, keep_ns and needs_* for the merged list
         t.windows, t.keep_ns, t.needs_chain, t.needs_live = nt.windows, nt.keep_ns, nt.needs_chain, nt.needs_live
         self._attach(t)
+        self.reads_ticks = True
         self.ticks.keep = max(self.ticks.keep, pd.Timedelta(t.keep_ns + 2 * NS_MIN, unit="ns"))
         g.ids, g.native, g.windows, g.natives, g.cnatives = [], (), {}, None, None
         g.needs_chain = g.needs_live = False
@@ -429,7 +443,8 @@ class OperatorEngine:
                 t0 = _time.perf_counter()
                 part = df.iloc[i:j]
                 self.session.apply_frame(part)
-                self.ticks.add(part)
+                if self.reads_ticks:
+                    self.ticks.add(part)
                 self.stats["apply_s"] += _time.perf_counter() - t0
                 self.stats["ticks"] += j - i
                 i = j
@@ -463,7 +478,7 @@ class OperatorEngine:
                         if g.overruns >= OVERRUNS_BEFORE_FALLBACK:
                             self._coarsen(g, end)
             self.closed_to = end if self.closed_to is None else max(self.closed_to, end)
-        if self.closed_to is not None:
+        if self.closed_to is not None and self.reads_ticks:
             self.ticks.trim(pd.Timestamp(self.closed_to))
         res = _concat(out)
         self.stats["rows"] += len(res)
@@ -580,7 +595,8 @@ class OperatorEngine:
         for lb, sids in g.windows.items():
             lo = first_new - lb - tdd
             w = dict(raw)
-            w["ticks_fo"] = self.ticks.window(lo, upto)
+            if any("ticks_fo" in REGISTRY[s][0].inputs for s in sids):          # only a signal that reads ticks gets the window of them
+                w["ticks_fo"] = self.ticks.window(lo, upto)
             ho = raw.get("opt_1m")
             w["opt_1m"] = ho[pd.to_datetime(ho["ts"]) >= lo] if ho is not None and len(ho) else ho
             cw = [f for x, f in g.chain if x >= lo.value]
