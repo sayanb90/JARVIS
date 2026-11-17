@@ -495,8 +495,10 @@ def load_baselines(store: Path, underlying: str, day: date, ids: Iterable[str], 
 def history_for(lake: Path, underlying: str, day: date) -> dict:
     """Everything before `day` the live signals look back at: index and VIX minutes for 400 days (realised-vol forecast, VIX regime),
     the last 5 sessions of option and future minutes (day-over-day changes), contracts, participant file, events, rates."""
-    from signals.lakeio import load_raw
-    raw = load_raw(lake, underlying, day - timedelta(days=400), day - timedelta(days=1), option_from=day - timedelta(days=7), ticks=False)
+    from signals.lakeio import load_raw, load_threads
+    # no constituent minutes (the basket signals are research signals) and at most JARVIS_LOAD_THREADS cores for the read
+    raw = load_raw(lake, underlying, day - timedelta(days=400), day - timedelta(days=1), option_from=day - timedelta(days=7), ticks=False,
+                   stocks=False, threads=load_threads())
     return raw
 
 

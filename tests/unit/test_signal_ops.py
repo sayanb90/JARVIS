@@ -184,3 +184,30 @@ def test_engine_live_cap_default_is_large_enough_and_signals_live_reads_dotenv()
     src = Path(lr.__file__).resolve().parent / "__main__.py"
     assert "load_dotenv(ENV_FILE)" in src.read_text()
     assert "load_dotenv(ENV_FILE)" in (Path(lr.__file__).resolve().parents[1] / "trading" / "paper.py").read_text()
+
+
+def test_history_load_can_skip_the_constituent_minutes_and_limit_the_cores(lake):
+    """17 Nov 2026: four engines loading 400 days of history at once took every core of the 4-core VPS for about 100 s (load average 6.05).  The
+    load is limited to JARVIS_LOAD_THREADS cores (default 2) and skips the constituents' minutes (only the basket research signals read them)."""
+    from signals import lakeio
+    assert lakeio.load_threads({}) == 2 and lakeio.load_threads({"JARVIS_LOAD_THREADS": "1"}) == 1 and lakeio.load_threads({"JARVIS_LOAD_THREADS": "0"}) == 1
+    assert lakeio.connect(1).execute("select current_setting('threads')").fetchone()[0] == 1
+    d1 = DAY
+    full = lakeio.load_raw(lake, "NIFTY", d1 - pd.Timedelta(days=10), d1, stocks=True)
+    lean = lakeio.load_raw(lake, "NIFTY", d1 - pd.Timedelta(days=10), d1, stocks=False, threads=1)
+    assert len(lean["stocks_1m"]) == 0 and set(lean["stocks_1m"].columns) <= set(full["stocks_1m"].columns)
+    for k in ("index_1m", "vix_1m", "fut_1m", "opt_1m"):                     # everything else is the same
+        pd.testing.assert_frame_equal(lean[k].reset_index(drop=True), full[k].reset_index(drop=True))
+
+
+def test_crontab_starts_the_one_minute_engines_after_the_fast_ones():
+    """Each engine loads 400 days of history at its start; four at once took the 4 cores (17 Nov 2026), so the one-minute engines start 3 and 5 minutes later."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    start = {}
+    for ln in (root / "deploy/crontab").read_text().splitlines():
+        m = re.match(r"^(\d+) 3 \* \* 1-5\s+cd \$JARVIS && python -m data_layer.jobrun run (signals-live-[a-z0-9-]+)", ln)
+        if m:
+            start[m.group(2)] = int(m.group(1))
+    assert start == {"signals-live-nifty": 44, "signals-live-nifty-1min": 47, "signals-live-banknifty": 44, "signals-live-banknifty-1min": 49}
