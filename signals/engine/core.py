@@ -41,12 +41,17 @@ from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
 log = logging.getLogger("signals.engine")
 
 TICK_MS_DEFAULT = 250
+PROVISIONAL_MS_DEFAULT = 1000        # provisional values copy every operator's state: at 250 ms they cost about half a core on 17 Nov 2026
 REORDER_MS_DEFAULT = 200
 HIST_PROVIDERS = ("spot", "vix", "futures", "fut_front")
 
 
 def tick_ms(env=None) -> int:
     return int((os.environ if env is None else env).get("JARVIS_SIGNAL_TICK_MS", TICK_MS_DEFAULT))
+
+
+def provisional_ms(env=None) -> int:
+    return int((os.environ if env is None else env).get("JARVIS_SIGNAL_PROVISIONAL_MS", PROVISIONAL_MS_DEFAULT))
 
 
 def engine_kind(env=None) -> str:
@@ -202,6 +207,7 @@ class Group:
     needs_chain: bool = True
     windows: dict = field(default_factory=dict)
     timings: dict = field(default_factory=dict)
+    tm_prev: dict = field(default_factory=dict)         # the timings at the last status line, to report the mean per bucket in the interval
     buckets: int = 0
     overruns: int = 0
     interval: dict = field(default_factory=lambda: {"n": 0, "sum_s": 0.0, "max_s": 0.0})   # bucket closes since the last status
@@ -329,6 +335,10 @@ class OperatorEngine:
             iv = g.interval
             out["groups"][c] = {"signals": len(g.ids), "buckets": g.buckets, "closed": iv["n"],
                                 "mean_ms": round(1000 * iv["sum_s"] / iv["n"], 1) if iv["n"] else None, "max_ms": round(1000 * iv["max_s"], 1)}
+            if iv["n"]:                                    # where a bucket close goes: mean ms per phase over the interval
+                out["groups"][c]["phase_ms"] = {k: round(1000 * (g.timings.get(k, 0.0) - g.tm_prev.get(k, 0.0)) / iv["n"], 1)
+                                                for k in ("state", "native", "chain_native", "inputs")}
+            g.tm_prev = {k: g.timings.get(k, 0.0) for k in ("state", "native", "chain_native", "inputs")}
             g.interval = {"n": 0, "sum_s": 0.0, "max_s": 0.0}
         return out
 
@@ -662,7 +672,9 @@ MARKET_UTC = (pd.Timedelta(hours=3, minutes=45), pd.Timedelta(hours=10))
 def status_line(st: dict) -> str:
     """One log line per engine and minute: ticks, late, missed on the bus, rows, lag, memory, per cadence buckets closed and the
     mean / slowest close in the last minute, and any fallback."""
-    gs = " ".join(f"{c}[sig={g['signals']} closed={g['closed']} mean={g['mean_ms']}ms max={g['max_ms']}ms]" for c, g in st["groups"].items())
+    gs = " ".join(f"{c}[sig={g['signals']} closed={g['closed']} mean={g['mean_ms']}ms max={g['max_ms']}ms"
+                  + (" " + "/".join(f"{k}={v}" for k, v in g["phase_ms"].items()) if g.get("phase_ms") else "") + "]"
+                  for c, g in st["groups"].items())
     fb = f" FALLBACKS={st['fallbacks']}" if st["fallbacks"] else ""
     return (f"status {st['underlying']}: ticks={st['ticks']} late={st['late']} missed_on_bus={st['missed_on_bus']} "
             f"errors={st.get('errors', 0)} rows={st['rows']} "
@@ -671,14 +683,17 @@ def status_line(st: dict) -> str:
 
 def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, tick_ms: Optional[int] = None,
         clock=lambda: pd.Timestamp.utcnow().tz_localize(None), grace: pd.Timedelta = pd.Timedelta(milliseconds=500),
-        heartbeat=None, status_s: float = STATUS_EVERY_S) -> dict:
+        heartbeat=None, status_s: float = STATUS_EVERY_S, prov_ms: Optional[int] = None) -> dict:
     """The session loop of engine v2: poll ticks, apply them, every tick_ms close due buckets (wall clock minus grace) and publish
     provisional values; final rows go to the bus ("signal") and to the store every 15 s."""
     from signals.engine.runner import WRITE_EVERY_S, signal_rows
     from signals.options.stream import write_rows
     tick_ms = tick_ms or TICK_MS_DEFAULT
+    prov_s = (prov_ms if prov_ms is not None else tick_ms) / 1000          # None: at every timer step, as before
     stats = {"loops": 0, "rows": 0, "provisional": 0, "max_close_s": 0.0}
-    pending, last_write, last_timer = [], _time.monotonic(), 0.0
+    pending, last_write, last_timer, last_prov = [], _time.monotonic(), 0.0, 0.0
+    share = {"poll": 0.0, "apply": 0.0, "advance": 0.0, "provisional": 0.0, "publish": 0.0, "write": 0.0}   # seconds in each part of the loop
+    share_t0 = _time.monotonic()
     last_status, start_mono, warned_missed = _time.monotonic(), _time.monotonic(), 0
     statuses: dict = {}
 
@@ -690,7 +705,10 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
             publisher.publish(topic, cols, data)
 
     while clock() < until:
+        c0 = _time.perf_counter()
         df = source.poll(timeout_ms=tick_ms)
+        c1 = _time.perf_counter()
+        share["poll"] += c1 - c0
         out = []
         for e in engines:
             try:
@@ -698,6 +716,7 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
             except Exception:                                           # noqa: BLE001 -- one bad batch must not stop the session
                 e.errors += 1
                 log.exception("%s: applying a tick batch failed (%d errors so far); continuing", e.underlying, e.errors)
+        share["apply"] += _time.perf_counter() - c1
         if _time.monotonic() - last_timer >= tick_ms / 1000:
             last_timer = _time.monotonic()
             now = clock()
@@ -706,17 +725,27 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
                 e.trigger = (now.value, now.value)
                 try:
                     out.append(stamp(e.advance(now, grace), e))
-                    stats["max_close_s"] = max(stats["max_close_s"], _time.perf_counter() - t0)
-                    prov = stamp(provisional(e, now), e)
-                    stats["provisional"] += len(prov)
-                    publish(prov, "provisional")
+                    t1 = _time.perf_counter()
+                    stats["max_close_s"] = max(stats["max_close_s"], t1 - t0)
+                    share["advance"] += t1 - t0
+                    if _time.monotonic() - last_prov >= prov_s:
+                        prov = stamp(provisional(e, now), e)
+                        stats["provisional"] += len(prov)
+                        publish(prov, "provisional")
+                        share["provisional"] += _time.perf_counter() - t1
                 except Exception:                                       # noqa: BLE001
                     e.errors += 1
                     log.exception("%s: the timer step failed (%d errors so far); continuing", e.underlying, e.errors)
+            if _time.monotonic() - last_prov >= prov_s:
+                last_prov = _time.monotonic()
             if _time.monotonic() - last_status >= status_s:
                 last_status = _time.monotonic()
                 missed = int(getattr(source, "missed", 0) or 0)
                 in_market = MARKET_UTC[0] <= now - now.normalize() < MARKET_UTC[1]
+                wall = max(1e-9, _time.monotonic() - share_t0)
+                log.info("status loop: " + " ".join(f"{k}={100 * v / wall:.0f}%" for k, v in share.items())
+                         + f" (of {wall:.0f} s; poll is the idle wait)")
+                share, share_t0 = {k: 0.0 for k in share}, _time.monotonic()
                 for e in engines:
                     st = e.status(now, missed)
                     statuses[e.underlying] = st
@@ -731,17 +760,21 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
                     warned_missed = missed
             if heartbeat is not None:
                 heartbeat(now, engines, statuses)
+        p0 = _time.perf_counter()
         rows = _concat(out)
         stats["loops"] += 1
         if len(rows):
             stats["rows"] += len(rows)
             publish(rows, "signal")
             pending.append(rows.drop(columns=["t_vendor", "t_recv", "t_emit"], errors="ignore"))
+        share["publish"] += _time.perf_counter() - p0
         if store is not None and pending and _time.monotonic() - last_write >= WRITE_EVERY_S:
+            w0 = _time.perf_counter()
             allr = _concat(pending)
             pending, last_write = [], _time.monotonic()
             for (u, b), g in allr.groupby(["underlying", "bucket"]):
                 write_rows(g.to_dict("records"), store, prefix=f"engine-{u}-{ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
+            share["write"] += _time.perf_counter() - w0
     for e in engines:
         rows = e.finish()
         if len(rows):
@@ -801,12 +834,16 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
         e.trigger = (0, 0)
     pub = bus.Publisher("signals-" + "-".join(underlyings), env=env) if bus.bus_enabled(env) else None
     src = BusSource(env=env) if bus.bus_enabled(env) else FileSource(Path(lake), day)
+    if isinstance(src, FileSource):
+        log.warning("engine v2 reads tick files, not the bus (JARVIS_TICK_BUS is not set): signals come 5 to 15 s late and a late start "
+                    "first reads the whole day's files (about 45 minutes on 16 Nov 2026).  Set JARVIS_TICK_BUS=1 in the crontab or .env.")
     until = pd.Timestamp(datetime.combine(day, datetime.strptime(until_utc, "%H:%M").time()))
     log.info("engine v2: %s; cadence groups %s; tick %d ms; source %s", list(underlyings),
              {c: len(v) for c, v in cadence_mod.groups(cad).items()}, tick_ms(env), type(src).__name__)
+    log.info("provisional values every %d ms (JARVIS_SIGNAL_PROVISIONAL_MS)", provisional_ms(env))
     hb = write_heartbeat(Path(store) / "live" / f"engine-{'-'.join(underlyings)}.heartbeat.json")
     try:
-        return run(engines, src, until, publisher=pub, store=Path(store), tick_ms=tick_ms(env), heartbeat=hb)
+        return run(engines, src, until, publisher=pub, store=Path(store), tick_ms=tick_ms(env), heartbeat=hb, prov_ms=provisional_ms(env))
     finally:                                            # free the bus endpoints, so a restart can bind them again
         for x in (pub, getattr(src, "sub", None)):
             if x is not None:

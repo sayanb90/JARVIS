@@ -139,6 +139,9 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--until", default="10:00", help="UTC")
     p.add_argument("--logs", default="logs")
     a = ap.parse_args(argv)
+    from dotenv import load_dotenv
+    from data_layer.lake import ENV_FILE
+    load_dotenv(ENV_FILE)             # as the feeds do (the crontab's own values win): without JARVIS_TICK_BUS the bus is off
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     day = datetime.utcnow().date()
     until = pd.Timestamp(datetime.combine(day, datetime.strptime(a.until, "%H:%M").time()))

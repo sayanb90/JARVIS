@@ -351,6 +351,7 @@ def test_status_line_reports_every_cadence_and_fallbacks(day):
     line = status_line(eng.status(d + pd.Timedelta(hours=3, minutes=47), missed=3))
     assert line.startswith("status NIFTY: ticks=") and "missed_on_bus=3" in line and "1s[sig=1" in line and "lag=" in line
     assert "FALLBACKS" not in line
+    assert "state=" in line and "native=" in line          # where a bucket close goes (mean ms per phase), so the log says what is slow
 
 
 def test_watch_flags_stale_behind_fallback_and_errors(tmp_path):
@@ -451,3 +452,37 @@ def test_tick_window_returns_what_the_whole_window_copy_returned_and_stays_on_th
         ref.trim(now)
     assert fast.fast > 1000                                        # the one-second windows are served without copying the window
     assert len(fast.big) > 0 and len(fast.chunks) < 40             # the old ticks moved to the big frame; only the last seconds are chunks
+
+
+def test_provisional_values_follow_their_own_interval_and_the_loop_reports_where_its_time_goes(day, tmp_path, caplog):
+    """17 Nov 2026: provisional values (a copy of every operator's state) ran at every 250 ms timer step and cost about half a core.  They now
+    have their own interval (JARVIS_SIGNAL_PROVISIONAL_MS, 1000 ms by default), and each status interval logs the share of the loop's time
+    in waiting, applying ticks, closing buckets, provisional values, publishing and writing."""
+    import logging
+    from signals.engine.core import provisional_ms, run
+    hist, ticks, d = day
+    t = _cut(ticks, d, 4)
+
+    def go(prov_ms):
+        parts = iter([g for _, g in t.groupby(t["fts"].dt.floor("10s"))])
+        now = {"t": d + pd.Timedelta(hours=3, minutes=45)}
+
+        class Src:
+            def poll(self, timeout_ms=0):
+                g = next(parts, None)
+                if g is None:
+                    now["t"] += pd.Timedelta(seconds=30)
+                    return pd.DataFrame()
+                now["t"] = g["fts"].max() + pd.Timedelta(milliseconds=200)
+                return g
+
+        eng = OperatorEngine("NIFTY", trim(hist), {"book_pressure": "10s", "pcr_full": "1min"}, d)
+        return run([eng], Src(), d + pd.Timedelta(hours=3, minutes=50), tick_ms=1, clock=lambda: now["t"], status_s=0, prov_ms=prov_ms)
+
+    assert provisional_ms({}) == 1000 and provisional_ms({"JARVIS_SIGNAL_PROVISIONAL_MS": "250"}) == 250
+    with caplog.at_level(logging.INFO, logger="signals.engine"):
+        every_step = go(None)["provisional"]
+    assert every_step > 0
+    assert go(10 ** 9)["provisional"] < every_step                      # a long interval: far fewer provisional computations
+    loop = [r.message for r in caplog.records if r.message.startswith("status loop:")]
+    assert loop and all(k in loop[0] for k in ("poll=", "apply=", "advance=", "provisional=", "publish=", "write="))
