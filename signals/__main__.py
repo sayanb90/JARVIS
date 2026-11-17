@@ -336,6 +336,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     lv.add_argument("--root", type=Path, default=None)
     lv.add_argument("--underlying", default="NIFTY,BANKNIFTY")
     lv.add_argument("--until", default="10:02", help="UTC time to stop (before the 10:05 compaction)")
+    lv.add_argument("--cadences", default=None, help="compute only these cadences, e.g. 1s,10s or 1min (default all; JARVIS_SIGNAL_CADENCES): "
+                    "the one-minute signals in a process of their own keep their 3-5 s close away from the 1 s signals")
     lt = sub.add_parser("latency", help="tick-to-trade latency per leg (p50 / p95 / p99) from logs/latency-<day>.jsonl")
     lt.add_argument("day")
     lt.add_argument("--logs", default="logs")
@@ -397,7 +399,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         start = core.start if kind == "operators" else engine.start
         from datetime import datetime as _dt
         until = pd.Timestamp(_dt.combine(_dt.utcnow().date(), _dt.strptime(a.until, "%H:%M").time()))
-        res = core.supervise(lambda: start(a.lake or LAKE_DIR, a.root or default_store(), a.underlying.split(","), a.until), until)
+        from signals import cadence as _cad
+        only = _cad.parse_only(a.cadences)
+        extra = {"cadences": only} if kind == "operators" else {}
+        res = core.supervise(lambda: start(a.lake or LAKE_DIR, a.root or default_store(), a.underlying.split(","), a.until, **extra), until)
         print(json.dumps(res, default=str))
         return 0
     if a.cmd == "latency":

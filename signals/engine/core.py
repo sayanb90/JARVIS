@@ -34,6 +34,8 @@ from signals import cadence as cadence_mod
 from signals import lookbacks, normalise
 from signals.engine import chain_ops, operators, surface
 from signals.engine.state import EXPIRY_NS, NS_MIN, YEAR_NS, Session, td_ns
+
+NS_SEC = 10**9
 from signals.framework import REGISTRY, Context, normalise_output
 from signals.live_runner import CHAIN_FREE, OVERRUNS_BEFORE_FALLBACK, LiveRunner, _last_sessions, bar_volume, daily_inputs, live_signal_ids
 from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
@@ -41,7 +43,8 @@ from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
 log = logging.getLogger("signals.engine")
 
 TICK_MS_DEFAULT = 250
-PROVISIONAL_MS_DEFAULT = 1000        # provisional values copy every operator's state: at 250 ms they cost about half a core on 17 Nov 2026
+PHASES = ("state", "native", "chain_native", "inputs", "total")
+PROVISIONAL_MS_DEFAULT = 2000        # provisional values copy every operator's state: 250 ms cost about half a core, 1 s still 10-13% of the loop (17 Nov 2026)
 REORDER_MS_DEFAULT = 200
 HIST_PROVIDERS = ("spot", "vix", "futures", "fut_front")
 
@@ -271,8 +274,12 @@ class OperatorEngine:
         self.pending = pd.DataFrame()                   # reorder buffer
         self.newest: Optional[int] = None               # newest event time seen (ns)
         self.closed_to: Optional[int] = None            # every bucket ending at or before this is closed, at every cadence
-        keep = max((g.keep_ns for g in self.groups.values()), default=0)
-        self.ticks = TickWindow(pd.Timedelta(keep + 2 * NS_MIN, unit="ns"))
+        # Only the adapters (a batch function on frames) read ticks further back than the bucket; the native operators carry their own state and
+        # read the bucket's ticks plus each symbol's last earlier tick (TickWindow keeps that separately).  An engine with no adapter (the 1 s
+        # process of signals live --cadences 1s,10s) therefore keeps a few buckets, not the 12 minutes the chain signals' lookbacks say.
+        adapters = any(g.windows for g in self.groups.values())
+        keep = max((g.keep_ns if g.windows else 2 * g.td for g in self.groups.values() if g.ids), default=0)      # not the empty fallback groups
+        self.ticks = TickWindow(pd.Timedelta(keep + (2 * NS_MIN if adapters else 30 * NS_SEC), unit="ns"))
         self.prefix = f"{underlying}_"
         self.symbols = {INDEX_SYMBOL[underlying], VIX_SYMBOL}
         self.late = 0
@@ -351,7 +358,12 @@ class OperatorEngine:
             if iv["n"]:                                    # where a bucket close goes: mean ms per phase over the interval
                 out["groups"][c]["phase_ms"] = {k: round(1000 * (g.timings.get(k, 0.0) - g.tm_prev.get(k, 0.0)) / iv["n"], 1)
                                                 for k in ("state", "native", "chain_native", "inputs")}
-            g.tm_prev = {k: g.timings.get(k, 0.0) for k in ("state", "native", "chain_native", "inputs")}
+                # ... and per signal that runs as an adapter (its batch function on frames): the slowest three, mean ms per close
+                sig = {k: 1000 * (v - g.tm_prev.get(k, 0.0)) / iv["n"] for k, v in g.timings.items() if k not in PHASES}
+                top = sorted(((k, v) for k, v in sig.items() if v >= 1.0), key=lambda x: -x[1])[:3]
+                if top:
+                    out["groups"][c]["signal_ms"] = {k: round(v, 1) for k, v in top}
+            g.tm_prev = dict(g.timings)
             g.interval = {"n": 0, "sum_s": 0.0, "max_s": 0.0}
         return out
 
@@ -689,7 +701,8 @@ def status_line(st: dict) -> str:
     """One log line per engine and minute: ticks, late, missed on the bus, rows, lag, memory, per cadence buckets closed and the
     mean / slowest close in the last minute, and any fallback."""
     gs = " ".join(f"{c}[sig={g['signals']} closed={g['closed']} mean={g['mean_ms']}ms max={g['max_ms']}ms"
-                  + (" " + "/".join(f"{k}={v}" for k, v in g["phase_ms"].items()) if g.get("phase_ms") else "") + "]"
+                  + (" " + "/".join(f"{k}={v}" for k, v in g["phase_ms"].items()) if g.get("phase_ms") else "")
+                  + (" slowest: " + " ".join(f"{k}={v}ms" for k, v in g["signal_ms"].items()) if g.get("signal_ms") else "") + "]"
                   for c, g in st["groups"].items())
     fb = f" FALLBACKS={st['fallbacks']}" if st["fallbacks"] else ""
     return (f"status {st['underlying']}: ticks={st['ticks']} late={st['late']} missed_on_bus={st['missed_on_bus']} "
@@ -835,7 +848,7 @@ def write_heartbeat(path) -> callable:
     return beat
 
 
-def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env=None) -> dict:
+def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env=None, cadences: Optional[list] = None) -> dict:
     """Engine v2 for the session: history and anchors loaded once, the cadence config, ticks from the bus (or tick files)."""
     from datetime import datetime
     from pathlib import Path
@@ -849,6 +862,14 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
     cad = cadence_mod.load(ids, env=env)
     if env.get("JARVIS_LIVE_SIGNALS", "").strip().lower() in ("1", "true", "yes", "on"):
         cad = {k: v for k, v in cad.items() if k not in IN_FEED}
+    # A process may compute only some cadences (signals live --cadences 1s,10s / 1min; or JARVIS_SIGNAL_CADENCES).  The five one-minute signals
+    # take 2.6 to 5 s to close on the live feed, and one loop that does that reads no ticks for those seconds (5-10% of ticks late, 17 Nov 2026):
+    # their own process keeps that wait away from the 1 s signals.
+    only = cadences if cadences is not None else cadence_mod.parse_only(env.get("JARVIS_SIGNAL_CADENCES"))
+    cad = cadence_mod.only(cad, only)
+    tag = cadence_mod.tag(only)
+    if not cad:
+        raise ValueError(f"no live signal runs at {only}")
     engines = []
     for u in underlyings:
         hist = history_for(Path(lake), u, day)
@@ -858,16 +879,16 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
                                       reorder_ms=int(env.get("JARVIS_SIGNAL_REORDER_MS", REORDER_MS_DEFAULT))))
     for e in engines:
         e.trigger = (0, 0)
-    pub = bus.Publisher("signals-" + "-".join(underlyings), env=env) if bus.bus_enabled(env) else None
+    pub = bus.Publisher("signals-" + "-".join(underlyings) + tag, env=env) if bus.bus_enabled(env) else None
     src = BusSource(env=env) if bus.bus_enabled(env) else FileSource(Path(lake), day)
     if isinstance(src, FileSource):
         log.warning("engine v2 reads tick files, not the bus (JARVIS_TICK_BUS is not set): signals come 5 to 15 s late and a late start "
                     "first reads the whole day's files (about 45 minutes on 16 Nov 2026).  Set JARVIS_TICK_BUS=1 in the crontab or .env.")
     until = pd.Timestamp(datetime.combine(day, datetime.strptime(until_utc, "%H:%M").time()))
-    log.info("engine v2: %s; cadence groups %s; tick %d ms; source %s", list(underlyings),
-             {c: len(v) for c, v in cadence_mod.groups(cad).items()}, tick_ms(env), type(src).__name__)
+    log.info("engine v2: %s; cadence groups %s; tick %d ms; source %s; process %s", list(underlyings),
+             {c: len(v) for c, v in cadence_mod.groups(cad).items()}, tick_ms(env), type(src).__name__, tag.strip("-") or "all cadences or the finest")
     log.info("provisional values every %d ms (JARVIS_SIGNAL_PROVISIONAL_MS)", provisional_ms(env))
-    hb = write_heartbeat(Path(store) / "live" / f"engine-{'-'.join(underlyings)}.heartbeat.json")
+    hb = write_heartbeat(Path(store) / "live" / f"engine-{'-'.join(underlyings)}{tag}.heartbeat.json")
     try:
         return run(engines, src, until, publisher=pub, store=Path(store), tick_ms=tick_ms(env), heartbeat=hb, prov_ms=provisional_ms(env))
     finally:                                            # free the bus endpoints, so a restart can bind them again

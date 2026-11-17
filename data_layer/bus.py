@@ -162,7 +162,7 @@ def rows_frame(msgs: Iterable[dict]):
 
 def signal_names(underlyings=("NIFTY", "BANKNIFTY")) -> list[str]:
     """Publishers of the live signal engines (one process per underlying)."""
-    return [f"signals-{u}" for u in underlyings]
+    return [f"signals-{u}{t}" for u in underlyings for t in ("", "-1min")]     # "-1min": the second process of an underlying (signals live --cadences 1min)
 
 
 def feed_names(env=None) -> list[str]:
