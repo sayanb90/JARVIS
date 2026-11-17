@@ -74,26 +74,46 @@ class FileSource:
 
 
 # ---------------------------------------------------------------------------------------------- the engine
-def signal_rows(df: pd.DataFrame) -> tuple[list[str], list[list]]:
-    """Signal rows for the bus: times as nanoseconds, dates as ISO text, NaN as None."""
+def _bus_value(v):
+    """One value for the bus: times as nanoseconds (to the microsecond, as data_layer.bus.to_ns), dates as ISO text, NaN as None."""
     from data_layer.bus import to_ns
+    if isinstance(v, (pd.Timestamp, datetime)):
+        return to_ns(v)
+    if isinstance(v, date):
+        return v.isoformat()
+    if v is None or (isinstance(v, float) and v != v):
+        return None
+    if hasattr(v, "item"):
+        return v.item()
+    return v if isinstance(v, (int, float, str, bool)) else str(v)
+
+
+def signal_rows(df: pd.DataFrame) -> tuple[list[str], list[list]]:
+    """Signal rows for the bus: times as nanoseconds, dates as ISO text, NaN as None.  Column by column (numeric, time and text columns
+    in one numpy / pandas call each; only columns of mixed objects value by value): the row-by-row version took about 15% of an engine's
+    time on 17 Nov 2026, with 5,000 per-contract rows a second."""
     cols = list(df.columns)
-    rows = []
-    for rec in df.itertuples(index=False):
-        row = []
-        for v in rec:
-            if isinstance(v, (pd.Timestamp, datetime)):
-                row.append(to_ns(v))
-            elif isinstance(v, date):
-                row.append(v.isoformat())
-            elif v is None or (isinstance(v, float) and v != v):
-                row.append(None)
-            elif hasattr(v, "item"):
-                row.append(v.item())
-            else:
-                row.append(v if isinstance(v, (int, float, str, bool)) else str(v))
-        rows.append(row)
-    return cols, rows
+    if not len(df):
+        return cols, []
+    out = []
+    for c in cols:
+        s = df[c]
+        kind = getattr(s.dtype, "kind", "O")
+        if kind == "M" and getattr(s.dtype, "tz", None) is None:
+            ns = (s.dt.as_unit("ns").astype("int64").to_numpy() // 1000) * 1000
+            vals = ns.tolist()
+            if s.isna().any():
+                vals = [None if m else v for v, m in zip(vals, s.isna().tolist())]
+        elif kind == "f":
+            vals = s.astype(object).where(s.notna(), None).tolist()
+        elif kind in "iub" and not str(s.dtype)[0].isupper():
+            vals = s.tolist()
+        else:
+            vals = s.tolist()
+            if not all(type(v) is str for v in vals):
+                vals = [_bus_value(v) for v in vals]
+        out.append(vals)
+    return cols, [list(r) for r in zip(*out)]
 
 
 @dataclass

@@ -503,7 +503,7 @@ class OperatorEngine:
             tp = operators.TapeTable(self.ticks.window(ts, upto), g.natives.meta, b, g.td)
             res = g.natives.run(tp, chain_live=bk.chain("live") if g.needs_live else None, book=self.session.options)
             for sid, df in res.items():
-                part = _select(normalise_output(REGISTRY[sid][0], df, self.underlying), g.since, upto, self.day)
+                part = _select(normalise_output(REGISTRY[sid][0], df, self.underlying), g.since, upto, self.day, own=True)
                 if part is not None:
                     out.append(self._finish_rows(g, sid, part))
             g.timings["native"] = g.timings.get("native", 0.0) + _time.perf_counter() - n0
@@ -529,7 +529,7 @@ class OperatorEngine:
             t_fut = ((pd.Timestamp(fut[1]).value + EXPIRY_NS - (b + g.td)) / YEAR_NS) if fut[1] is not None else math.nan
             res = g.cnatives.run(b, bk.chain("bar"), bk.chain("live") if g.cnatives.needs_live else None, at, (fut[0], t_fut), g.since)
             for sid, df in res.items():
-                part = _select(normalise_output(REGISTRY[sid][0], df, self.underlying), g.since, upto, self.day)
+                part = _select(normalise_output(REGISTRY[sid][0], df, self.underlying), g.since, upto, self.day, own=True)
                 if part is not None:
                     out.append(self._finish_rows(g, sid, part))
             g.timings["chain_native"] = g.timings.get("chain_native", 0.0) + _time.perf_counter() - t1
@@ -601,15 +601,18 @@ def _finish(self, g: Group, sid: str, part: pd.DataFrame) -> pd.DataFrame:
 OperatorEngine._finish_rows = _finish
 
 
-def _select(df: Optional[pd.DataFrame], since: Optional[pd.Timestamp], upto: pd.Timestamp, day: pd.Timestamp) -> Optional[pd.DataFrame]:
+def _select(df: Optional[pd.DataFrame], since: Optional[pd.Timestamp], upto: pd.Timestamp, day: pd.Timestamp, own: bool = False) -> Optional[pd.DataFrame]:
     """The rows first known in (since, upto] (from the session start when since is None), as the runner selects them."""
     if df is None or not len(df) or "known_at" not in df.columns:
         return None
-    ka = pd.to_datetime(df["known_at"])
+    ka = df["known_at"]
+    if not pd.api.types.is_datetime64_any_dtype(ka):
+        ka = pd.to_datetime(ka)
     sel = (ka <= upto) & ((ka > since) if since is not None else (ka >= day))
-    if not sel.any():
+    n = int(sel.sum())
+    if not n:
         return None
-    return df[sel].copy()
+    return df if own and n == len(df) else df[sel].copy()  # own: the caller just built the frame (normalise_output) and every row is selected: no copy
 
 
 def _concat(parts: Iterable[pd.DataFrame]) -> pd.DataFrame:
@@ -773,7 +776,7 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
             allr = _concat(pending)
             pending, last_write = [], _time.monotonic()
             for (u, b), g in allr.groupby(["underlying", "bucket"]):
-                write_rows(g.to_dict("records"), store, prefix=f"engine-{u}-{ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
+                write_rows(g, store, prefix=f"engine-{u}-{ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
             share["write"] += _time.perf_counter() - w0
     for e in engines:
         rows = e.finish()
@@ -782,7 +785,7 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
     if store is not None and pending:
         allr = _concat(pending)
         for (u, b), g in allr.groupby(["underlying", "bucket"]):
-            write_rows(g.to_dict("records"), store, prefix=f"engine-{u}-{ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
+            write_rows(g, store, prefix=f"engine-{u}-{ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
     stats["late"] = sum(e.late for e in engines)
     stats["fallbacks"] = {e.underlying: e.fallbacks for e in engines}
     for e in engines:

@@ -333,13 +333,13 @@ def live_dir(store: Optional[Any] = None, day: Optional[date] = None):
     return root / "live" / f"date={day or datetime.utcnow().date()}"
 
 
-def write_rows(rows: list[dict], store: Optional[Any] = None, prefix: str = "book") -> int:
+def write_rows(rows: "list[dict] | pd.DataFrame", store: Optional[Any] = None, prefix: str = "book") -> int:
     """Append closed bucket rows as one parquet segment per write (named <prefix>-<ms>-<pid>), grouped by day.  Returns rows written."""
     import os
     import time as _time
-    if not rows:
+    if rows is None or not len(rows):
         return 0
-    df = pd.DataFrame(rows)
+    df = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
     when = pd.to_datetime(df["ts"]) if "ts" in df.columns else pd.Series(pd.NaT, index=df.index)
     if "known_at" in df.columns:                       # snapshot signals carry known_at, not ts
         when = when.fillna(pd.to_datetime(df["known_at"]))

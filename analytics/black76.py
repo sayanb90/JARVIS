@@ -19,7 +19,7 @@ import math
 import numpy as np
 
 VOL_LO, VOL_HI = 1e-4, 5.0
-BISECT_STEPS = 64
+BISECT_STEPS = 44          # 5 / 2**44 = 3e-13 before the two Newton polishes; 64 steps cost a third more for nothing (17 Nov 2026)
 _SQRT2 = math.sqrt(2.0)
 _SQRT2PI = math.sqrt(2.0 * math.pi)
 
@@ -93,11 +93,20 @@ def implied_vol(is_call, premium, F, K, T, r=0.0) -> np.ndarray:
     lo = np.full(premium.shape, VOL_LO)
     hi = np.full(premium.shape, VOL_HI)
     ok &= price(is_call, F, K, T, hi, r) >= premium
-    for _ in range(BISECT_STEPS):
-        mid = 0.5 * (lo + hi)
-        above = price(is_call, F, K, T, mid, r) > premium
-        hi = np.where(above, mid, hi)
-        lo = np.where(above, lo, mid)
+    # the bisection prices each step with what does not change set up once, and the one of the call and the put formulas that is needed:
+    # call = df (F N(d1) - K N(d2)), put = df (K N(-d2) - F N(-d1)) = df (-1) (F N(-d1) - K N(-d2)); the same floating-point results as
+    # price(), with half the normal CDFs and no log or square root per step (17 Nov 2026: the IV solves were half of a bucket close)
+    sgn = np.where(is_call > 0.5, 1.0, -1.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lfk, sqt = np.log(F / K), np.sqrt(T)
+        for _ in range(BISECT_STEPS):
+            mid = 0.5 * (lo + hi)
+            sd = mid * sqt
+            d1 = (lfk + 0.5 * sd * sd) / sd
+            d2 = d1 - sd
+            above = df * (sgn * (F * _ncdf(sgn * d1) - K * _ncdf(sgn * d2))) > premium
+            hi = np.where(above, mid, hi)
+            lo = np.where(above, lo, mid)
     sig = 0.5 * (lo + hi)
     for _ in range(2):                                   # polish
         v = greeks(is_call, F, K, T, sig, r)["vega"]
