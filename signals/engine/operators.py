@@ -52,17 +52,23 @@ class TapeTable:
         self.b, self.td = b, td
         t = ticks
         sym = t["symbol"].astype(str).to_numpy() if len(t) else np.array([], dtype=object)
-        info = [meta.get(s) for s in sym]
-        keep = np.array([x is not None for x in info], dtype=bool)          # contracts of this underlying (index, VIX dropped)
+        # contract facts once per distinct symbol (a few hundred), then by index for the ticks (several hundred a second)
+        u, inv = np.unique(sym, return_inverse=True) if len(sym) else (np.array([], dtype=object), np.zeros(0, np.int64))
+        uinfo = [meta.get(x) for x in u.tolist()]
+        ukeep = np.array([x is not None for x in uinfo], dtype=bool)          # contracts of this underlying (index, VIX dropped)
+        keep = ukeep[inv] if len(sym) else np.zeros(0, dtype=bool)
         t = t[keep]
-        info = [x for x in info if x is not None]
         self.n = n = len(t)
         self.sym = sym[keep]
         self.t = t["fts"].to_numpy(dtype="datetime64[ns]").astype(np.int64) if n else np.zeros(0, np.int64)
-        self.itype = np.array([x[0] for x in info], dtype=object)
-        self.strike = np.array([x[1] for x in info], dtype=float)
-        self.expiry = np.array([x[2] for x in info] + [None], dtype=object)[:-1]
-        self.lot = np.array([x[3] for x in info], dtype=float)
+        ok = [x for x in uinfo if x is not None]
+        u_itype = np.array([x[0] for x in ok], dtype=object)
+        u_strike = np.array([x[1] for x in ok], dtype=float)
+        u_expiry = np.array([x[2] for x in ok] + [None], dtype=object)[:-1]
+        u_lot = np.array([x[3] for x in ok], dtype=float)
+        newcode = np.cumsum(ukeep) - 1                                        # rank among the kept symbols (u is sorted, so is `codes`)
+        kc = newcode[inv][keep] if len(sym) else np.zeros(0, np.int64)
+        self.itype, self.strike, self.expiry, self.lot = u_itype[kc], u_strike[kc], u_expiry[kc], u_lot[kc]
         self.is_opt = np.isin(self.itype, ["CE", "PE"])
         self.is_fut = self.itype == "FUT"
         for c in ("ltp", "vol_today", "oi", "bid", "ask", "bid_qty", "ask_qty", "ltq"):
@@ -83,8 +89,7 @@ class TapeTable:
             self.qi = (self.bid_qty - self.ask_qty) / tot
         self.in_b = self.t >= b
         # previous tick of the same symbol (-1 when none in the table)
-        codes, self.code = np.unique(self.sym, return_inverse=True) if n else (np.array([]), np.zeros(0, np.int64))
-        self.codes = codes
+        self.code, self.codes = kc, (u[ukeep] if len(sym) else np.array([]))
         order = np.lexsort((np.arange(n), self.code))
         prev = np.full(n, -1, dtype=np.int64)
         if n > 1:
