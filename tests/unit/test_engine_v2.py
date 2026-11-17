@@ -745,3 +745,41 @@ def test_normalise_output_sort_and_the_one_row_fast_path_equal_the_pandas_versio
     slow = eng._finish_rows(g, "book_pressure", _select(normalise_output(REGISTRY["book_pressure"][0], one, "NIFTY"), g.since, upto, eng.day, own=True))
     pd.testing.assert_frame_equal(fast, slow)
     assert eng._emit(g, "book_pressure", one.assign(known_at=ts + pd.Timedelta("9s")), upto) is None
+
+
+@pytest.mark.parametrize("bucket,minutes", [("10s", 5), ("1s", 2)])
+def test_vectorised_tape_operators_equal_the_reference_loops_bucket_by_bucket(day, bucket, minutes):
+    """SCRUM-205: signed_flow, trade_size_flow, opening_flow, block_prints and fair_value_gap lost their per-symbol loops; Lee-Ready and the OI
+    carry too.  The shadow monitor runs the original loops (operators_ref.py) on the same ticks of every bucket: no bucket may differ, and the
+    reference must have produced the rows (a comparison of two empty frames proves nothing)."""
+    from signals.engine.operators import NATIVE
+    from signals.engine.shadow import ShadowParity
+    hist, ticks, d = day
+    t = _cut(dense_ticks(ticks), d, minutes)
+    ids = [s for s in NATIVE]
+    eng = OperatorEngine("NIFTY", trim(hist), {s: bucket for s in ids}, d)
+    eng.shadow = ShadowParity("NIFTY")
+    for _, part in t.groupby(t["fts"].dt.floor("1min"), sort=True):
+        eng.on_ticks(part)
+    eng.finish()
+    sh = eng.shadow
+    assert sum(sh.differ.values()) == 0, sh.report()
+    for sid in ("signed_flow", "trade_size_flow", "opening_flow"):
+        assert sh.ok[sid] > 5, (sid, dict(sh.ok))
+    if bucket != "1s":
+        assert sh.ok["block_prints"] > 0 and sh.ok["fair_value_gap"] > 0, dict(sh.ok)
+    assert "parity ok=" in eng.status(pd.Timestamp(d) + pd.Timedelta(hours=4))["parity"]
+
+
+def test_shadow_compare_finds_differences_and_ignores_rounding():
+    from signals.engine.shadow import compare
+    a = pd.DataFrame({"x": [1.0, 2.0, np.nan], "s": ["a", "b", None], "n": [1, 2, 3]})
+    assert compare(a, a.copy()) is None
+    assert compare(a, a.assign(x=a["x"] * (1 + 1e-12))) is None                  # last-bit differences of a sum in another order
+    d = compare(a, a.assign(x=[1.0, 2.1, np.nan]))
+    assert d["what"] == "x" and d["at"] == 1 and d["gap"] > 0.04
+    assert compare(a, a.assign(s=["a", "c", None]))["what"] == "s"
+    assert compare(a, a.iloc[:2])["what"] == "rows"
+    assert compare(a, a.drop(columns="n"))["what"] == "columns"
+    assert compare(a, a.assign(x=[1.0, 2.0, 3.0]))["what"] == "x"                  # NaN against a number
+    assert compare(pd.DataFrame(), pd.DataFrame()) is None

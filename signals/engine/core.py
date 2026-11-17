@@ -299,6 +299,7 @@ class OperatorEngine:
         self.trigger = (0, 0)                           # (vendor time, receive time) of the tick that closed the last buckets
         self.last_tick_mono: Optional[float] = None
         self.errors = 0                                 # batches or timer steps that raised (logged, the session continues)
+        self.shadow = None                              # ShadowParity when JARVIS_SHADOW_PARITY=1 (set by start())
         self.reads_ticks = self._reads_ticks()          # does any signal of this process read ticks (the tape operators, a signal with ticks_fo)?
 
     def _reads_ticks(self) -> bool:
@@ -377,6 +378,8 @@ class OperatorEngine:
                "errors": self.errors,
                "rows": int(self.stats.get("rows", 0)), "lag_s": round((now.value - self.newest) / 1e9, 2) if self.newest else None,
                "rss_mb": round(rss), "fallbacks": [list(f[:2]) + [len(f[2]), f[3]] for f in self.fallbacks], "groups": {}}
+        if self.shadow is not None:
+            out["parity"] = self.shadow.line()
         for c, g in self.groups.items():
             iv = g.interval
             out["groups"][c] = {"signals": len(g.ids), "buckets": g.buckets, "closed": iv["n"],
@@ -553,7 +556,13 @@ class OperatorEngine:
         if g.natives is not None:
             n0 = _time.perf_counter()
             tp = operators.TapeTable(self.ticks.window(ts, upto), g.natives.meta, b, g.td)
-            res = g.natives.run(tp, chain_live=bk.chain("live") if g.needs_live else None, book=self.session.options)
+            cl = bk.chain("live") if g.needs_live else None
+            res = g.natives.run(tp, chain_live=cl, book=self.session.options)
+            if self.shadow is not None:                       # the reference implementations on the same ticks (signals/engine/shadow.py)
+                try:
+                    self.shadow.check(g, tp, cl, self.session.options, res)
+                except Exception:                             # noqa: BLE001 -- a monitor must never stop the engine
+                    log.exception("shadow parity check failed")
             for sid, df in res.items():
                 part = self._emit(g, sid, df, upto)
                 if part is not None:
@@ -760,7 +769,7 @@ def status_line(st: dict) -> str:
     fb = f" FALLBACKS={st['fallbacks']}" if st["fallbacks"] else ""
     return (f"status {st['underlying']}: ticks={st['ticks']} late={st['late']} missed_on_bus={st['missed_on_bus']} "
             f"errors={st.get('errors', 0)} rows={st['rows']} "
-            f"lag={st['lag_s']}s rss={st['rss_mb']}MB {gs}{fb}")
+            f"lag={st['lag_s']}s rss={st['rss_mb']}MB {gs}{fb}" + (f" {st['parity']}" if st.get("parity") else ""))
 
 
 def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, tick_ms: Optional[int] = None,
@@ -894,6 +903,7 @@ def write_heartbeat(path) -> callable:
                                                           "ticks": int(e.stats.get("ticks", 0)), "errors": e.errors,
                                                           "lag_s": round((now.value - e.newest) / 1e9, 2) if e.newest else None,
                                                           "fallbacks": [list(f[:2]) + [len(f[2]), f[3]] for f in e.fallbacks],
+                                                          "parity": e.shadow.report() if e.shadow is not None else None,
                                                           "last_status": statuses.get(e.underlying)} for e in engines}}
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(doc))
@@ -940,8 +950,13 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
         base = {c: load_baselines(Path(store), u, day, s, c) for c, s in groups.items()}
         engines.append(OperatorEngine(u, hist, cad, day, baselines=base, volume_slot_daily=slot_volume_history(Path(lake), u, day),
                                       reorder_ms=reorder))
+    from signals.engine import shadow as shadow_mod
     for e in engines:
         e.trigger = (0, 0)
+        if shadow_mod.enabled(env):
+            e.shadow = shadow_mod.ShadowParity(e.underlying, shadow_mod.rtol(env))
+    if shadow_mod.enabled(env):
+        log.info("shadow parity ON: the reference operators run next to the vectorised ones (JARVIS_SHADOW_PARITY=0 turns it off)")
     pub = bus.Publisher("signals-" + "-".join(underlyings) + tag, env=env) if bus.bus_enabled(env) else None
     src = BusSource(env=env) if bus.bus_enabled(env) else FileSource(Path(lake), day)
     if isinstance(src, FileSource):

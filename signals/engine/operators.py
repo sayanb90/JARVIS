@@ -205,6 +205,31 @@ def _sum(a: np.ndarray, rows: np.ndarray) -> float:
     return float(np.nansum(v))
 
 
+class GreekTable:
+    """The live chain's delta and vega by symbol (a bucket's), for looking up many symbols at once."""
+
+    def __init__(self, names: np.ndarray, delta: np.ndarray, vega: np.ndarray, k: np.ndarray):
+        self.names, self.delta, self.vega, self.k = names, delta, vega, k
+        self._index = None
+
+    @classmethod
+    def empty(cls) -> "GreekTable":
+        return cls(np.array([], dtype=object), np.array([]), np.array([]), np.array([]))
+
+    def __bool__(self) -> bool:
+        return len(self.names) > 0
+
+    def lookup(self, syms: np.ndarray):
+        """(delta, vega, k) of each symbol, NaN where the chain has none."""
+        if self._index is None:
+            self._index = pd.Index(self.names)
+        pos = self._index.get_indexer(syms)
+        ok = pos >= 0
+        d, v, k = np.full(len(pos), np.nan), np.full(len(pos), np.nan), np.full(len(pos), np.nan)
+        d[ok], v[ok], k[ok] = self.delta[pos[ok]], self.vega[pos[ok]], self.k[pos[ok]]
+        return d, v, k
+
+
 class Natives:
     """State and per-bucket computation of every native operator of one cadence group."""
 
@@ -233,21 +258,28 @@ class Natives:
         with np.errstate(invalid="ignore"):
             d = np.sign(tp.ltp - pl)
         sign = np.zeros(tp.n)
-        for s, idx in tp.groups(np.ones(tp.n, bool)):
-            mem = self.tick_sign.get(s, 0.0)
-            for i in idx:
-                if d[i] == d[i] and d[i] != 0:
-                    mem = d[i]
-                pm = prev_mid[i]
-                if pm != pm:
-                    sign[i] = mem
-                elif tp.ltp[i] > pm:
-                    sign[i] = 1.0
-                elif tp.ltp[i] < pm:
-                    sign[i] = -1.0
-                else:
-                    sign[i] = mem
-            self.tick_sign[s] = mem
+        rows = np.flatnonzero(tp.in_b)                       # the bucket's ticks, symbol by symbol in time order (the anchors only give the previous tick)
+        if len(rows):
+            c = tp.code[rows]
+            o = np.argsort(c, kind="stable")
+            r, c = rows[o], c[o]
+            first = np.empty(len(r), dtype=bool)
+            first[0] = True
+            first[1:] = c[1:] != c[:-1]
+            start = np.flatnonzero(first)
+            gstart = start[np.cumsum(first) - 1]             # position of each tick's symbol's first tick
+            init = np.array([self.tick_sign.get(x, 0.0) for x in tp.codes[c[start]]])
+            dd = d[r]
+            upd = (dd == dd) & (dd != 0)                     # a price change sets the memory
+            last = np.maximum.accumulate(np.where(upd, np.arange(len(r)), -1))
+            has = last >= gstart                             # a change within this symbol's ticks of the bucket
+            mem = np.where(has, dd[np.maximum(last, 0)], init[np.cumsum(first) - 1])
+            pm, lp = prev_mid[r], tp.ltp[r]
+            with np.errstate(invalid="ignore"):
+                sg = np.where(pm != pm, mem, np.where(lp > pm, 1.0, np.where(lp < pm, -1.0, mem)))
+            sign[r] = sg
+            ends = np.append(start[1:], len(r)) - 1
+            self.tick_sign.update(zip(tp.codes[c[start]].tolist(), mem[ends].tolist()))
         return dv, sign
 
     def run(self, tp: TapeTable, chain_live=None, book=None) -> dict:
@@ -259,22 +291,29 @@ class Natives:
         dv = sign = None
         if need_lr:
             dv, sign = self._lee_ready(tp, tp.in_b)
-        greek = {}
-        if chain_live is not None and len(chain_live) and book is not None:
-            s = chain_live.slots
-            for j, slot in enumerate(s):
-                greek[book.symbols[slot]] = (chain_live.cols["delta"][j], chain_live.cols["vega"][j], chain_live.cols["k"][j])
+        greek = self._greek_table(chain_live, book)
         for sid in self.ids:
             fn = getattr(self, "_" + sid)
             out[sid] = fn(tp, ts, ka, dv=dv, sign=sign, greek=greek)
         self._carry(tp)
         return out
 
+    def _greek_table(self, chain_live, book) -> "GreekTable":
+        if chain_live is None or not len(chain_live) or book is None:
+            return GreekTable.empty()
+        slots = np.asarray(chain_live.slots, dtype=np.int64)
+        names = np.asarray(book.symbols, dtype=object)[slots]
+        return GreekTable(names, np.asarray(chain_live.cols["delta"][:len(slots)], dtype=float),
+                          np.asarray(chain_live.cols["vega"][:len(slots)], dtype=float),
+                          np.asarray(chain_live.cols["k"][:len(slots)], dtype=float))
+
     def _carry(self, tp: TapeTable) -> None:
-        for s, idx in tp.groups(tp.is_opt):
-            v = _last(tp.oi, idx)
-            if v == v:
-                self.prev_oi[s] = v
+        g = tp.grouped(tp.is_opt)
+        if g is None:
+            return
+        v = g.last(tp.oi)
+        ok = v == v
+        self.prev_oi.update(zip(g.syms[ok].tolist(), v[ok].tolist()))
 
     def _info(self, s):
         x = self.meta[s]
@@ -318,8 +357,7 @@ class Natives:
             return pd.DataFrame()
         syms = g.syms.tolist()
         e, k, cp = self._facts(syms)
-        nan3 = (math.nan, math.nan, math.nan)
-        kk = np.array([greek.get(s, nan3)[2] for s in syms], dtype=float) if greek else np.full(len(syms), np.nan)
+        kk = greek.lookup(g.syms)[2] if greek else np.full(len(syms), np.nan)
         rs = g.median(tp.rel_spread)
         return pd.DataFrame({"ts": ts, "known_at": ka, "symbol": syms, "expiry": e, "strike": k,
                              "cp": ["C" if c == "CE" else "P" for c in cp], "k": kk, "rel_spread": rs, "z": self._spread_z(ts, kk, rs)})
@@ -463,19 +501,16 @@ class Natives:
 
     # ------------------------------------------------------------------------------------------ the tape
     def _signed_flow(self, tp, ts, ka, dv=None, sign=None, greek=None, **_):
-        o = np.flatnonzero(tp.is_opt & tp.in_b)
-        if not len(o) or not greek:
+        g = tp.grouped(tp.is_opt)
+        if g is None or not greek:
             return pd.DataFrame()
-        sv = df_ = vf = 0.0
-        for s, idx in tp.groups(tp.is_opt):
-            signed = float((sign[idx] * dv[idx]).sum())
-            d_, v_, _ = greek.get(s, (math.nan, math.nan, math.nan))
-            lot = tp.lot[idx[0]]
-            lot = 1.0 if lot != lot else lot
-            sv += signed
-            df_ += signed * (0.0 if d_ != d_ else d_) * lot
-            vf += signed * (0.0 if v_ != v_ else v_) * lot / 100.0
-        return pd.DataFrame([{"ts": ts, "signed_volume": sv, "delta_flow": df_, "vega_flow": vf, "known_at": ka}])
+        signed = g.sum(sign * dv)
+        d_, v_, _k = greek.lookup(g.syms)
+        lot = tp.lot[g.first_rows]
+        lot = np.where(lot != lot, 1.0, lot)
+        return pd.DataFrame([{"ts": ts, "signed_volume": float(signed.sum()),
+                              "delta_flow": float((signed * np.where(d_ != d_, 0.0, d_) * lot).sum()),
+                              "vega_flow": float((signed * np.where(v_ != v_, 0.0, v_) * lot / 100.0).sum()), "known_at": ka}])
 
     def _lots(self, tp, rows):
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -491,36 +526,31 @@ class Natives:
         lots = self._lots(tp, rows)
         lots = np.where(np.isnan(lots), 1.0, lots)
         out = {f"{k}_{b}": 0.0 for k in ("opt", "fut") for b in SIZE_LABELS}
-        edges = [0, 1, 5, 20, np.inf]
-        for j, r in enumerate(rows):
-            x = lots[j]
-            lab = next((SIZE_LABELS[i] for i in range(4) if edges[i] < x <= edges[i + 1]), None)
-            if lab is None:
-                continue
-            kind = "fut" if tp.is_fut[r] else "opt"
-            out[f"{kind}_{lab}"] += sign[r] * x
+        lab = np.select([(lots > 0) & (lots <= 1), (lots > 1) & (lots <= 5), (lots > 5) & (lots <= 20), lots > 20], [0, 1, 2, 3], -1)
+        ok = lab >= 0
+        cell = np.where(tp.is_fut[rows], 4, 0) + lab                       # option labels 0-3, future labels 4-7, in the order of `out`
+        tot = np.bincount(cell[ok], weights=(sign[rows] * lots)[ok], minlength=8)     # adds in row order, as the loop did
+        for j, key in enumerate(out):
+            out[key] = float(tot[j])
         return pd.DataFrame([{"ts": ts, **out, "known_at": ka}])
 
     def _opening_flow(self, tp, ts, ka, dv=None, sign=None, **_):
         cls_names = ("open_buy", "open_sell", "close_short", "close_long", "none")
-        tot = {f"{c}_{s}": 0.0 for s in ("calls", "puts") for c in cls_names}
-        any_row = False
-        for s, idx in tp.groups(tp.is_opt):
-            any_row = True
-            signed = float((sign[idx] * dv[idx]).sum())
-            vol = float(dv[idx].sum())
-            oi = _last(tp.oi, idx)
-            prev = self.prev_oi.get(s)
-            d_oi = oi - prev if prev is not None and oi == oi else 0.0
-            d_oi = 0.0 if d_oi != d_oi else d_oi
-            c = ("open_buy" if d_oi > 0 and signed > 0 else "open_sell" if d_oi > 0 and signed < 0 else
-                 "close_short" if d_oi < 0 and signed > 0 else "close_long" if d_oi < 0 and signed < 0 else "none")
-            side = "calls" if self.meta[s][0] == "CE" else "puts"
-            tot[f"{c}_{side}"] += vol
-        if not any_row:
+        g = tp.grouped(tp.is_opt)
+        if g is None:
             return pd.DataFrame()
-        for side in ("calls", "puts"):
-            tot[f"net_open_buy_{side}"] = tot[f"open_buy_{side}"] - tot[f"open_sell_{side}"]
+        signed, vol, oi = g.sum(sign * dv), g.sum(dv), g.last(tp.oi)
+        prev = np.array([self.prev_oi.get(s, math.nan) for s in g.syms.tolist()])
+        d_oi = np.where((prev == prev) & (oi == oi), oi - prev, 0.0)
+        d_oi = np.where(d_oi != d_oi, 0.0, d_oi)
+        c = np.select([(d_oi > 0) & (signed > 0), (d_oi > 0) & (signed < 0), (d_oi < 0) & (signed > 0), (d_oi < 0) & (signed < 0)], [0, 1, 2, 3], 4)
+        _, _, cp = self._facts(g.syms.tolist())
+        side = np.array([0 if x == "CE" else 1 for x in cp])
+        cell = side * 5 + c                                                  # calls 0-4, puts 5-9, in the order of `tot`
+        sums = np.bincount(cell, weights=vol, minlength=10)                  # symbol order, as the loop added
+        tot = {f"{n}_{s}": float(sums[i * 5 + j]) for i, s in enumerate(("calls", "puts")) for j, n in enumerate(cls_names)}
+        for side_ in ("calls", "puts"):
+            tot[f"net_open_buy_{side_}"] = tot[f"open_buy_{side_}"] - tot[f"open_sell_{side_}"]
         return pd.DataFrame([{"ts": ts, **tot, "known_at": ka}])
 
     def _block_prints(self, tp, ts, ka, dv=None, sign=None, **_):
@@ -531,27 +561,26 @@ class Natives:
             return pd.DataFrame()
         lots = self._lots(tp, rows)
         big = (tp.is_fut[rows] & (lots >= BLOCK_LOTS_FUT)) | (tp.is_opt[rows] & (lots >= BLOCK_LOTS_OPT))
-        ev = rows[big & (dv[rows] > 0)]
+        keep = big & (dv[rows] > 0)
+        ev = rows[keep]
         if not len(ev):
             return pd.DataFrame()
-        top = None
-        for s, idx in tp.groups(tp.is_opt):
-            oi = _last(tp.oi, idx)
-            prev = self.prev_oi.get(s)
-            if prev is None or oi != oi:
-                continue
-            d = oi - prev
-            if top is None or abs(d) > abs(top[3]):
-                e, k, cp = self._info(s)
-                top = (s, k, cp, d)
-        lot_of = dict(zip(rows, lots))
-        out = []
-        for r in ev:
-            out.append({"ts": ts, "symbol": tp.sym[r], "instrument_type": tp.itype[r], "ltp": tp.ltp[r], "lots": lot_of[r],
-                        "sign": sign[r], "oi_symbol": top[0] if top else None, "oi_strike": top[1] if top else math.nan,
-                        "oi_cp": top[2] if top else None, "oi_jump": top[3] if top else math.nan,
-                        "known_at": pd.Timestamp(int(tp.t[r]))})
-        return pd.DataFrame(out)
+        top = None                                                           # the option with the largest OI change since its previous bucket
+        g = tp.grouped(tp.is_opt)
+        if g is not None:
+            oi = g.last(tp.oi)
+            prev = np.array([self.prev_oi.get(s, math.nan) for s in g.syms.tolist()])
+            ok = (prev == prev) & (oi == oi)
+            if ok.any():
+                dchg = np.where(ok, oi - prev, 0.0)
+                j = int(np.argmax(np.where(ok, np.abs(dchg), -1.0)))         # the first of equal changes, as the loop kept
+                e, k, cp = self._info(g.syms[j])
+                top = (g.syms[j], k, cp, float(dchg[j]))
+        n = len(ev)
+        return pd.DataFrame({"ts": ts, "symbol": tp.sym[ev], "instrument_type": tp.itype[ev], "ltp": tp.ltp[ev], "lots": lots[keep],
+                             "sign": sign[ev], "oi_symbol": [top[0] if top else None] * n, "oi_strike": top[1] if top else math.nan,
+                             "oi_cp": [top[2] if top else None] * n, "oi_jump": top[3] if top else math.nan,
+                             "known_at": pd.to_datetime(tp.t[ev], unit="ns")})
 
     def _fair_value_gap(self, tp, ts, ka, greek=None, **_):
         fut = np.flatnonzero(tp.is_fut & tp.in_b)
@@ -560,21 +589,30 @@ class Natives:
             e = min(tp.expiry[fut])
             fr = fut[tp.expiry[fut] == e]
             fmp = _last(tp.microprice, fr)
-        rows = []
-        for s, idx in tp.groups(tp.is_opt):
-            e, k, cp = self._info(s)
-            mid, bid, ask = _last(tp.mid, idx), _last(tp.bid, idx), _last(tp.ask, idx)
-            prev = self.prev_fvg.get(s)
-            self.prev_fvg[s] = (tp.b, mid, fmp)
-            if prev is None or prev[0] != tp.b - self.td or not greek:
-                continue
-            d_ = greek.get(s, (math.nan,))[0]
-            fair = prev[1] + d_ * (fmp - prev[2])
-            if fair != fair:
-                continue
-            rows.append({"ts": ts, "known_at": ka, "symbol": s, "expiry": e, "strike": k, "cp": "C" if cp == "CE" else "P", "fair": fair,
-                         "buy_edge": _div(fair - ask, mid), "sell_edge": _div(bid - fair, mid)})
-        return pd.DataFrame(rows)
+        g = tp.grouped(tp.is_opt)
+        if g is None:
+            return pd.DataFrame()
+        syms = g.syms.tolist()
+        mid, bid, ask = g.last(tp.mid), g.last(tp.bid), g.last(tp.ask)
+        prev = [self.prev_fvg.get(s) for s in syms]
+        self.prev_fvg.update(zip(syms, ((tp.b, m, fmp) for m in mid.tolist())))
+        if not greek:
+            return pd.DataFrame()
+        pb = np.array([p[0] if p is not None else -1 for p in prev], dtype=np.int64)
+        pmid = np.array([p[1] if p is not None else math.nan for p in prev])
+        pfm = np.array([p[2] if p is not None else math.nan for p in prev])
+        d_, _v, _k = greek.lookup(g.syms)
+        with np.errstate(invalid="ignore"):
+            fair = pmid + d_ * (fmp - pfm)
+        sel = (pb == tp.b - self.td) & (fair == fair)
+        if not sel.any():
+            return pd.DataFrame()
+        syms_s = [syms[i] for i in np.flatnonzero(sel)]
+        e, k, cp = self._facts(syms_s)
+        f, m, bi, a = fair[sel], mid[sel], bid[sel], ask[sel]
+        return pd.DataFrame({"ts": ts, "known_at": ka, "symbol": syms_s, "expiry": e, "strike": k,
+                             "cp": ["C" if x == "CE" else "P" for x in cp], "fair": f,
+                             "buy_edge": _divv(f - a, m), "sell_edge": _divv(bi - f, m)})
 
 
 def contract_meta(contract_table: pd.DataFrame) -> dict:
