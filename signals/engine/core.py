@@ -126,20 +126,20 @@ class TickWindow:
         self._small = None
         m = pd.concat(moved, ignore_index=True) if len(moved) > 1 else moved[0]
         last = pd.concat([self.big_last, m], ignore_index=True) if len(self.big_last) else m
-        self.big_last = last.groupby("symbol").tail(1)
+        self.big_last = last.drop_duplicates("symbol", keep="last")
         mx = m["fts"].max()
         self.big_max = mx if self.big_max is None else max(self.big_max, mx)
         self.big = pd.concat([self.big, m], ignore_index=True) if len(self.big) else m
         old = self.big["fts"] < now - self.keep
         if old.any():
-            anchors = self.big[old].groupby("symbol").tail(1)
+            anchors = self.big[old].drop_duplicates("symbol", keep="last")
             self.big = pd.concat([anchors, self.big[~old]], ignore_index=True)
 
     def window(self, lo: pd.Timestamp, upto: pd.Timestamp) -> pd.DataFrame:
         small = self._small_df()
         if self.big_max is not None and self.big_max < lo:
             self.fast += 1
-            before = small[small["fts"] < lo].groupby("symbol").tail(1) if len(small) else small
+            before = small[small["fts"] < lo].drop_duplicates("symbol", keep="last") if len(small) else small
             anchors = self.big_last[~self.big_last["symbol"].isin(before["symbol"])] if len(before) else self.big_last
             inside = small[(small["fts"] >= lo) & (small["fts"] < upto)] if len(small) else small
             parts = [x for x in (anchors, before, inside) if len(x)]
@@ -149,7 +149,7 @@ class TickWindow:
         if not len(t):
             return t
         keep = (t["fts"] >= lo) & (t["fts"] < upto)
-        anchors = t[t["fts"] < lo].groupby("symbol").tail(1)
+        anchors = t[t["fts"] < lo].drop_duplicates("symbol", keep="last")
         return pd.concat([anchors, t[keep]], ignore_index=True)
 
 
@@ -299,6 +299,7 @@ class OperatorEngine:
         self.trigger = (0, 0)                           # (vendor time, receive time) of the tick that closed the last buckets
         self.last_tick_mono: Optional[float] = None
         self.errors = 0                                 # batches or timer steps that raised (logged, the session continues)
+        self._rank_index = None                         # contracts in output order (expiry, strike, call before put, symbol), built on first use
         self.shadow = None                              # ShadowParity when JARVIS_SHADOW_PARITY=1 (set by start())
         self.reads_ticks = self._reads_ticks()          # does any signal of this process read ticks (the tape operators, a signal with ticks_fo)?
 
@@ -683,10 +684,45 @@ def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timesta
                     data[c] = df[c].array
             data["bucket"] = g.cadence
             return pd.DataFrame(data, index=pd.RangeIndex(1))
+    if (df is not None and len(df) > 1 and {"symbol", "expiry", "strike", "cp", "known_at"} <= set(df.columns) and "signal" not in df.columns
+            and (self.baselines.get(g.cadence) or {}).get(sid) is None and pd.api.types.is_datetime64_any_dtype(df["known_at"])):
+        key = "ts" if spec.grid == "1m" else "date"
+        fast = self._emit_many(g, sid, df, upto, key) if key in df.columns else False
+        if fast is not False:
+            return fast
     part = _select(normalise_output(spec, df, self.underlying), g.since, upto, self.day, own=True)
     return self._finish_rows(g, sid, part) if part is not None else None
 
 
+def _emit_many(self, g: Group, sid: str, df: pd.DataFrame, upto: pd.Timestamp, key: str):
+    """A per-contract native output (one known_at for all rows) as final rows: the order (expiry, strike, call before put, symbol) is the rank of each
+    contract in a table sorted once, so no per-bucket sort of text and dates.  False when the frame is not of that shape (the general path runs)."""
+    ka = df["known_at"].to_numpy()
+    if not (ka == ka[0]).all() or (key == "ts" and not (df[key].to_numpy() == df[key].to_numpy()[0]).all()):
+        return False
+    if self._rank_index is None:
+        m = pd.DataFrame([(s, v[2], v[1], "C" if v[0] == "CE" else "P" if v[0] == "PE" else "F") for s, v in self._meta.items()],
+                         columns=["symbol", "expiry", "strike", "cp"])
+        self._rank_index = pd.Index(m.sort_values(["expiry", "strike", "cp", "symbol"], kind="stable")["symbol"].to_numpy())
+    rank = self._rank_index.get_indexer(df["symbol"].astype(str).to_numpy())
+    if (rank < 0).any():
+        return False
+    kt = pd.Timestamp(ka[0])
+    if not ((kt <= upto) and ((kt > g.since) if g.since is not None else (kt >= self.day))):
+        return None
+    o = np.argsort(rank, kind="stable")
+    ordered = bool((o == np.arange(len(o))).all())
+    data = {"signal": sid, "underlying": self.underlying, key: df[key].array, "known_at": df["known_at"].array}
+    for c in df.columns:
+        if c not in ("underlying", key, "known_at"):
+            data[c] = df[c].array
+    if not ordered:
+        data = {k: (v.take(o) if hasattr(v, "take") else v) for k, v in data.items()}
+    data["bucket"] = g.cadence
+    return pd.DataFrame(data, index=pd.RangeIndex(len(o)))
+
+
+OperatorEngine._emit_many = _emit_many
 OperatorEngine._emit = _emit
 
 

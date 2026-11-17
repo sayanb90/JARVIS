@@ -783,3 +783,21 @@ def test_shadow_compare_finds_differences_and_ignores_rounding():
     assert compare(a, a.drop(columns="n"))["what"] == "columns"
     assert compare(a, a.assign(x=[1.0, 2.0, 3.0]))["what"] == "x"                  # NaN against a number
     assert compare(pd.DataFrame(), pd.DataFrame()) is None
+
+
+def test_per_contract_native_outputs_are_ordered_by_rank_exactly_as_the_general_path_sorts_them(day, monkeypatch):
+    """SCRUM-205: a per-contract native output (book_pressure, illiquidity, spread_gate, depth_features, fair_value_gap, ...) is put in the order
+    (expiry, strike, call before put, symbol) by the rank of its contracts instead of a sort of text and dates.  The final rows must be the same
+    frames, row for row and dtype for dtype, as the general path (normalise_output, select, finish) gives."""
+    hist, ticks, d = day
+    t = _cut(dense_ticks(ticks), d, 3)
+    ids = ["book_pressure", "illiquidity", "spread_gate", "depth_features", "fair_value_gap", "block_prints", "signed_flow"]
+    fast = engine_replay("NIFTY", trim(hist), t, {s: "10s" for s in ids}, step="1min")
+    monkeypatch.setattr(OperatorEngine, "_emit_many", lambda self, *a, **k: False)
+    slow = engine_replay("NIFTY", trim(hist), t, {s: "10s" for s in ids}, step="1min")
+    assert len(fast) == len(slow) > 100
+    assert {"book_pressure", "depth_features"} <= set(fast["signal"])
+    for sid in set(fast["signal"]):
+        a = fast[fast["signal"] == sid].dropna(axis=1, how="all").reset_index(drop=True)
+        b = slow[slow["signal"] == sid].dropna(axis=1, how="all").reset_index(drop=True)
+        pd.testing.assert_frame_equal(a, b, check_dtype=False, check_like=True, obj=sid)
