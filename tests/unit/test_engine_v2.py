@@ -486,3 +486,120 @@ def test_provisional_values_follow_their_own_interval_and_the_loop_reports_where
     assert go(10 ** 9)["provisional"] < every_step                      # a long interval: far fewer provisional computations
     loop = [r.message for r in caplog.records if r.message.startswith("status loop:")]
     assert loop and all(k in loop[0] for k in ("poll=", "apply=", "advance=", "provisional=", "publish=", "write="))
+
+
+# ---------------------------------------------------------------------------------------------- vectorised reductions (17 Nov 2026)
+def test_grouped_reductions_equal_the_per_symbol_helpers():
+    """Grouped (last, mean, median, sum per symbol in one numpy pass) gives what the per-symbol loops gave: the loops cost about 200 ms of
+    every 1 s bucket close on the live feed, with 300 contracts ticking a second."""
+    from signals.engine import operators as op
+    rng = np.random.default_rng(3)
+    n = 400
+    syms = rng.choice([f"S{i:02d}" for i in range(37)], n)
+    codes, code = np.unique(syms, return_inverse=True)
+
+    class T:                                                   # the parts of TapeTable that Grouped reads
+        pass
+
+    tp = T()
+    tp.code, tp.codes, tp.n = code, codes, n
+    tp.in_b = rng.random(n) < 0.9
+    a = rng.normal(size=n)
+    a[rng.random(n) < 0.3] = np.nan                            # NaN-heavy: some symbols have no value at all
+    a[code == 5] = np.nan
+    mask = rng.random(n) < 0.8
+    g = op.Grouped(tp, mask)
+    ref = op.TapeTable.groups(tp, mask) if False else None     # (TapeTable.groups is a method of the real table: rebuilt below)
+    idx = np.flatnonzero(mask & tp.in_b)
+    order = np.lexsort((idx, code[idx]))
+    idx = idx[order]
+    cut = np.flatnonzero(np.diff(code[idx])) + 1
+    groups = [(codes[code[s[0]]], s) for s in np.split(idx, cut)]
+    assert list(g.syms) == [s for s, _ in groups] and g.n == len(groups)
+    for fn, helper in ((g.last, op._last), (g.mean, op._mean), (g.median, op._median)):
+        want = np.array([helper(a, rows) for _, rows in groups])
+        np.testing.assert_allclose(fn(a), want, rtol=1e-12, atol=0, equal_nan=True)
+    np.testing.assert_allclose(g.sum(a), np.array([op._sum(a, rows) for _, rows in groups]), rtol=1e-12, equal_nan=True)
+    assert op.Grouped(tp, np.zeros(n, bool)).n == 0
+
+
+def test_signal_rows_by_column_equal_the_row_by_row_version():
+    import datetime as dt
+    from signals.engine.runner import signal_rows
+    from data_layer.bus import to_ns
+
+    def old(df):                                               # the first version, row by row
+        rows = []
+        for rec in df.itertuples(index=False):
+            row = []
+            for v in rec:
+                if isinstance(v, (pd.Timestamp, dt.datetime)):
+                    row.append(to_ns(v))
+                elif isinstance(v, dt.date):
+                    row.append(v.isoformat())
+                elif v is None or (isinstance(v, float) and v != v):
+                    row.append(None)
+                elif hasattr(v, "item"):
+                    row.append(v.item())
+                else:
+                    row.append(v if isinstance(v, (int, float, str, bool)) else str(v))
+            rows.append(row)
+        return list(df.columns), rows
+
+    df = pd.DataFrame({"ts": pd.to_datetime(["2026-11-17 03:45:00.123456789", "2026-11-17 03:45:01.000000000"]),
+                       "known_at": pd.to_datetime(["2026-11-17 03:45:01.000000", "2026-11-17 03:45:02.000000"]).as_unit("us"),
+                       "symbol": ["NIFTY_24000_CE", "NIFTY_24000_PE"], "expiry": [dt.date(2026, 11, 17), dt.date(2026, 11, 24)],
+                       "strike": [24000.0, np.nan], "n": [3, 4], "flag": [True, False], "mix": [1, "a"], "maybe": [None, 2.5]})
+    assert signal_rows(df) == old(df)
+    assert signal_rows(df.iloc[:0]) == (list(df.columns), [])
+
+
+def test_write_rows_accepts_a_frame_and_a_list_of_dicts(tmp_path):
+    from signals.options.stream import read_live, write_rows
+    rows = [{"ts": pd.Timestamp("2026-11-17 03:45:00"), "signal": "x", "v": 1.5}, {"ts": pd.Timestamp("2026-11-17 03:45:01"), "signal": "x", "v": 2.5}]
+    assert write_rows(pd.DataFrame(rows), tmp_path, prefix="a") == 2 and write_rows(rows, tmp_path, prefix="b") == 2
+    assert write_rows(pd.DataFrame(), tmp_path) == 0 and write_rows([], tmp_path) == 0
+    assert len(read_live(tmp_path, pd.Timestamp("2026-11-17").date())) == 4
+
+
+def test_stack_sampler_reports_where_the_engine_thread_spends_its_time():
+    import time
+    from signals.engine.sampler import StackSampler
+
+    def inner_work():
+        t = time.perf_counter()
+        x = 0
+        while time.perf_counter() - t < 0.4:
+            x += sum(i * i for i in range(200))
+        return x
+
+    def outer():
+        return inner_work()
+
+    sm = StackSampler(interval=0.005).start()
+    outer()
+    lines = sm.report()
+    sm.stop()
+    text = "\n".join(lines)
+    assert lines[0].startswith("profile:") and "samples" in lines[0]
+    assert "inner_work" in text and "outer" in text                        # the cumulative line names the functions we were inside
+    assert sm.report(reset=False)[0] == "profile: no samples"              # the report reset the counters
+
+
+def test_engine_gives_the_same_rows_with_object_strings_as_with_arrow_strings(day):
+    """pandas 3 keeps text in Arrow arrays; the engine switches to object strings (use_object_strings) because every selection, sort and concat
+    of its per-bucket frames is then about a third faster.  The rows must not change."""
+    from signals.engine.core import replay, use_object_strings
+    hist, ticks, d = day
+    t = _cut(ticks, d, 4)
+    ids = {"book_pressure": "10s", "illiquidity": "10s", "spread_gate": "10s", "depth_features": "10s", "pcr_full": "1min", "skew": "1min"}
+    with pd.option_context("future.infer_string", True):
+        a = replay("NIFTY", trim(hist), t, ids, step="1min")
+    with pd.option_context("future.infer_string", False):
+        assert use_object_strings({}) is True
+        b = replay("NIFTY", trim(hist), t, ids, step="1min")
+    assert len(a) == len(b) > 0
+    pd.testing.assert_frame_equal(a.sort_values(["signal", "bucket", "known_at"] + [c for c in ("symbol", "expiry", "strike", "cp") if c in a.columns]).reset_index(drop=True).astype(object),
+                                  b.sort_values(["signal", "bucket", "known_at"] + [c for c in ("symbol", "expiry", "strike", "cp") if c in b.columns]).reset_index(drop=True).astype(object),
+                                  check_dtype=False, check_like=True, check_column_type=False, check_index_type=False)
+    assert use_object_strings({"JARVIS_OBJECT_STRINGS": "0"}) is False

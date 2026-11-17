@@ -162,13 +162,16 @@ def normalise_output(spec: Spec, out: Optional[pd.DataFrame], underlying: str) -
     key = "ts" if spec.grid == "1m" else "date"
     if out is None or len(out) == 0:
         return pd.DataFrame(columns=["underlying", key, "known_at"])
-    out = out.copy()
     if key not in out.columns or "known_at" not in out.columns:
         raise ValueError(f"{spec.id}: output needs columns {key!r} and 'known_at', has {list(out.columns)}")
-    out["underlying"] = underlying
-    out["known_at"] = pd.to_datetime(out["known_at"])
+    out = out.assign(underlying=underlying)                                  # a new frame: the caller's is not touched
+    if not pd.api.types.is_datetime64_any_dtype(out["known_at"]):            # already datetimes in every engine output: no conversion
+        out["known_at"] = pd.to_datetime(out["known_at"])
     cols = ["underlying", key, "known_at"] + [c for c in out.columns if c not in ("underlying", key, "known_at")]
-    return out[cols].sort_values([key, "known_at"] + [c for c in ("snap", "expiry", "strike", "cp", "symbol", "bucket", "group", "participant", "hour", "leg") if c in out.columns]).reset_index(drop=True)
+    out = out[cols]
+    if len(out) > 1:                                                         # one row has nothing to sort (a signal row per bucket: most)
+        out = out.sort_values([key, "known_at"] + [c for c in ("snap", "expiry", "strike", "cp", "symbol", "bucket", "group", "participant", "hour", "leg") if c in out.columns])
+    return out.reset_index(drop=True)
 
 
 def _ns_cols(df: pd.DataFrame, cols) -> pd.DataFrame:
