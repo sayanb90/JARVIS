@@ -75,3 +75,27 @@ def groups(cadence: dict[str, str]) -> dict[str, list[str]]:
 
 def td(c: str) -> pd.Timedelta:
     return pd.Timedelta(norm(c))
+
+
+def parse_only(text: Optional[str]) -> Optional[list[str]]:
+    """A comma list of cadences ("1s,10s", "1min") for a process that computes only those: None means all.  Raises ValueError on an unknown one."""
+    if text is None or not str(text).strip():
+        return None
+    out = [norm(x.strip()) for x in str(text).split(",") if x.strip()]
+    unknown = [x for x in out if x not in ORDER]
+    if unknown:
+        raise ValueError(f"unknown cadence {unknown}: use {list(ORDER)}")
+    return sorted(set(out), key=ORDER.index)
+
+
+def only(cadence: dict[str, str], cadences: Optional[list[str]]) -> dict[str, str]:
+    """The signals of `cadence` that run at one of `cadences` (all of them when None)."""
+    return dict(cadence) if cadences is None else {sid: c for sid, c in cadence.items() if c in cadences}
+
+
+def tag(cadences: Optional[list[str]]) -> str:
+    """"" for a process that computes the finest cadence (it keeps the plain names: signals-NIFTY, engine-NIFTY.heartbeat.json); otherwise
+    "-<cadences>", so a second process of the same underlying (the one-minute signals) has its own bus endpoint and heartbeat file."""
+    if cadences is None or ORDER[0] in cadences:
+        return ""
+    return "-" + "+".join(cadences)

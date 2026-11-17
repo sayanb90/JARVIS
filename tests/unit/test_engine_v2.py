@@ -603,3 +603,27 @@ def test_engine_gives_the_same_rows_with_object_strings_as_with_arrow_strings(da
                                   b.sort_values(["signal", "bucket", "known_at"] + [c for c in ("symbol", "expiry", "strike", "cp") if c in b.columns]).reset_index(drop=True).astype(object),
                                   check_dtype=False, check_like=True, check_column_type=False, check_index_type=False)
     assert use_object_strings({"JARVIS_OBJECT_STRINGS": "0"}) is False
+
+
+def test_a_process_can_compute_only_some_cadences_with_names_of_its_own(day, tmp_path):
+    """17 Nov 2026: the five one-minute signals close in 2.6 to 5 s on the live feed and one loop reads no ticks meanwhile (5-10% of the ticks late).
+    signals live --cadences 1min runs them in a process of their own; the 1 s process keeps the plain names (signals-NIFTY, engine-NIFTY...)."""
+    import signals.cadence as cm
+    from signals.engine.core import live_signal_ids
+    assert cm.parse_only(None) is None and cm.parse_only("") is None
+    assert cm.parse_only("1min") == ["1min"] and cm.parse_only("10s, 1s") == ["1s", "10s"]
+    with pytest.raises(ValueError):
+        cm.parse_only("5s")
+    full = cm.load(live_signal_ids(), env={})
+    fast, slow = cm.only(full, ["1s", "10s"]), cm.only(full, ["1min"])
+    assert fast and slow and not (set(fast) & set(slow)) and set(fast) | set(slow) == set(full)     # every signal in exactly one process
+    assert set(slow.values()) == {"1min"} and "1min" not in set(fast.values())
+    assert cm.tag(["1s", "10s"]) == "" and cm.tag(None) == "" and cm.tag(["1min"]) == "-1min"      # only the one-minute process has its own names
+    from data_layer import bus
+    assert bus.signal_names(("NIFTY",)) == ["signals-NIFTY", "signals-NIFTY-1min"]                 # the viewer listens to both
+    # an engine built from the one-minute signals alone: only the one-minute group exists, and it closes buckets
+    hist, ticks, d = day
+    eng = OperatorEngine("NIFTY", trim(hist), {s: "1min" for s in list(slow)[:2]}, d)
+    assert list(eng.groups) == ["1min"]
+    eng.on_ticks(_cut(ticks, d, 3))
+    assert eng.groups["1min"].buckets >= 1

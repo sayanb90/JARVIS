@@ -835,7 +835,7 @@ def write_heartbeat(path) -> callable:
     return beat
 
 
-def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env=None) -> dict:
+def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env=None, cadences: Optional[list] = None) -> dict:
     """Engine v2 for the session: history and anchors loaded once, the cadence config, ticks from the bus (or tick files)."""
     from datetime import datetime
     from pathlib import Path
@@ -849,6 +849,14 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
     cad = cadence_mod.load(ids, env=env)
     if env.get("JARVIS_LIVE_SIGNALS", "").strip().lower() in ("1", "true", "yes", "on"):
         cad = {k: v for k, v in cad.items() if k not in IN_FEED}
+    # A process may compute only some cadences (signals live --cadences 1s,10s / 1min; or JARVIS_SIGNAL_CADENCES).  The five one-minute signals
+    # take 2.6 to 5 s to close on the live feed, and one loop that does that reads no ticks for those seconds (5-10% of ticks late, 17 Nov 2026):
+    # their own process keeps that wait away from the 1 s signals.
+    only = cadences if cadences is not None else cadence_mod.parse_only(env.get("JARVIS_SIGNAL_CADENCES"))
+    cad = cadence_mod.only(cad, only)
+    tag = cadence_mod.tag(only)
+    if not cad:
+        raise ValueError(f"no live signal runs at {only}")
     engines = []
     for u in underlyings:
         hist = history_for(Path(lake), u, day)
@@ -858,16 +866,16 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
                                       reorder_ms=int(env.get("JARVIS_SIGNAL_REORDER_MS", REORDER_MS_DEFAULT))))
     for e in engines:
         e.trigger = (0, 0)
-    pub = bus.Publisher("signals-" + "-".join(underlyings), env=env) if bus.bus_enabled(env) else None
+    pub = bus.Publisher("signals-" + "-".join(underlyings) + tag, env=env) if bus.bus_enabled(env) else None
     src = BusSource(env=env) if bus.bus_enabled(env) else FileSource(Path(lake), day)
     if isinstance(src, FileSource):
         log.warning("engine v2 reads tick files, not the bus (JARVIS_TICK_BUS is not set): signals come 5 to 15 s late and a late start "
                     "first reads the whole day's files (about 45 minutes on 16 Nov 2026).  Set JARVIS_TICK_BUS=1 in the crontab or .env.")
     until = pd.Timestamp(datetime.combine(day, datetime.strptime(until_utc, "%H:%M").time()))
-    log.info("engine v2: %s; cadence groups %s; tick %d ms; source %s", list(underlyings),
-             {c: len(v) for c, v in cadence_mod.groups(cad).items()}, tick_ms(env), type(src).__name__)
+    log.info("engine v2: %s; cadence groups %s; tick %d ms; source %s; process %s", list(underlyings),
+             {c: len(v) for c, v in cadence_mod.groups(cad).items()}, tick_ms(env), type(src).__name__, tag.strip("-") or "all cadences or the finest")
     log.info("provisional values every %d ms (JARVIS_SIGNAL_PROVISIONAL_MS)", provisional_ms(env))
-    hb = write_heartbeat(Path(store) / "live" / f"engine-{'-'.join(underlyings)}.heartbeat.json")
+    hb = write_heartbeat(Path(store) / "live" / f"engine-{'-'.join(underlyings)}{tag}.heartbeat.json")
     try:
         return run(engines, src, until, publisher=pub, store=Path(store), tick_ms=tick_ms(env), heartbeat=hb, prov_ms=provisional_ms(env))
     finally:                                            # free the bus endpoints, so a restart can bind them again
