@@ -34,6 +34,8 @@ from signals import cadence as cadence_mod
 from signals import lookbacks, normalise
 from signals.engine import chain_ops, operators, surface
 from signals.engine.state import EXPIRY_NS, NS_MIN, YEAR_NS, Session, td_ns
+
+NS_SEC = 10**9
 from signals.framework import REGISTRY, Context, normalise_output
 from signals.live_runner import CHAIN_FREE, OVERRUNS_BEFORE_FALLBACK, LiveRunner, _last_sessions, bar_volume, daily_inputs, live_signal_ids
 from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
@@ -41,7 +43,8 @@ from signals.options.core import INDEX_SYMBOL, VIX_SYMBOL
 log = logging.getLogger("signals.engine")
 
 TICK_MS_DEFAULT = 250
-PROVISIONAL_MS_DEFAULT = 1000        # provisional values copy every operator's state: at 250 ms they cost about half a core on 17 Nov 2026
+PHASES = ("state", "native", "chain_native", "inputs", "total")
+PROVISIONAL_MS_DEFAULT = 2000        # provisional values copy every operator's state: 250 ms cost about half a core, 1 s still 10-13% of the loop (17 Nov 2026)
 REORDER_MS_DEFAULT = 200
 HIST_PROVIDERS = ("spot", "vix", "futures", "fut_front")
 
@@ -271,8 +274,12 @@ class OperatorEngine:
         self.pending = pd.DataFrame()                   # reorder buffer
         self.newest: Optional[int] = None               # newest event time seen (ns)
         self.closed_to: Optional[int] = None            # every bucket ending at or before this is closed, at every cadence
-        keep = max((g.keep_ns for g in self.groups.values()), default=0)
-        self.ticks = TickWindow(pd.Timedelta(keep + 2 * NS_MIN, unit="ns"))
+        # Only the adapters (a batch function on frames) read ticks further back than the bucket; the native operators carry their own state and
+        # read the bucket's ticks plus each symbol's last earlier tick (TickWindow keeps that separately).  An engine with no adapter (the 1 s
+        # process of signals live --cadences 1s,10s) therefore keeps a few buckets, not the 12 minutes the chain signals' lookbacks say.
+        adapters = any(g.windows for g in self.groups.values())
+        keep = max((g.keep_ns if g.windows else 2 * g.td for g in self.groups.values() if g.ids), default=0)      # not the empty fallback groups
+        self.ticks = TickWindow(pd.Timedelta(keep + (2 * NS_MIN if adapters else 30 * NS_SEC), unit="ns"))
         self.prefix = f"{underlying}_"
         self.symbols = {INDEX_SYMBOL[underlying], VIX_SYMBOL}
         self.late = 0
@@ -351,7 +358,12 @@ class OperatorEngine:
             if iv["n"]:                                    # where a bucket close goes: mean ms per phase over the interval
                 out["groups"][c]["phase_ms"] = {k: round(1000 * (g.timings.get(k, 0.0) - g.tm_prev.get(k, 0.0)) / iv["n"], 1)
                                                 for k in ("state", "native", "chain_native", "inputs")}
-            g.tm_prev = {k: g.timings.get(k, 0.0) for k in ("state", "native", "chain_native", "inputs")}
+                # ... and per signal that runs as an adapter (its batch function on frames): the slowest three, mean ms per close
+                sig = {k: 1000 * (v - g.tm_prev.get(k, 0.0)) / iv["n"] for k, v in g.timings.items() if k not in PHASES}
+                top = sorted(((k, v) for k, v in sig.items() if v >= 1.0), key=lambda x: -x[1])[:3]
+                if top:
+                    out["groups"][c]["signal_ms"] = {k: round(v, 1) for k, v in top}
+            g.tm_prev = dict(g.timings)
             g.interval = {"n": 0, "sum_s": 0.0, "max_s": 0.0}
         return out
 
@@ -689,7 +701,8 @@ def status_line(st: dict) -> str:
     """One log line per engine and minute: ticks, late, missed on the bus, rows, lag, memory, per cadence buckets closed and the
     mean / slowest close in the last minute, and any fallback."""
     gs = " ".join(f"{c}[sig={g['signals']} closed={g['closed']} mean={g['mean_ms']}ms max={g['max_ms']}ms"
-                  + (" " + "/".join(f"{k}={v}" for k, v in g["phase_ms"].items()) if g.get("phase_ms") else "") + "]"
+                  + (" " + "/".join(f"{k}={v}" for k, v in g["phase_ms"].items()) if g.get("phase_ms") else "")
+                  + (" slowest: " + " ".join(f"{k}={v}ms" for k, v in g["signal_ms"].items()) if g.get("signal_ms") else "") + "]"
                   for c, g in st["groups"].items())
     fb = f" FALLBACKS={st['fallbacks']}" if st["fallbacks"] else ""
     return (f"status {st['underlying']}: ticks={st['ticks']} late={st['late']} missed_on_bus={st['missed_on_bus']} "

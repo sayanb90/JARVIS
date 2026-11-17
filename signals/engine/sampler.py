@@ -64,7 +64,7 @@ class StackSampler:
                 self._self[innermost] += 1
                 self._cum.update(keys)
 
-    def report(self, top_self: int = 10, top_cum: int = 18, reset: bool = True) -> list[str]:
+    def report(self, top_self: int = 10, top_cum: int = 30, top_lib: int = 10, reset: bool = True) -> list[str]:
         """Log lines: the samples taken, the innermost functions, and the functions with the most samples under them (own code first)."""
         with self._lock:
             n, own, cum = self._n, self._self.copy(), self._cum.copy()
@@ -80,4 +80,7 @@ class StackSampler:
         out = [f"profile: {n} samples of {1000 * self.interval:.0f} ms (cumulative = functions the engine was inside; self = innermost frame)"]
         out.append("profile self: " + " | ".join(fmt(k, c) for k, c in own.most_common(top_self)))
         out.append("profile cumulative (our code): " + " | ".join(fmt(k, c) for k, c in sorted(project, key=lambda x: -x[1])[:top_cum]))
+        libs = [(k, c) for k, c in cum.items() if "/site-packages/" in k[0] and 100 * c / n >= 1.5]
+        if libs:                                                  # numpy / pandas / zmq functions the engine was inside (a sign of the kind of work)
+            out.append("profile cumulative (libraries): " + " | ".join(fmt(k, c) for k, c in sorted(libs, key=lambda x: -x[1])[:top_lib]))
         return out

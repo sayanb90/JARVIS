@@ -456,7 +456,7 @@ def test_tick_window_returns_what_the_whole_window_copy_returned_and_stays_on_th
 
 def test_provisional_values_follow_their_own_interval_and_the_loop_reports_where_its_time_goes(day, tmp_path, caplog):
     """17 Nov 2026: provisional values (a copy of every operator's state) ran at every 250 ms timer step and cost about half a core.  They now
-    have their own interval (JARVIS_SIGNAL_PROVISIONAL_MS, 1000 ms by default), and each status interval logs the share of the loop's time
+    have their own interval (JARVIS_SIGNAL_PROVISIONAL_MS, 2000 ms by default), and each status interval logs the share of the loop's time
     in waiting, applying ticks, closing buckets, provisional values, publishing and writing."""
     import logging
     from signals.engine.core import provisional_ms, run
@@ -479,7 +479,7 @@ def test_provisional_values_follow_their_own_interval_and_the_loop_reports_where
         eng = OperatorEngine("NIFTY", trim(hist), {"book_pressure": "10s", "pcr_full": "1min"}, d)
         return run([eng], Src(), d + pd.Timedelta(hours=3, minutes=50), tick_ms=1, clock=lambda: now["t"], status_s=0, prov_ms=prov_ms)
 
-    assert provisional_ms({}) == 1000 and provisional_ms({"JARVIS_SIGNAL_PROVISIONAL_MS": "250"}) == 250
+    assert provisional_ms({}) == 2000 and provisional_ms({"JARVIS_SIGNAL_PROVISIONAL_MS": "250"}) == 250
     with caplog.at_level(logging.INFO, logger="signals.engine"):
         every_step = go(None)["provisional"]
     assert every_step > 0
@@ -627,3 +627,22 @@ def test_a_process_can_compute_only_some_cadences_with_names_of_its_own(day, tmp
     assert list(eng.groups) == ["1min"]
     eng.on_ticks(_cut(ticks, d, 3))
     assert eng.groups["1min"].buckets >= 1
+
+
+def test_an_engine_without_adapters_keeps_a_short_tick_window_and_the_status_names_the_slowest_signals(day):
+    """17 Nov 2026: only the adapters (a batch function on frames) read ticks further back than the bucket; the native operators carry their own
+    state.  The 1 s process (no adapter) therefore keeps a few buckets of ticks, not the 12 minutes of the chain signals' lookbacks; the one-minute
+    process (adapters) keeps its long window.  The status line names the slowest adapter signals of the interval."""
+    from signals.engine.core import live_signal_ids, status_line
+    import signals.cadence as cm
+    hist, ticks, d = day
+    full = cm.load(live_signal_ids(), env={})
+    fast = OperatorEngine("NIFTY", trim(hist), cm.only(full, ["1s", "10s"]), d)
+    slow = OperatorEngine("NIFTY", trim(hist), cm.only(full, ["1min"]), d)
+    assert not any(g.windows for g in fast.groups.values()) and fast.ticks.keep <= pd.Timedelta(seconds=60)
+    assert any(g.windows for g in slow.groups.values()) and slow.ticks.keep >= pd.Timedelta(minutes=2)
+    slow.on_ticks(_cut(ticks, d, 4))
+    st = slow.status(d + pd.Timedelta(hours=3, minutes=50))
+    g = st["groups"]["1min"]
+    assert g["closed"] >= 1 and g.get("signal_ms") and all(k in full for k in g["signal_ms"])         # slowest adapters of the interval
+    assert "slowest:" in status_line(st)
