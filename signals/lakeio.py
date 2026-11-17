@@ -70,14 +70,19 @@ def _q(files: list[str]) -> str:
 
 
 def read_bars(lake_dir: Path, d0: date, d1: date, where: str, params: Optional[list] = None, con=None) -> pd.DataFrame:
-    files = _day_files(Path(lake_dir) / "bars" / "interval=1m", d0, d1)
+    """1-minute bars: the vendor candles (lake/bars) and, for the index, VIX and futures of a day the vendor has not served yet, the bars built from
+    our own ticks (lake/bars_ticks, data_layer/bars_from_ticks.py).  Where both have a (symbol, minute) the vendor's row is taken."""
+    vendor = _day_files(Path(lake_dir) / "bars" / "interval=1m", d0, d1)
+    ours = _day_files(Path(lake_dir) / "bars_ticks" / "interval=1m", d0, d1)
+    files = vendor + ours
     if not files:
         return pd.DataFrame(columns=["ts", "symbol", "open", "high", "low", "close", "volume", "oi"])
     con = con or duckdb.connect()
     cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({_q(files)}, union_by_name=true)").fetchall()}
     oi = "oi" if "oi" in cols else "CAST(NULL AS BIGINT) AS oi"
-    sql = (f"SELECT ts, symbol, open, high, low, close, volume, {oi} FROM read_parquet({_q(files)}, union_by_name=true) WHERE {where} "
-           "QUALIFY row_number() OVER (PARTITION BY symbol, ts ORDER BY ts) = 1 ORDER BY symbol, ts")
+    rank = "CASE WHEN filename LIKE '%/bars_ticks/%' THEN 1 ELSE 0 END" if ours else "0"
+    sql = (f"SELECT ts, symbol, open, high, low, close, volume, {oi} FROM read_parquet({_q(files)}, union_by_name=true, filename=true) WHERE {where} "
+           f"QUALIFY row_number() OVER (PARTITION BY symbol, ts ORDER BY {rank}, ts) = 1 ORDER BY symbol, ts")
     return con.execute(sql, params or []).df()
 
 

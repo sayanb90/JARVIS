@@ -217,6 +217,12 @@ def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDE
         raise SystemExit("no 1-minute bars in the lake")
     day = bars_day or tick_day
     log(f"nightly: batch signals for {bars_day}, live-era replay and live table for {tick_day}")
+    if tick_day:                                 # the day's index, VIX and futures minutes from our own ticks (the vendor's candles of it arrive the next day)
+        try:
+            from data_layer.bars_from_ticks import build_day
+            build_day(lake, tick_day, log=log)
+        except Exception as exc:                 # noqa: BLE001 -- the replay and the batch signals do not depend on it
+            log(f"bars from ticks {tick_day} failed: {exc!r}")
     prov = {}
     if (Path(lake) / "manifest.json").exists():
         from research.access import provenance_of

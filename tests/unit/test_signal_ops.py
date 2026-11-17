@@ -211,3 +211,53 @@ def test_crontab_starts_the_one_minute_engines_after_the_fast_ones():
         if m:
             start[m.group(2)] = int(m.group(1))
     assert start == {"signals-live-nifty": 44, "signals-live-nifty-1min": 47, "signals-live-banknifty": 44, "signals-live-banknifty-1min": 49}
+
+
+def _tick_rows(sym, t0, n, px0, vol0=0, step_s=7, oi=None, quote_only_from=None):
+    rows = []
+    for i in range(n):
+        t = t0 + pd.Timedelta(seconds=step_s * i)
+        quote_only = quote_only_from is not None and i >= quote_only_from
+        rows.append({"symbol": sym, "fts": t, "ts": t, "ltp": None if quote_only else px0 + 0.5 * i, "bid": px0 + 0.5 * i - 0.1, "ask": px0 + 0.5 * i + 0.1,
+                     "vol_today": float(vol0 + 10 * i), "oi": oi})
+    return rows
+
+
+def test_bars_from_ticks_follow_the_engine_rules_and_the_vendor_wins_where_both_exist(tmp_path):
+    """17 Nov 2026: the vendor's candles of a day arrive the next day, so the next open's history ended a session early.  The bars are built from the
+    day's ticks into lake/bars_ticks (not lake/bars: the candle job's gap detection counts rows there), and read_bars takes the vendor's row first."""
+    from data_layer import bars_from_ticks as bt
+    from signals import lakeio
+    lake = tmp_path / "lake"
+    day = pd.Timestamp("2026-11-16").date()
+    t0 = pd.Timestamp("2026-11-16 03:45:00")
+    pre = pd.Timestamp("2026-11-16 03:40:00")                                   # auction ticks before the open
+    eq = pd.DataFrame(_tick_rows("NSE_INDEX:Nifty 50", t0, 60, 24000.0) + _tick_rows("NSE_INDEX:Nifty 50", pre, 3, 23000.0)
+                      + _tick_rows("RELIANCE", t0, 20, 1300.0))                 # a stock: not a bar of this job
+    fo = pd.DataFrame(_tick_rows("NIFTY_FUT_24_NOV_26", t0, 60, 24050.0, vol0=1000, oi=500.0, quote_only_from=40)
+                      + _tick_rows("NIFTY_24000_CE_17_NOV_26", t0, 60, 120.0))   # an option: not a bar of this job
+    for seg, df in (("eq", eq), ("fo", fo)):
+        f = lake / "ticks" / f"segment={seg}" / f"date={day}"
+        f.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(f / "ticks.parquet", index=False)
+    assert bt.build_day(lake, day, log=lambda *a: None) > 0
+    out = pd.read_parquet(bt.out_dir(lake, day) / "bars.parquet")
+    assert set(out["symbol"]) == {"NSE_INDEX:Nifty 50", "NIFTY_FUT_24_NOV_26"} and set(out["src"]) == {"ticks"} and set(out["market"]) == {"IN"}
+    assert out["ts"].min() == t0 and not (lake / "bars").exists()                  # the auction ticks are out; nothing in the vendor table
+    idx = out[out["symbol"] == "NSE_INDEX:Nifty 50"].set_index("ts")
+    first = idx.loc[t0]                                                            # ticks at 0, 7, ..., 56 s of the first minute: 9 of them
+    assert (first["open"], first["close"], first["high"], first["low"]) == (24000.0, 24000.0 + 0.5 * 8, 24000.0 + 0.5 * 8, 24000.0)
+    fut = out[out["symbol"] == "NIFTY_FUT_24_NOV_26"].set_index("ts")
+    assert fut.loc[t0]["volume"] == 80                                              # counter 1000 at the first tick, 1080 at the last of the minute
+    assert fut.loc[t0 + pd.Timedelta(minutes=1)]["volume"] == 90                    # then 1170: the change since the previous minute
+    assert fut["oi"].dropna().eq(500.0).all()
+    late = fut[fut.index >= t0 + pd.Timedelta(minutes=5)]                          # quote-only ticks: the mid is the price
+    assert len(late) and late["close"].notna().all()
+    # the vendor's row wins where both exist; ours fills the minutes it lacks
+    vend = lake / "bars" / "interval=1m" / f"date={day}"
+    vend.mkdir(parents=True)
+    pd.DataFrame({"ts": [t0], "symbol": ["NSE_INDEX:Nifty 50"], "open": [1.0], "high": [2.0], "low": [0.5], "close": [1.5], "volume": [0], "oi": [None],
+                  "market": ["IN"]}).to_parquet(vend / "bars.parquet", index=False)
+    got = lakeio.read_bars(lake, day, day, "symbol = ?", ["NSE_INDEX:Nifty 50"]).set_index("ts")
+    assert got.loc[t0]["close"] == 1.5 and len(got) == len(idx)                    # minute 1 from the vendor, the others from the ticks
+    assert (got.drop(index=t0)["close"] == idx.drop(index=t0)["close"]).all()
