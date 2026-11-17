@@ -79,7 +79,7 @@ def test_release_and_backfill_scripts():
     for s in ("deploy/release.sh", "deploy/data-backfill.sh"):
         assert subprocess.run(["bash", "-n", s], cwd=root).returncode == 0
     rel = (root / "deploy/release.sh").read_text()
-    assert "crontab deploy/crontab" in rel and "JARVIS_DEPTH5" in rel and "pytest" in rel
+    assert 'crontab "$RENDERED"' in rel and "JARVIS_DEPTH5" in rel and "pytest" in rel
     out = subprocess.run(["bash", "deploy/data-backfill.sh"], cwd=root, capture_output=True, text=True).stdout
     assert out.index("validate-iv") < out.index("signals run") and "--only expired" in out
 
@@ -160,3 +160,27 @@ def test_nightly_replays_the_newest_closed_tick_day_and_loads_no_ticks_for_the_b
     assert seen == [("NIFTY", str(newer.date()))]                      # the replay is for the tick day
     assert runs and all(r[2] is False for r in runs)                   # no ticks for the batch signals
     assert kept == [newer.date()] and res["tick_day"] == str(newer.date())
+
+
+def test_crontab_template_renders_for_any_checkout_with_the_engine_settings(tmp_path):
+    """16-17 Nov 2026: the template names /home/jarvis/JARVIS, so on another user's checkout every job failed at `cd $JARVIS`; and the engines
+    need the store, memory cap and bus settings from cron.  release.sh renders the template with sed for the repository's real path."""
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    out = subprocess.run(["sed", "s#/home/jarvis/JARVIS#/home/tradestone/JARVIS#g", str(root / "deploy/crontab")], capture_output=True, text=True).stdout
+    assert "/home/jarvis" not in out
+    lines = out.splitlines()
+    for want in ("JARVIS=/home/tradestone/JARVIS", "JARVIS_SIGNAL_STORE=/home/tradestone/JARVIS/store", "JARVIS_SIGNAL_LIVE_MAX_MB=12288",
+                 "JARVIS_TICK_BUS=1", "JARVIS_LIVE_SIGNALS=1", "JARVIS_SIGNAL_ENGINE=operators", "PATH=/home/tradestone/JARVIS/.venv/bin:/usr/local/bin:/usr/bin:/bin"):
+        assert want in lines, want
+    rel = (root / "deploy/release.sh").read_text()
+    assert 's#/home/jarvis/JARVIS#${ROOT}#g' in rel and "still names /home/jarvis" in rel
+
+
+def test_engine_live_cap_default_is_large_enough_and_signals_live_reads_dotenv():
+    import signals.live_runner as lr
+    assert lr.MAX_MB_DEFAULT >= 8192                         # 2048 broke the startup load of 400 days of bars (17 Nov 2026)
+    src = Path(lr.__file__).resolve().parent / "__main__.py"
+    assert "load_dotenv(ENV_FILE)" in src.read_text()
+    assert "load_dotenv(ENV_FILE)" in (Path(lr.__file__).resolve().parents[1] / "trading" / "paper.py").read_text()

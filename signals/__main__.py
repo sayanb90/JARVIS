@@ -383,9 +383,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     if a.cmd == "live":
         import logging
-        from data_layer.lake import LAKE_DIR
+        from data_layer.lake import ENV_FILE, LAKE_DIR
         from signals import engine
         from signals.live_runner import cap_memory
+        from dotenv import load_dotenv
+        load_dotenv(ENV_FILE)         # as the feeds do: a setting the crontab lacks (JARVIS_TICK_BUS ...) still reaches the engine; the crontab's own values win
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
         mb = cap_memory()
         logging.getLogger("signals.engine").info("memory cap %d MB", mb)

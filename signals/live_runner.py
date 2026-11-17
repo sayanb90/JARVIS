@@ -518,7 +518,7 @@ def slot_volume_history(lake: Path, underlying: str, day: date, sessions: int = 
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame(columns=["date", "cp", "dteb", "band", "slot", "v5_mean"])
 
 
-MAX_MB_DEFAULT = 2048
+MAX_MB_DEFAULT = 12288      # address space, not RAM: DuckDB's startup load of 400 days of bars failed under 2048 (17 Nov 2026)
 
 
 def cap_memory(env=None, var: str = "JARVIS_SIGNAL_LIVE_MAX_MB", default: int = MAX_MB_DEFAULT) -> int:

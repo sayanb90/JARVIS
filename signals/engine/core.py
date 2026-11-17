@@ -801,6 +801,9 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
         e.trigger = (0, 0)
     pub = bus.Publisher("signals-" + "-".join(underlyings), env=env) if bus.bus_enabled(env) else None
     src = BusSource(env=env) if bus.bus_enabled(env) else FileSource(Path(lake), day)
+    if isinstance(src, FileSource):
+        log.warning("engine v2 reads tick files, not the bus (JARVIS_TICK_BUS is not set): signals come 5 to 15 s late and a late start "
+                    "first reads the whole day's files (about 45 minutes on 16 Nov 2026).  Set JARVIS_TICK_BUS=1 in the crontab or .env.")
     until = pd.Timestamp(datetime.combine(day, datetime.strptime(until_utc, "%H:%M").time()))
     log.info("engine v2: %s; cadence groups %s; tick %d ms; source %s", list(underlyings),
              {c: len(v) for c, v in cadence_mod.groups(cad).items()}, tick_ms(env), type(src).__name__)

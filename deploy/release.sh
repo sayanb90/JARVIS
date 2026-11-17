@@ -14,7 +14,8 @@
 #      signals/cadence.toml) and JARVIS_SIGNAL_ENGINE=operators (engine v2; "runner" falls back to the first engine).  It never sets
 #      JARVIS_LIVE_ORDERS: real orders stay off until the owner sets it by hand.  A backup is made
 #      first.  DEPTH5=off leaves the depth switch out; STRIKES=15 widens further.
-#   4. crontab: the current one is saved to logs/crontab-backup-<time>.txt, then deploy/crontab is installed.  It adds the second F&O
+#   4. crontab: the current one is saved to logs/crontab-backup-<time>.txt, then deploy/crontab is installed, rendered for this repository's path (and with the engine
+#      settings: store, memory cap, bus).  It adds the second F&O
 #      feed connection, the daily NSE/RBI collectors, and the signals health check (11:40 UTC) and nightly run (12:15 UTC).
 #   5. restarts jarvis-feed and jarvis-viewer (new feed and book code; the F&O feed itself starts from cron each morning)
 #   6. the scheduler check, the signal input health check on the last session, and the signal list
@@ -62,8 +63,17 @@ $PY -m data_layer.envfile set $pairs || stop "could not update .env"
 
 step "4. crontab"
 crontab -l > "logs/crontab-backup-$(date -u +%Y%m%d-%H%M%S).txt" 2>/dev/null || true
-crontab deploy/crontab || stop "crontab install failed (the previous one is saved in logs/)"
+# deploy/crontab is written for /home/jarvis/JARVIS; installed as it is on another user's checkout every job failed at `cd $JARVIS`
+# (16 Nov 2026).  So it is rendered for this repository's path first, and the release stops if the old path is still in it.
+ROOT="$(pwd)"
+RENDERED="logs/crontab-rendered-$(date -u +%Y%m%d-%H%M%S).txt"
+sed "s#/home/jarvis/JARVIS#${ROOT}#g" deploy/crontab > "$RENDERED" || stop "could not render deploy/crontab"
+if [ "$ROOT" != "/home/jarvis/JARVIS" ] && grep -q "/home/jarvis" "$RENDERED"; then
+    stop "the rendered crontab still names /home/jarvis ($RENDERED): not installed"
+fi
+crontab "$RENDERED" || stop "crontab install failed (the previous one is saved in logs/)"
 crontab -l | grep -c -E '^[0-9*]' | xargs -I{} echo "{} cron lines installed"
+crontab -l | grep -E '^(JARVIS|PATH)' | sed 's/^/   installed: /'
 
 step "5. restart jarvis-feed and jarvis-viewer"
 systemctl --user restart jarvis-feed
