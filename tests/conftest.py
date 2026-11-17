@@ -139,3 +139,13 @@ def _isolated_env_file(tmp_path, monkeypatch):
     nowhere = tmp_path / "no-such.env"
     for mod, attr in ((lake, "ENV_FILE"), (feed, "ENV_FILE"), (auth, "ENV_PATH")):
         monkeypatch.setattr(mod, attr, nowhere)
+
+
+@pytest.fixture(autouse=True)
+def _restore_pandas_string_option():
+    """signals.engine.core.use_object_strings() sets a global pandas option (the engine processes want object strings); a test that starts the
+    engine or replays a day must not change the string type of the tests after it."""
+    import pandas as pd
+    before = pd.options.future.infer_string
+    yield
+    pd.options.future.infer_string = before

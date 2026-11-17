@@ -62,6 +62,19 @@ def engine_kind(env=None) -> str:
     return v
 
 
+def use_object_strings(env=None) -> bool:
+    """pandas 3 keeps text in Arrow arrays, and every selection, sort and concatenation of the engine's per-bucket frames (symbol, call/put and
+    the like) then goes through pyarrow.  Plain object strings, the pandas 2 behaviour, made a 1 s bucket close 36% faster on a synthetic
+    session with the live tick rate (144 to 92 ms; 17 Nov 2026).  JARVIS_OBJECT_STRINGS=0 turns it off.  Call it before the history loads."""
+    if (os.environ if env is None else env).get("JARVIS_OBJECT_STRINGS", "1").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        pd.options.future.infer_string = False
+        return True
+    except Exception:                                           # noqa: BLE001 -- a pandas without the option has object strings already
+        return False
+
+
 # ---------------------------------------------------------------------------------------------- ticks kept for tape windows
 class TickWindow:
     """This underlying's ticks of the last `keep` (plus each symbol's last earlier tick as an anchor), for operators that read ticks.
@@ -697,6 +710,10 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
     pending, last_write, last_timer, last_prov = [], _time.monotonic(), 0.0, 0.0
     share = {"poll": 0.0, "apply": 0.0, "advance": 0.0, "provisional": 0.0, "publish": 0.0, "write": 0.0}   # seconds in each part of the loop
     share_t0 = _time.monotonic()
+    prof = None                                                    # a sampling profile of this process in the log, every status interval
+    if os.environ.get("JARVIS_SIGNAL_PROFILE", "1").strip().lower() not in ("0", "false", "no", "off"):
+        from signals.engine.sampler import StackSampler
+        prof = StackSampler().start()
     last_status, start_mono, warned_missed = _time.monotonic(), _time.monotonic(), 0
     statuses: dict = {}
 
@@ -749,6 +766,9 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
                 log.info("status loop: " + " ".join(f"{k}={100 * v / wall:.0f}%" for k, v in share.items())
                          + f" (of {wall:.0f} s; poll is the idle wait)")
                 share, share_t0 = {k: 0.0 for k in share}, _time.monotonic()
+                if prof is not None:
+                    for line in prof.report():
+                        log.info(line)
                 for e in engines:
                     st = e.status(now, missed)
                     statuses[e.underlying] = st
@@ -786,6 +806,8 @@ def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, 
         allr = _concat(pending)
         for (u, b), g in allr.groupby(["underlying", "bucket"]):
             write_rows(g, store, prefix=f"engine-{u}-{ {'1s': '1s', '10s': '10s'}.get(b, '1m') }")
+    if prof is not None:
+        prof.stop()
     stats["late"] = sum(e.late for e in engines)
     stats["fallbacks"] = {e.underlying: e.fallbacks for e in engines}
     for e in engines:
@@ -821,6 +843,7 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
     from signals.engine.runner import IN_FEED, BusSource, FileSource
     from signals.live_runner import history_for, load_baselines, slot_volume_history
     env = os.environ if env is None else env
+    log.info("object strings (pandas): %s", use_object_strings(env))
     day = datetime.utcnow().date()
     ids = live_signal_ids()
     cad = cadence_mod.load(ids, env=env)
@@ -917,6 +940,7 @@ def replay_day(lake, store, underlying: str, day, cadence: dict, window: pd.Time
     from pathlib import Path
     from signals.framework import output_dir
     from signals.live_runner import history_for, load_baselines, slot_volume_history
+    use_object_strings()
     d = pd.Timestamp(day).normalize()
     groups = cadence_mod.groups(cadence)
     base = {c: load_baselines(Path(store), underlying, d.date(), ids, c) for c, ids in groups.items()}

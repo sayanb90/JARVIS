@@ -560,3 +560,46 @@ def test_write_rows_accepts_a_frame_and_a_list_of_dicts(tmp_path):
     assert write_rows(pd.DataFrame(rows), tmp_path, prefix="a") == 2 and write_rows(rows, tmp_path, prefix="b") == 2
     assert write_rows(pd.DataFrame(), tmp_path) == 0 and write_rows([], tmp_path) == 0
     assert len(read_live(tmp_path, pd.Timestamp("2026-11-17").date())) == 4
+
+
+def test_stack_sampler_reports_where_the_engine_thread_spends_its_time():
+    import time
+    from signals.engine.sampler import StackSampler
+
+    def inner_work():
+        t = time.perf_counter()
+        x = 0
+        while time.perf_counter() - t < 0.4:
+            x += sum(i * i for i in range(200))
+        return x
+
+    def outer():
+        return inner_work()
+
+    sm = StackSampler(interval=0.005).start()
+    outer()
+    lines = sm.report()
+    sm.stop()
+    text = "\n".join(lines)
+    assert lines[0].startswith("profile:") and "samples" in lines[0]
+    assert "inner_work" in text and "outer" in text                        # the cumulative line names the functions we were inside
+    assert sm.report(reset=False)[0] == "profile: no samples"              # the report reset the counters
+
+
+def test_engine_gives_the_same_rows_with_object_strings_as_with_arrow_strings(day):
+    """pandas 3 keeps text in Arrow arrays; the engine switches to object strings (use_object_strings) because every selection, sort and concat
+    of its per-bucket frames is then about a third faster.  The rows must not change."""
+    from signals.engine.core import replay, use_object_strings
+    hist, ticks, d = day
+    t = _cut(ticks, d, 4)
+    ids = {"book_pressure": "10s", "illiquidity": "10s", "spread_gate": "10s", "depth_features": "10s", "pcr_full": "1min", "skew": "1min"}
+    with pd.option_context("future.infer_string", True):
+        a = replay("NIFTY", trim(hist), t, ids, step="1min")
+    with pd.option_context("future.infer_string", False):
+        assert use_object_strings({}) is True
+        b = replay("NIFTY", trim(hist), t, ids, step="1min")
+    assert len(a) == len(b) > 0
+    pd.testing.assert_frame_equal(a.sort_values(["signal", "bucket", "known_at"] + [c for c in ("symbol", "expiry", "strike", "cp") if c in a.columns]).reset_index(drop=True).astype(object),
+                                  b.sort_values(["signal", "bucket", "known_at"] + [c for c in ("symbol", "expiry", "strike", "cp") if c in b.columns]).reset_index(drop=True).astype(object),
+                                  check_dtype=False, check_like=True, check_column_type=False, check_index_type=False)
+    assert use_object_strings({"JARVIS_OBJECT_STRINGS": "0"}) is False
