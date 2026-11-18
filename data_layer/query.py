@@ -19,6 +19,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import threading
+
 import duckdb
 import pandas as pd
 
@@ -28,7 +30,9 @@ from .lake import LAKE_DIR
 PE_MAX, ROIC_MIN, LT_DEBT_FCF_MAX, PFCF_MAX = 22.5, 0.09, 5.0, 20.0
 TRADING_DAYS = 250
 FO_REGEX = tick_store.FO_REGEX                  # lake symbols of futures and options
-VIEWER_MEMORY_GB = 2.0                         # DuckDB memory per query connection; beyond it sorts and joins spill to disk (SCRUM-129)
+VIEWER_MEMORY_GB = 0.6                         # DuckDB memory per query connection; beyond it sorts and joins spill to disk (SCRUM-129).  Was 2.0 until 18 Nov 2026: above the
+                                               # viewer service's MemoryMax (1500M), so a heavy day query was OOM-killed (the viewer restarted 7 times in 25 minutes)
+VIEWER_QUERIES = 2                             # queries running at once in the viewer process (each connection has its own memory limit)
 
 _NULLABLE = {"oi": "DOUBLE", "bid": "DOUBLE", "ask": "DOUBLE", "bid_qty": "DOUBLE", "ask_qty": "DOUBLE", "vol_today": "DOUBLE"}   # as the feed writes them
 
@@ -57,6 +61,9 @@ def _cached(key: tuple, compute):
     return _CACHE[key]
 
 
+_QUERY_SLOTS = threading.BoundedSemaphore(VIEWER_QUERIES)
+
+
 def _memory_limit() -> str:
     try:
         gb = float(os.environ.get("JARVIS_VIEWER_MEMORY_GB") or VIEWER_MEMORY_GB)
@@ -70,6 +77,7 @@ class Lake:
         self.dir = Path(lake_dir) if lake_dir else LAKE_DIR
         self.con = duckdb.connect()
         self.con.execute(f"SET memory_limit='{_memory_limit()}'")
+        self.con.execute("SET threads=2")
         self.con.execute(f"SET temp_directory='{Path(tempfile.gettempdir()) / 'jarvis-viewer-spill'}'")
         for name in ("income_statement", "balance_sheet", "cash_flow", "ratios", "pillar_metrics"):
             f = self.dir / "fundamentals" / f"{name}.parquet"
@@ -159,7 +167,8 @@ class Lake:
 
     # -- generic ------------------------------------------------------------
     def sql(self, query: str, params: list | None = None) -> pd.DataFrame:
-        return self.con.execute(query, params or []).df()
+        with _QUERY_SLOTS:                              # at most VIEWER_QUERIES at once: every connection may use its whole memory limit
+            return self.con.execute(query, params or []).df()
 
     def tables(self) -> list[str]:
         return [r[0] for r in self.con.execute("SHOW TABLES").fetchall()]

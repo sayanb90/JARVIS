@@ -287,3 +287,16 @@ def test_the_loader_stops_at_a_memory_guard_instead_of_being_killed(store, monke
     s2 = signals_view.summary(store, "NIFTY", DAY.date(), NOW)
     assert s2["load"]["error"] is None and len(s2["signals"]) == 5                          # the next refresh reads the rest
     signals_store.forget()
+
+
+def test_the_viewers_duckdb_limits_fit_inside_its_service_cap(tmp_path, monkeypatch):
+    """18 Nov 2026: each query connection was allowed 2 GB while the service is capped at 1.5 GB, so one heavy day query got the viewer OOM-killed (seven
+    times in 25 minutes).  Now 0.6 GB a connection, two queries at once, two threads; JARVIS_VIEWER_MEMORY_GB still overrides."""
+    from data_layer import query
+    monkeypatch.delenv("JARVIS_VIEWER_MEMORY_GB", raising=False)
+    assert query.VIEWER_MEMORY_GB * query.VIEWER_QUERIES < 1.5 and query._memory_limit() == "0.6GB"
+    q = query.Lake(tmp_path)
+    assert q.con.execute("SELECT current_setting('threads')").fetchone()[0] == 2
+    assert q.con.execute("SELECT current_setting('memory_limit')").fetchone()[0].startswith("572.")          # 0.6 GB as DuckDB prints it
+    monkeypatch.setenv("JARVIS_VIEWER_MEMORY_GB", "1.5")
+    assert query._memory_limit() == "1.5GB"

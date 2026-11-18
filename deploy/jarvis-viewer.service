@@ -11,8 +11,10 @@ EnvironmentFile=/home/jarvis/JARVIS/.env
 ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m webapp --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
-# the viewer must never starve the collector: cap its memory
-MemoryMax=1500M
+# the viewer must never starve the collector: cap its memory.  3G (1.5G until 18 Nov 2026, when heavy queries got the viewer OOM-killed in a loop; DuckDB's
+# own limit per connection is JARVIS_VIEWER_MEMORY_GB, 0.6) with a soft limit that throttles it first; the box has 16 GB and the feeds and engines use 3-5.
+MemoryHigh=1800M
+MemoryMax=3G
 # Jobs started from the Jobs tab (JARVIS_JOB_CONTROL=1, SCRUM-204) are children of the viewer: a restart of the viewer must not kill
 # them.  They still count against MemoryMax above, so a heavy job (the end-of-day compaction needs several GB) is better run from cron.
 KillMode=process
