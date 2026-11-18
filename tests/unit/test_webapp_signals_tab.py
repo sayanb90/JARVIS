@@ -340,3 +340,25 @@ def test_a_busy_viewer_answers_503_quickly_and_the_direct_timing_mode_reports_ea
     assert perf.main(["--direct", "--limit", "120", "--report", str(tmp_path / "direct.txt")]) == 0
     text = (tmp_path / "direct.txt").read_text()
     assert "direct timings" in text and "F&O chain" in text and "Signals tab: the first read" in text and "peak MB" in text
+
+
+def test_the_market_overview_in_batches_gives_the_same_rows_and_the_direct_report_survives_noise(tmp_path, monkeypatch):
+    """18 Nov 2026: the overview built the windows over every equity's second bars at once (25-110 s, 2-3 GB of RSS).  It now runs OVERVIEW_BATCH symbols at a
+    time; a row depends on one symbol only, so the result is the same whatever the batch size."""
+    from data_layer import query
+    write_fake_lake(tmp_path)
+    from tests.unit.test_signal_ops import DAY as TICK_DAY
+    day = str(TICK_DAY)
+    monkeypatch.setattr(query.Lake, "OVERVIEW_BATCH", 10_000)
+    whole = query.Lake(tmp_path).day_overview(day)
+    monkeypatch.setattr(query.Lake, "OVERVIEW_BATCH", 3)
+    batched = query.Lake(tmp_path).day_overview(day)
+    assert len(whole) > 3
+    pd.testing.assert_frame_equal(batched.reset_index(drop=True), whole.reset_index(drop=True))
+    # a heavy call that prints a progress bar before the marker, and a result line glued to it, must still be read
+    monkeypatch.setattr("webapp.perf.DIRECT_CALLS", [("noisy", "import sys\nsys.stdout.write('50% |==|\\r100% |====| (00:00:01)')\nrows = 7")])
+    monkeypatch.setenv("JARVIS_LAKE", str(tmp_path)); monkeypatch.setenv("JARVIS_SIGNAL_STORE", str(tmp_path / "store"))
+    from webapp import perf
+    assert perf.main(["--direct", "--date", day, "--limit", "60", "--report", str(tmp_path / "d.txt")]) == 0
+    text = (tmp_path / "d.txt").read_text()
+    assert "noisy" in text and "7" in text and "failed" not in text

@@ -86,6 +86,7 @@ class Lake:
         self._pending: dict = {}                                      # view name -> SQL, or a function that builds it
         self.con.execute(f"SET memory_limit='{_memory_limit()}'")
         self.con.execute("SET threads=2")
+        self.con.execute("SET enable_progress_bar=false")                        # it prints \\r-driven bars to stdout in a terminal
         self.con.execute(f"SET temp_directory='{Path(tempfile.gettempdir()) / 'jarvis-viewer-spill'}'")
         for name in ("income_statement", "balance_sheet", "cash_flow", "ratios", "pillar_metrics"):
             f = self.dir / "fundamentals" / f"{name}.parquet"
@@ -638,22 +639,34 @@ class Lake:
                 "futures": fut_rows, "chain": chain, "pcr": pcr,
                 "total_call_oi": total_call_oi or None, "total_put_oi": total_put_oi or None}
 
+    OVERVIEW_BATCH = 200                          # symbols per query: a window over every equity's second bars at once held 2.1-2.7 GB of RSS (12 M ticks)
+
     def day_overview(self, day: str, interval: str = "1s", equities_only: bool = False) -> pd.DataFrame:
         """
         One row per instrument for `day`: bars, volume, vwap, open/high/low/close, return %, average and
         median spread in bps, realised volatility % (annualised), average book sizes.  `equities_only` leaves the futures and options
         out before any bar is built (they are most of the rows, and the Market tab does not show them).
+
+        From ticks the instruments are done OVERVIEW_BATCH at a time (a row of the result depends on one symbol only, so the rows are the same):
+        the windows over the second bars of all 2,000 equities at once took 25-110 s and 2-3 GB, whatever DuckDB's memory limit said.
         """
         files = self._tick_files(day, "eq" if equities_only else None)         # only the stocks' file: the options are not even opened
         if interval == "1s" and files:
             where = (f"NOT regexp_matches(symbol, '{FO_REGEX}') AND symbol NOT LIKE 'NSE_INDEX:%' AND symbol NOT LIKE 'BSE_INDEX:%'") if equities_only else None
-            raw_cte = f"raw AS {self._ticks_bars_sql(files, where=where)}"
-        else:
-            folder = self.dir / "bars" / f"interval={interval}" / f"date={day}"
-            if not any(folder.glob("*.parquet")):
-                return pd.DataFrame()
-            raw_cte = (f"raw AS (SELECT * FROM read_parquet('{folder}/*.parquet', union_by_name=true, filename=true) "
-                      f"QUALIFY row_number() OVER (PARTITION BY symbol, ts ORDER BY filename DESC) = 1)")
+            names = sorted(self.sql(f"SELECT DISTINCT symbol FROM {_rp(files)} WHERE ltp IS NOT NULL" + (f" AND {where}" if where else ""))["symbol"])
+            parts = []
+            for i in range(0, len(names), self.OVERVIEW_BATCH):
+                chunk = ", ".join("'" + x.replace("'", "''") + "'" for x in names[i:i + self.OVERVIEW_BATCH])
+                w = f"symbol IN ({chunk})" + (f" AND {where}" if where else "")
+                parts.append(self._overview_sql(f"raw AS {self._ticks_bars_sql(files, where=w)}"))
+            return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+        folder = self.dir / "bars" / f"interval={interval}" / f"date={day}"
+        if not any(folder.glob("*.parquet")):
+            return pd.DataFrame()
+        return self._overview_sql(f"raw AS (SELECT * FROM read_parquet('{folder}/*.parquet', union_by_name=true, filename=true) "
+                                  f"QUALIFY row_number() OVER (PARTITION BY symbol, ts ORDER BY filename DESC) = 1)")
+
+    def _overview_sql(self, raw_cte: str) -> pd.DataFrame:
         return self.sql(f"""
             WITH {raw_cte},
             r AS (
