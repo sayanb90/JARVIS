@@ -398,9 +398,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         from signals.live_runner import cap_memory
         cap_memory(var="JARVIS_SIGNAL_NIGHTLY_MAX_MB", default=10240)
         from signals import anchors
-        return anchors.main([x for kv in (("--underlying", a.underlying), ("--day", str(a.day) if a.day else None),
-                                          ("--lake", str(a.lake) if a.lake else None), ("--root", str(a.root) if a.root else None))
-                             for x in kv if x is not None])
+        opts = (("--underlying", a.underlying), ("--day", a.day), ("--lake", a.lake), ("--root", a.root))
+        return anchors.main([x for flag, v in opts if v is not None for x in (flag, str(v))])      # a flag only with its value: omitted options are dropped as pairs
     if a.cmd == "live":
         import logging
         from data_layer.lake import ENV_FILE, LAKE_DIR

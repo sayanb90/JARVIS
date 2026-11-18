@@ -284,3 +284,21 @@ def test_anchors_job_saves_what_an_engine_loads_and_the_crontab_runs_it_before_t
     at = next(l for l in lines if "signals anchors" in l)
     assert (int(at.split()[1]), int(at.split()[0])) < (3, 44) and (int(at.split()[1]), int(at.split()[0])) > (3, 25)
     assert hasattr(m, "main")
+
+
+def test_anchors_command_line_works_with_and_without_the_optional_arguments(lake, tmp_path, monkeypatch):
+    """18 Nov 2026 (VPS): `python -m signals anchors --underlying NIFTY` failed with "--day: expected one argument" because an omitted option left its
+    flag in the argument list without a value; the cron line passes no options at all.  Through the real command line, with and without them."""
+    import signals.__main__ as m
+    from signals import anchors as an
+    seen = []
+    monkeypatch.setattr(an, "main", lambda argv=None: seen.append(list(argv)) or 0)
+    assert m.main(["anchors"]) == 0
+    assert m.main(["anchors", "--underlying", "NIFTY", "--day", "2026-11-18"]) == 0
+    assert m.main(["anchors", "--underlying", "BANKNIFTY", "--lake", str(lake), "--root", str(tmp_path), "--day", "2026-11-18"]) == 0
+    assert seen[0] == ["--underlying", "NIFTY,BANKNIFTY"]                  # the defaults; no orphaned flags
+    assert seen[1] == ["--underlying", "NIFTY", "--day", "2026-11-18"]
+    assert seen[2] == ["--underlying", "BANKNIFTY", "--day", "2026-11-18", "--lake", str(lake), "--root", str(tmp_path)]
+    monkeypatch.undo()
+    out = an.main(["--underlying", "NIFTY", "--day", str(DAY + pd.Timedelta(days=1)), "--lake", str(lake), "--root", str(tmp_path)])      # the module itself, end to end
+    assert out == 0 and (tmp_path / "anchors").exists()
