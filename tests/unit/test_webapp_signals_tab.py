@@ -300,3 +300,21 @@ def test_the_viewers_duckdb_limits_fit_inside_its_service_cap(tmp_path, monkeypa
     assert q.con.execute("SELECT current_setting('memory_limit')").fetchone()[0].startswith("572.")          # 0.6 GB as DuckDB prints it
     monkeypatch.setenv("JARVIS_VIEWER_MEMORY_GB", "1.5")
     assert query._memory_limit() == "1.5GB"
+
+
+def test_lake_opens_without_reading_every_tick_file_and_creates_the_bar_views_when_a_query_names_them(tmp_path):
+    """18 Nov 2026: every viewer request opened a Lake, which created the bars_* views over the footers of every parquet file of every day (about 1 s and
+    200 MB held per connection for 12,000 tick files); a page load made several at once and the viewer was OOM-killed.  The views now appear when a
+    query names them; the results are the same."""
+    from data_layer import query
+    write_fake_lake(tmp_path)
+    q = query.Lake(tmp_path)
+    assert q._pending and "bars_1s" in q._pending                                   # nothing bound yet
+    assert q.bar_days("1s") and q.candle_days("1s") is not None                       # listings need no view
+    assert q._pending and "bars_1s" in q._pending
+    n = q.sql("SELECT count(*) AS n FROM bars_1s")["n"][0]                            # naming the view creates it
+    assert n > 0 and "bars_1s" not in q._pending
+    assert "bars_1s" in q.tables()
+    eager = query.Lake(tmp_path)
+    eager._views_for("SHOW TABLES")
+    assert not eager._pending and set(eager.tables()) == set(q.tables())
