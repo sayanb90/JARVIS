@@ -126,20 +126,20 @@ class TickWindow:
         self._small = None
         m = pd.concat(moved, ignore_index=True) if len(moved) > 1 else moved[0]
         last = pd.concat([self.big_last, m], ignore_index=True) if len(self.big_last) else m
-        self.big_last = last.groupby("symbol").tail(1)
+        self.big_last = last.drop_duplicates("symbol", keep="last")
         mx = m["fts"].max()
         self.big_max = mx if self.big_max is None else max(self.big_max, mx)
         self.big = pd.concat([self.big, m], ignore_index=True) if len(self.big) else m
         old = self.big["fts"] < now - self.keep
         if old.any():
-            anchors = self.big[old].groupby("symbol").tail(1)
+            anchors = self.big[old].drop_duplicates("symbol", keep="last")
             self.big = pd.concat([anchors, self.big[~old]], ignore_index=True)
 
     def window(self, lo: pd.Timestamp, upto: pd.Timestamp) -> pd.DataFrame:
         small = self._small_df()
         if self.big_max is not None and self.big_max < lo:
             self.fast += 1
-            before = small[small["fts"] < lo].groupby("symbol").tail(1) if len(small) else small
+            before = small[small["fts"] < lo].drop_duplicates("symbol", keep="last") if len(small) else small
             anchors = self.big_last[~self.big_last["symbol"].isin(before["symbol"])] if len(before) else self.big_last
             inside = small[(small["fts"] >= lo) & (small["fts"] < upto)] if len(small) else small
             parts = [x for x in (anchors, before, inside) if len(x)]
@@ -149,7 +149,7 @@ class TickWindow:
         if not len(t):
             return t
         keep = (t["fts"] >= lo) & (t["fts"] < upto)
-        anchors = t[t["fts"] < lo].groupby("symbol").tail(1)
+        anchors = t[t["fts"] < lo].drop_duplicates("symbol", keep="last")
         return pd.concat([anchors, t[keep]], ignore_index=True)
 
 
@@ -299,6 +299,8 @@ class OperatorEngine:
         self.trigger = (0, 0)                           # (vendor time, receive time) of the tick that closed the last buckets
         self.last_tick_mono: Optional[float] = None
         self.errors = 0                                 # batches or timer steps that raised (logged, the session continues)
+        self._rank_index = None                         # contracts in output order (expiry, strike, call before put, symbol), built on first use
+        self.shadow = None                              # ShadowParity when JARVIS_SHADOW_PARITY=1 (set by start())
         self.reads_ticks = self._reads_ticks()          # does any signal of this process read ticks (the tape operators, a signal with ticks_fo)?
 
     def _reads_ticks(self) -> bool:
@@ -377,6 +379,8 @@ class OperatorEngine:
                "errors": self.errors,
                "rows": int(self.stats.get("rows", 0)), "lag_s": round((now.value - self.newest) / 1e9, 2) if self.newest else None,
                "rss_mb": round(rss), "fallbacks": [list(f[:2]) + [len(f[2]), f[3]] for f in self.fallbacks], "groups": {}}
+        if self.shadow is not None:
+            out["parity"] = self.shadow.line()
         for c, g in self.groups.items():
             iv = g.interval
             out["groups"][c] = {"signals": len(g.ids), "buckets": g.buckets, "closed": iv["n"],
@@ -550,14 +554,18 @@ class OperatorEngine:
         ts = pd.Timestamp(b)
         upto = ts + tdd
         out = []
+        rows1: list = []                                   # one-row native outputs as dicts, built into one frame at the end
         if g.natives is not None:
             n0 = _time.perf_counter()
             tp = operators.TapeTable(self.ticks.window(ts, upto), g.natives.meta, b, g.td)
-            res = g.natives.run(tp, chain_live=bk.chain("live") if g.needs_live else None, book=self.session.options)
-            for sid, df in res.items():
-                part = self._emit(g, sid, df, upto)
-                if part is not None:
-                    out.append(part)
+            cl = bk.chain("live") if g.needs_live else None
+            res = g.natives.run(tp, chain_live=cl, book=self.session.options)
+            if self.shadow is not None:                       # the reference implementations on the same ticks (signals/engine/shadow.py)
+                try:
+                    self.shadow.check(g, tp, cl, self.session.options, res)
+                except Exception:                             # noqa: BLE001 -- a monitor must never stop the engine
+                    log.exception("shadow parity check failed")
+            self._collect(g, res, upto, out, rows1)
             g.timings["native"] = g.timings.get("native", 0.0) + _time.perf_counter() - n0
         at = None
         if g.needs_chain or g.cnatives is not None:
@@ -580,17 +588,14 @@ class OperatorEngine:
             fut = self.session.bars.front_bar(g.cadence, b, self.session.day)
             t_fut = ((pd.Timestamp(fut[1]).value + EXPIRY_NS - (b + g.td)) / YEAR_NS) if fut[1] is not None else math.nan
             res = g.cnatives.run(b, bk.chain("bar"), bk.chain("live") if g.cnatives.needs_live else None, at, (fut[0], t_fut), g.since)
-            for sid, df in res.items():
-                part = self._emit(g, sid, df, upto)
-                if part is not None:
-                    out.append(part)
+            self._collect(g, res, upto, out, rows1)
             g.timings["chain_native"] = g.timings.get("chain_native", 0.0) + _time.perf_counter() - t1
             t1 = _time.perf_counter()
         if not g.windows:                                  # every signal of the group is native: no frames, no shared inputs
             g.since = upto
             g.buckets += 1
             g.timings["total"] = g.timings.get("total", 0.0) + _time.perf_counter() - t0
-            return _concat(out)
+            return _concat(out + ([pd.DataFrame(rows1)] if rows1 else []))
         today = self._raw_today(g)
         shared = self._shared(g, today)
         t2 = _time.perf_counter()
@@ -636,7 +641,7 @@ class OperatorEngine:
         g.since = upto
         g.buckets += 1
         g.timings["total"] = g.timings.get("total", 0.0) + _time.perf_counter() - t0
-        return _concat(out)
+        return _concat(out + ([pd.DataFrame(rows1)] if rows1 else []))
 
 
 def _finish(self, g: Group, sid: str, part: pd.DataFrame) -> pd.DataFrame:
@@ -654,7 +659,7 @@ def _finish(self, g: Group, sid: str, part: pd.DataFrame) -> pd.DataFrame:
 OperatorEngine._finish_rows = _finish
 
 
-def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timestamp) -> Optional[pd.DataFrame]:
+def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timestamp, as_row: bool = False):
     """A native operator's output as final rows: normalise, select the rows first known in (since, upto], add signal, bucket and underlying.
     Most signals give one row per bucket: that is built once as the final frame (the three steps copied it three times, about 0.4 ms of 1 ms per
     signal and bucket, 27 signals a second); several rows, a baseline to apply or an own `signal` column take the general path."""
@@ -666,17 +671,72 @@ def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timesta
             since, day = g.since, self.day
             if not ((ka <= upto) and ((ka > since) if since is not None else (ka >= day))):
                 return None
+            if as_row:                                    # one dict: the caller builds one frame for all the one-row signals of the close
+                row = {"signal": sid, "underlying": self.underlying, key: df[key].iat[0], "known_at": ka}
+                for c in df.columns:
+                    if c not in ("underlying", key, "known_at"):
+                        row[c] = df[c].iat[0]
+                row["bucket"] = g.cadence
+                return row
             data = {"signal": sid, "underlying": self.underlying, key: df[key].array, "known_at": df["known_at"].array}
             for c in df.columns:
                 if c not in ("underlying", key, "known_at"):
                     data[c] = df[c].array
             data["bucket"] = g.cadence
             return pd.DataFrame(data, index=pd.RangeIndex(1))
+    if (df is not None and len(df) > 1 and {"symbol", "expiry", "strike", "cp", "known_at"} <= set(df.columns) and "signal" not in df.columns
+            and (self.baselines.get(g.cadence) or {}).get(sid) is None and pd.api.types.is_datetime64_any_dtype(df["known_at"])):
+        key = "ts" if spec.grid == "1m" else "date"
+        fast = self._emit_many(g, sid, df, upto, key) if key in df.columns else False
+        if fast is not False:
+            return fast
     part = _select(normalise_output(spec, df, self.underlying), g.since, upto, self.day, own=True)
     return self._finish_rows(g, sid, part) if part is not None else None
 
 
+def _emit_many(self, g: Group, sid: str, df: pd.DataFrame, upto: pd.Timestamp, key: str):
+    """A per-contract native output (one known_at for all rows) as final rows: the order (expiry, strike, call before put, symbol) is the rank of each
+    contract in a table sorted once, so no per-bucket sort of text and dates.  False when the frame is not of that shape (the general path runs)."""
+    ka = df["known_at"].to_numpy()
+    if not (ka == ka[0]).all() or (key == "ts" and not (df[key].to_numpy() == df[key].to_numpy()[0]).all()):
+        return False
+    if self._rank_index is None:
+        m = pd.DataFrame([(s, v[2], v[1], "C" if v[0] == "CE" else "P" if v[0] == "PE" else "F") for s, v in self._meta.items()],
+                         columns=["symbol", "expiry", "strike", "cp"])
+        self._rank_index = pd.Index(m.sort_values(["expiry", "strike", "cp", "symbol"], kind="stable")["symbol"].to_numpy())
+    rank = self._rank_index.get_indexer(df["symbol"].astype(str).to_numpy())
+    if (rank < 0).any():
+        return False
+    kt = pd.Timestamp(ka[0])
+    if not ((kt <= upto) and ((kt > g.since) if g.since is not None else (kt >= self.day))):
+        return None
+    o = np.argsort(rank, kind="stable")
+    ordered = bool((o == np.arange(len(o))).all())
+    data = {"signal": sid, "underlying": self.underlying, key: df[key].array, "known_at": df["known_at"].array}
+    for c in df.columns:
+        if c not in ("underlying", key, "known_at"):
+            data[c] = df[c].array
+    if not ordered:
+        data = {k: (v.take(o) if hasattr(v, "take") else v) for k, v in data.items()}
+    data["bucket"] = g.cadence
+    return pd.DataFrame(data, index=pd.RangeIndex(len(o)))
+
+
+OperatorEngine._emit_many = _emit_many
 OperatorEngine._emit = _emit
+
+
+def _collect(self, g: Group, res: dict, upto: pd.Timestamp, out: list, rows1: list) -> None:
+    """The final rows of a native operators' results: one-row outputs as dicts into `rows1`, others as frames into `out`."""
+    for sid, df in res.items():
+        part = self._emit(g, sid, df, upto, as_row=True)
+        if isinstance(part, dict):
+            rows1.append(part)
+        elif part is not None:
+            out.append(part)
+
+
+OperatorEngine._collect = _collect
 
 
 def _select(df: Optional[pd.DataFrame], since: Optional[pd.Timestamp], upto: pd.Timestamp, day: pd.Timestamp, own: bool = False) -> Optional[pd.DataFrame]:
@@ -695,6 +755,8 @@ def _select(df: Optional[pd.DataFrame], since: Optional[pd.Timestamp], upto: pd.
 
 def _concat(parts: Iterable[pd.DataFrame]) -> pd.DataFrame:
     parts = [p for p in parts if p is not None and len(p)]
+    if len(parts) == 1:                                   # nothing to join: the rows of one close pass up through four levels (close, advance, loop, write)
+        return parts[0] if isinstance(parts[0].index, pd.RangeIndex) else parts[0].reset_index(drop=True)
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
@@ -760,7 +822,7 @@ def status_line(st: dict) -> str:
     fb = f" FALLBACKS={st['fallbacks']}" if st["fallbacks"] else ""
     return (f"status {st['underlying']}: ticks={st['ticks']} late={st['late']} missed_on_bus={st['missed_on_bus']} "
             f"errors={st.get('errors', 0)} rows={st['rows']} "
-            f"lag={st['lag_s']}s rss={st['rss_mb']}MB {gs}{fb}")
+            f"lag={st['lag_s']}s rss={st['rss_mb']}MB {gs}{fb}" + (f" {st['parity']}" if st.get("parity") else ""))
 
 
 def run(engines: list, source, until: pd.Timestamp, publisher=None, store=None, tick_ms: Optional[int] = None,
@@ -894,6 +956,7 @@ def write_heartbeat(path) -> callable:
                                                           "ticks": int(e.stats.get("ticks", 0)), "errors": e.errors,
                                                           "lag_s": round((now.value - e.newest) / 1e9, 2) if e.newest else None,
                                                           "fallbacks": [list(f[:2]) + [len(f[2]), f[3]] for f in e.fallbacks],
+                                                          "parity": e.shadow.report() if e.shadow is not None else None,
                                                           "last_status": statuses.get(e.underlying)} for e in engines}}
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(doc))
@@ -940,8 +1003,13 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
         base = {c: load_baselines(Path(store), u, day, s, c) for c, s in groups.items()}
         engines.append(OperatorEngine(u, hist, cad, day, baselines=base, volume_slot_daily=slot_volume_history(Path(lake), u, day),
                                       reorder_ms=reorder))
+    from signals.engine import shadow as shadow_mod
     for e in engines:
         e.trigger = (0, 0)
+        if shadow_mod.enabled(env):
+            e.shadow = shadow_mod.ShadowParity(e.underlying, shadow_mod.rtol(env))
+    if shadow_mod.enabled(env):
+        log.info("shadow parity ON: the reference operators run next to the vectorised ones (JARVIS_SHADOW_PARITY=0 turns it off)")
     pub = bus.Publisher("signals-" + "-".join(underlyings) + tag, env=env) if bus.bus_enabled(env) else None
     src = BusSource(env=env) if bus.bus_enabled(env) else FileSource(Path(lake), day)
     if isinstance(src, FileSource):
