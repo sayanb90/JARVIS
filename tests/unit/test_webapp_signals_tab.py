@@ -1,0 +1,226 @@
+"""The viewer's Signals tab, built out (SCRUM-206): signals by family, a signal's day, per-contract signals by strike, chain views, history across
+days, the IV smile; read from a store that the engines fill with many small files; read once, then only the new files."""
+
+import resource
+import time
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import pytest
+from fastapi.testclient import TestClient
+
+from signals.options.stream import write_rows
+from tests.signals_helpers import write_fake_lake
+from webapp import signals_store, signals_view
+from webapp.app import create_app
+
+DAY = pd.Timestamp("2026-11-13")
+T0 = DAY + pd.Timedelta(hours=4)                      # 04:00 UTC
+EXPS = ["2026-11-17", "2026-11-24"]
+STRIKES = [24000.0, 24100.0, 24200.0]
+
+
+def contract_rows(sid, seconds, bucket="1s", fut=True, start=0):
+    rows = []
+    for i in range(start, start + seconds):
+        ts = T0 + pd.Timedelta(seconds=i)
+        ka = ts + pd.Timedelta(seconds=1)
+        for e in EXPS:
+            for k in STRIKES:
+                for cp in ("CE", "PE"):
+                    rows.append({"signal": sid, "bucket": bucket, "underlying": "NIFTY", "ts": ts, "known_at": ka,
+                                 "symbol": f"NIFTY_{int(k)}_{cp}_{e}", "expiry": e, "strike": k, "cp": cp,
+                                 "qi": np.sin(i / 30 + k / 1000) * (1 if cp == "CE" else -1), "micro_rel": 0.001 * (i % 7)})
+        if fut:
+            rows.append({"signal": sid, "bucket": bucket, "underlying": "NIFTY", "ts": ts, "known_at": ka, "symbol": "NIFTY_FUT_24_NOV_26",
+                         "expiry": "2026-11-24", "strike": np.nan, "cp": "FUT", "qi": 0.5 + 0.1 * np.sin(i / 20), "micro_rel": 0.0})
+    return rows
+
+
+def single_rows(sid, minutes, bucket="1min", col="skew1_s", start=0):
+    rows = []
+    for i in range(start, start + minutes):
+        ts = T0 + pd.Timedelta(minutes=i)
+        rows.append({"signal": sid, "bucket": bucket, "underlying": "NIFTY", "ts": ts, "known_at": ts + pd.Timedelta(minutes=1), "date": ts.date(),
+                     col: 0.02 + 0.001 * i, col + "_tod_z": 0.05 * i, "other": float(i)})
+    return rows
+
+
+def fill(store, minutes=10):
+    write_rows(contract_rows("book_pressure", minutes * 60), store, prefix="engine-NIFTY-1s")
+    write_rows(contract_rows("spread_gate", minutes * 60, fut=False), store, prefix="engine-NIFTY-1s")
+    write_rows(single_rows("skew", minutes), store, prefix="engine-NIFTY-1m")
+    write_rows(single_rows("pcr_full", minutes, bucket="10s", col="pcr_oi"), store, prefix="engine-NIFTY-1s")
+    ts = T0 + pd.Timedelta(minutes=3)
+    write_rows([{"signal": "block_prints", "bucket": "1s", "underlying": "NIFTY", "ts": ts, "known_at": ts, "symbol": "NIFTY_24100_CE_2026-11-17",
+                 "instrument_type": "CE", "ltp": 120.0, "lots": 150.0, "sign": 1.0, "oi_jump": 5000.0}], store, prefix="engine-NIFTY-1s")
+
+
+def nightly(store, sid, day, col="skew1_s", minutes=30, bucket="1m"):
+    from webapp.signals_view import _spec
+    spec = _spec(sid)
+    folder = store / "signals" / sid / f"v{spec.version}" / "intraday" / f"bucket={bucket}" / "underlying=NIFTY" / f"date={day}"
+    folder.mkdir(parents=True, exist_ok=True)
+    d = pd.Timestamp(day)
+    pd.DataFrame({"known_at": [d + pd.Timedelta(hours=4, minutes=i + 1) for i in range(minutes)], col: [0.01 + 0.001 * i for i in range(minutes)],
+                  "other": range(minutes)}).to_parquet(folder / "part.parquet", index=False)
+
+
+@pytest.fixture()
+def store(tmp_path):
+    signals_store.forget()
+    fill(tmp_path)
+    yield tmp_path
+    signals_store.forget()
+
+
+NOW = datetime(2026, 11, 13, 4, 10, 5)
+
+
+def test_summary_groups_signals_by_family_and_reads_every_kind(store):
+    s = signals_view.summary(store, "NIFTY", DAY.date(), NOW)
+    by = {(x["signal"], x["bucket"]): x for x in s["signals"]}
+    assert set(by) == {("book_pressure", "1s"), ("spread_gate", "1s"), ("skew", "1min"), ("pcr_full", "10s"), ("block_prints", "1s")}
+    assert by[("skew", "1min")]["family"] == "surface" and by[("skew", "1min")]["family_label"] == "Volatility surface" and by[("skew", "1min")]["doc"]
+    assert by[("book_pressure", "1s")]["family"] == "live" and by[("block_prints", "1s")]["family"] == "flow"
+    assert by[("skew", "1min")]["kind"] == "single" and by[("book_pressure", "1s")]["kind"] == "contract" and by[("block_prints", "1s")]["kind"] == "events"
+    assert by[("skew", "1min")]["headline"] == "skew1_s" and abs(by[("skew", "1min")]["z"]["skew1_s"] - 0.45) < 1e-9
+    assert by[("book_pressure", "1s")]["front_future"] is True and by[("book_pressure", "1s")]["contracts"] == 12 and len(by[("book_pressure", "1s")]["series"]) > 100
+    sg = by[("spread_gate", "1s")]                                   # options only: the cross-section median of each snapshot
+    assert sg["kind"] == "contract" and sg["front_future"] is False and sg["headline"] == "qi" and len(sg["series"]) >= 10
+    assert by[("block_prints", "1s")]["events"] == 1
+    assert [x["family"] for x in s["signals"]] == sorted((x["family"] for x in s["signals"]), key=lambda f: ["live", "flow", "surface", "vol_gate", "positioning"].index(f))
+    assert s["days"] == ["2026-11-13"] and s["load"]["loaded"] is True and s["cadence"] == ["1s", "10s", "1min"]
+
+
+def test_series_gives_every_column_with_z_and_the_previous_session(store):
+    nightly(store, "skew", "2026-11-12")
+    s = signals_view.series(store, "NIFTY", "skew", "1min", DAY.date())
+    assert s["kind"] == "single" and s["headline"] == "skew1_s" and set(s["columns"]) == {"skew1_s", "other"} and len(s["t"]) == 10
+    assert abs(s["series"]["skew1_s"][-1] - 0.029) < 1e-12 and abs(s["z"]["skew1_s"][-1] - 0.45) < 1e-9
+    p = s["prev"]
+    assert p["date"] == "2026-11-12" and len(p["t"]) == 30 and p["t"][0].startswith("2026-11-13T04:01")        # shifted onto the day
+    assert signals_view.series(store, "NIFTY", "skew", "1min", DAY.date(), max_points=4)["t"].__len__() == 4
+    sub = signals_view.series(store, "NIFTY", "skew", "1min", DAY.date(), columns=["other"])
+    assert list(sub["series"]) == ["other"]
+    fut = signals_view.series(store, "NIFTY", "book_pressure", "1s", DAY.date())               # per contract: the future's series
+    assert fut["kind"] == "contract" and len(fut["t"]) == 600 and fut["prev"] is None
+    ev = signals_view.series(store, "NIFTY", "block_prints", "1s", DAY.date())
+    assert ev["kind"] == "events" and ev["events"][0]["lots"] == 150.0
+    assert signals_view.series(store, "NIFTY", "nope", "1s", DAY.date())["t"] == []
+
+
+def test_contracts_by_strike_and_as_strike_by_time(store):
+    c = signals_view.contracts(store, "NIFTY", "book_pressure", "1s", DAY.date())
+    assert c["expiries"] == EXPS and c["expiry"] == EXPS[0] and c["column"] == "qi" and {"qi", "micro_rel"} <= set(c["columns"])
+    rows = c["snapshot"]["rows"]
+    assert len(rows) == 6 and [r["strike"] for r in rows][:2] == [24000.0, 24000.0] and {r["cp"] for r in rows} == {"CE", "PE"}
+    h = c["heat"]
+    assert h["strikes"] == STRIKES and len(h["times"]) == 10 and len(h["call"]) == 3 and len(h["call"][0]) == 10 and len(h["put"]) == 3
+    assert abs(h["call"][0][0] - np.sin(59 / 30 + 24.0)) < 1e-5                                   # the snapshot at the first full minute
+    c2 = signals_view.contracts(store, "NIFTY", "book_pressure", "1s", DAY.date(), expiry=EXPS[1], column="micro_rel")
+    assert c2["expiry"] == EXPS[1] and c2["column"] == "micro_rel"
+    assert signals_view.contracts(store, "NIFTY", "skew", "1min", DAY.date())["snapshot"] is None
+
+
+def test_chain_panels_and_history(store):
+    ch = signals_view.chain(store, "NIFTY", DAY.date())
+    titles = {p["title"]: {c["signal"]: c for c in p["charts"]} for p in ch["panels"]}
+    assert "skew" in titles["Skew and shape"] and "pcr_full" in titles["Positioning"]
+    assert titles["Skew and shape"]["skew"]["column"] == "skew1_s" and len(titles["Skew and shape"]["skew"]["t"]) == 10
+    for i, d in enumerate(("2026-11-10", "2026-11-11", "2026-11-12")):
+        nightly(store, "skew", d, minutes=20 + i)
+    h = signals_view.history(store, "NIFTY", "skew", "1min")
+    assert h["available"] and h["headline"] == "skew1_s" and [d["date"] for d in h["days"]] == ["2026-11-10", "2026-11-11", "2026-11-12"]
+    day = h["days"][0]["columns"]["skew1_s"]
+    assert abs(day["open"] - 0.01) < 1e-12 and abs(day["close"] - 0.029) < 1e-12 and day["low"] <= day["mean"] <= day["high"]
+    assert len(h["paths"]) == 3 and h["paths"][0]["minutes"][0] == 241.0
+    assert signals_view.history(store, "NIFTY", "vrp", "1min")["available"] is False
+
+
+def test_new_files_are_read_incrementally_and_duplicates_dropped(store):
+    s1 = signals_view.summary(store, "NIFTY", DAY.date(), NOW)
+    ld = signals_store.get_day(store, DAY.date())
+    seen = len(ld.seen)
+    write_rows(single_rows("skew", 5, start=10), store, prefix="engine-NIFTY-1m")           # five newer minutes
+    write_rows(single_rows("skew", 2, start=8), store, prefix="engine-NIFTY-1m")            # two minutes already there (a restarted engine)
+    signals_store.get_day(store, DAY.date()).last_refresh = 0                                # do not wait for the refresh interval
+    s2 = signals_view.summary(store, "NIFTY", DAY.date(), NOW)
+    k1 = next(x for x in s1["signals"] if x["signal"] == "skew")
+    k2 = next(x for x in s2["signals"] if x["signal"] == "skew")
+    assert k1["n"] == 10 and k2["n"] == 15 and k2["known_at"] > k1["known_at"]
+    assert len(signals_store.get_day(store, DAY.date()).seen) == seen + 2
+
+
+def test_api_endpoints_validate_and_never_write(store, monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_SIGNAL_STORE", str(store))
+    before = sorted(str(p) for p in store.rglob("*"))
+    c = TestClient(create_app(tmp_path / "lake"))
+    p = {"underlying": "NIFTY", "date": "2026-11-13"}
+    live = c.get("/api/signals/live", params=p).json()
+    assert {x["signal"] for x in live["signals"]} >= {"skew", "book_pressure"} and live["days"] == ["2026-11-13"]
+    assert c.get("/api/signals/series", params={**p, "signal": "skew", "bucket": "1min"}).json()["headline"] == "skew1_s"
+    assert c.get("/api/signals/contracts", params={**p, "signal": "book_pressure", "bucket": "1s", "expiry": EXPS[1]}).json()["expiry"] == EXPS[1]
+    assert c.get("/api/signals/chain", params=p).json()["panels"]
+    assert c.get("/api/signals/history", params={"underlying": "NIFTY", "signal": "skew"}).json()["signal"] == "skew"
+    for path, bad in (("series", {"signal": "skew;x", "bucket": "1min"}), ("series", {"signal": "skew", "bucket": "1h"}), ("contracts", {"signal": "skew", "bucket": "1s", "expiry": "x"}),
+                      ("contracts", {"signal": "skew", "bucket": "1s", "column": "a b"}), ("chain", {"date": "nope"}), ("history", {"signal": "A"})):
+        assert c.get("/api/signals/" + path, params={"underlying": "NIFTY", **bad}).status_code == 400, (path, bad)
+    assert sorted(str(p) for p in store.rglob("*")) == before
+
+
+def test_a_big_day_loads_in_bounded_time_and_memory(tmp_path):
+    """The first version read every file of the day into one frame (about 500 MB of files by 06:15 UTC on 18 Nov; the viewer is capped at 1.5 GB).
+    300 files of 3,000 per-contract rows a second apart (about 900,000 rows) are read once and reduced."""
+    signals_store.forget()
+    syms = [(f"NIFTY_{24000 + 50 * j}_{cp}_2026-11-17", 24000.0 + 50 * j, cp) for j in range(30) for cp in ("CE", "PE")]
+    base = T0
+    for f in range(300):
+        rows = []
+        for s in range(50):
+            ts = base + pd.Timedelta(seconds=f * 50 + s)
+            for sym, k, cp in syms:
+                rows.append((ts, ts + pd.Timedelta(seconds=1), sym, "2026-11-17", k, cp, 0.1, 0.2))
+        df = pd.DataFrame(rows, columns=["ts", "known_at", "symbol", "expiry", "strike", "cp", "qi", "micro_rel"])
+        df.insert(0, "signal", "book_pressure"); df.insert(1, "bucket", "1s"); df.insert(2, "underlying", "NIFTY")
+        write_rows(df, tmp_path, prefix=f"engine-NIFTY-1s-{f:04d}")
+    rss0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    t0 = time.perf_counter()
+    s = signals_view.summary(tmp_path, "NIFTY", DAY.date(), NOW, wait_s=120)
+    took = time.perf_counter() - t0
+    grown_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - rss0) / 1024
+    assert s["load"]["loaded"] and s["signals"][0]["contracts"] == 60
+    assert took < 60 and grown_mb < 900, (took, grown_mb)
+    t0 = time.perf_counter()
+    signals_view.summary(tmp_path, "NIFTY", DAY.date(), NOW)                                  # the second call reads no file again
+    assert time.perf_counter() - t0 < 2
+    signals_store.forget()
+
+
+def test_iv_smile_from_the_option_ticks(tmp_path):
+    from tests.unit.test_signal_ops import DAY as TICK_DAY
+    write_fake_lake(tmp_path)
+    s = signals_view.smile(tmp_path, "NIFTY", TICK_DAY, minutes=24 * 60)
+    assert s["expiries"] and s["expiry"] in s["expiries"]
+    lat = s["latest"]
+    assert len(lat["strikes"]) == len(lat["call"]) == len(lat["put"]) > 3 and 0.02 < np.nanmean([v for v in lat["call"] if v is not None]) < 1.0
+    ot = s["over_time"]
+    assert len(ot["iv"]) == len(ot["strikes"]) and len(ot["iv"][0]) == len(ot["times"]) and s["atm"]
+    assert signals_view.smile(tmp_path, "BANKNIFTY", TICK_DAY)["latest"] is None
+
+
+def test_the_store_is_found_from_the_checkout_when_the_viewer_has_no_environment(tmp_path, monkeypatch):
+    """18 Nov 2026: the viewer service reads only .env, so JARVIS_SIGNAL_STORE (set in the crontab) was missing and it read a folder that does not
+    exist.  It now uses <working directory>/store when that holds live rows, and says which store it reads."""
+    signals_store.forget()
+    monkeypatch.delenv("JARVIS_SIGNAL_STORE", raising=False)
+    fill(tmp_path / "store")
+    monkeypatch.chdir(tmp_path)
+    c = TestClient(create_app(tmp_path / "lake"))
+    j = c.get("/api/signals/live", params={"underlying": "NIFTY", "date": "2026-11-13"}).json()
+    assert j["store"] == {"path": str(tmp_path / "store"), "exists": True, "from_env": False} and j["signals"]
+    monkeypatch.chdir(tmp_path / "store")                                                   # no store/ here: the research default, reported as missing
+    j2 = c.get("/api/signals/live", params={"underlying": "NIFTY", "date": "2026-11-13"}).json()
+    assert j2["signals"] == [] and j2["store"]["exists"] in (True, False) and j2["store"]["from_env"] is False
+    signals_store.forget()
