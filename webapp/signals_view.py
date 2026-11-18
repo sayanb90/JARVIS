@@ -248,7 +248,7 @@ def contracts(store: Path, underlying: str, signal: str, bucket: str, day: Optio
     ref = last if last is not None else hist
     num = _numeric_columns(ref)
     out["columns"] = num
-    exps = sorted({str(e) for e in ref["expiry"].dropna().unique()}) if "expiry" in ref.columns else []
+    exps = sorted({str(e) for f in (hist, last) if f is not None and "expiry" in f.columns for e in f["expiry"].dropna().unique()})
     out["expiries"] = exps
     expiry = expiry if expiry in exps else (exps[0] if exps else None)
     out["expiry"] = expiry
@@ -260,14 +260,18 @@ def contracts(store: Path, underlying: str, signal: str, bucket: str, day: Optio
             df = df[df["expiry"].astype(str) == expiry]
         return df
 
-    if last is not None:
-        snap = pick(last)
+    parts = [x for x in (hist, last) if x is not None]
+    if parts:
+        # the newest row of every contract (not one instant: at 1 s only the few contracts that traded in the last second have a row, and the
+        # nearest expiry may have none of them); the per-row time tells how old each value is
+        both = pick(pd.concat(parts, ignore_index=True)).sort_values("known_at", kind="stable")
+        snap = both.drop_duplicates(subset=[c for c in ("symbol", "strike", "cp") if c in both.columns] or ["symbol"], keep="last")
         rows = []
         for _, r in snap.sort_values([c for c in ("strike", "cp") if c in snap.columns] or ["symbol"]).iterrows():
-            rows.append({"symbol": r.get("symbol"), "strike": _num(r.get("strike")), "cp": r.get("cp"), "expiry": str(r.get("expiry", "")),
+            rows.append({"symbol": r.get("symbol"), "strike": _num(r.get("strike")), "cp": r.get("cp"), "expiry": str(r.get("expiry", "")), "at": _ts(r.get("known_at")),
                          "values": {c: _num(r.get(c)) for c in num if _num(r.get(c)) is not None},
                          "z": {c[:-6]: _num(r.get(c)) for c in snap.columns if c.endswith("_tod_z") and _num(r.get(c)) is not None}})
-        out["snapshot"] = {"known_at": _ts(snap["known_at"].max()) if len(snap) else _ts(last["known_at"].max()), "rows": rows}
+        out["snapshot"] = {"known_at": _ts(snap["known_at"].max()) if len(snap) else None, "rows": rows}
     if hist is not None and column is not None and "strike" in hist.columns and "cp" in hist.columns:
         h = pick(hist)
         h = pd.concat([h, pick(last)], ignore_index=True).drop_duplicates(subset=["known_at", "symbol"], keep="last") if last is not None else h
