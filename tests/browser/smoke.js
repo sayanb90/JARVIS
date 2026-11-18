@@ -145,16 +145,21 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
 
   // ---------------- Signals tab (SCRUM-199): live rows from the test's store, sparklines, read only ----------------
   const sg = await open(1400, 1000, '#tab=signals&sub=live');
-  await sg.waitForFunction(() => document.querySelectorAll('#sg-live tbody tr').length > 1, null, { timeout: 20000 });
-  if ((await sg.$$eval('#sg-live svg.spark', (x) => x.length)) < 1) fail('Signals tab: no sparkline');
+  await sg.waitForFunction(() => document.querySelectorAll('#sg-families tbody tr').length > 1, null, { timeout: 20000 });
+  if ((await sg.$$eval('#sg-families svg.spark', (x) => x.length)) < 1) fail('Signals tab: no sparkline');
   if (!/Live|Stale/.test(await sg.$eval('#sg-cards', (c) => c.textContent))) fail('Signals tab: status card');
+  // SCRUM-206: a click on a signal opens its day chart; the other views load without errors
+  await sg.click('#sg-families tr.clk');
+  await sg.waitForFunction(() => { const d = document.getElementById('chart-sg'); return !!(d && d.data && d.querySelector('.main-svg')); }, null, { timeout: 20000 })
+    .catch(() => fail('Signals tab: the signal chart was not drawn'));
+  for (const sub of ['strike', 'chain', 'history', 'daily']) { await sg.click(`.subtabs[data-tab="signals"] button[data-sub="${sub}"]`); await sg.waitForTimeout(800); }
   await sg.context().close();
 
   // ---------------- every section on a phone: no sideways scrolling ----------------
   const views = ['#tab=instrument&sub=price', '#tab=instrument&sub=book', '#tab=overview&sub=heat', '#tab=overview&sub=table',
                  '#tab=fo&sub=summary&underlying=NIFTY', '#tab=fo&sub=chain&underlying=NIFTY', '#tab=fo&sub=oi&underlying=NIFTY',
                  '#tab=fo&sub=contract&underlying=NIFTY&contract=NIFTY_FUT_27_OCT_26', '#tab=fo&sub=greeks&underlying=NIFTY',
-                 '#tab=signals&sub=live', '#tab=signals&sub=daily'];
+                 '#tab=signals&sub=live', '#tab=signals&sub=chart', '#tab=signals&sub=strike', '#tab=signals&sub=chain', '#tab=signals&sub=history', '#tab=signals&sub=daily'];
   for (const h of views) {
     const ph = await open(390, 844, h);
     await ph.waitForFunction(() => !document.getElementById('context').classList.contains('busy'), null, { timeout: 20000 });

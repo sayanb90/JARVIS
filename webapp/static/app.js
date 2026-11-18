@@ -25,13 +25,13 @@ const countText = (n, w) => (w === 0 ? `${fmtInt(n)} ticks (raw)` : `${fmtInt(n)
 const nearestDay = (days, want) => days.reduce((best, d) => (Math.abs(new Date(d) - new Date(want)) < Math.abs(new Date(best) - new Date(want)) ? d : best), days[0]);
 const VOLWIN_LABEL = { 60: '1 minute', 300: '5 minutes', 900: '15 minutes', 1800: '30 minutes' };
 const SUBS = { instrument: ['price', 'book', 'vol'], overview: ['heat', 'liq', 'table'], fo: ['summary', 'chain', 'oi', 'contract', 'greeks'],
-               candles: ['chart', 'profile'], data: ['coverage', 'run', 'storage'], history: ['chart', 'volume'], signals: ['live', 'daily'] };
+               candles: ['chart', 'profile'], data: ['coverage', 'run', 'storage'], history: ['chart', 'volume'], signals: ['live', 'chart', 'strike', 'chain', 'history', 'daily'] };
 const CANDLE_LABEL = { 1: '1 minute', 3: '3 minutes', 5: '5 minutes', 15: '15 minutes', 30: '30 minutes', 60: '1 hour' };
 const SOURCE_LABEL = { live: 'live feed', rest: 'REST candle API' };
 
 const state = {
   meta: null, day: null, tab: 'instrument', sub: { instrument: 'price', overview: 'heat', fo: 'summary', candles: 'chart', data: 'coverage', history: 'chart', signals: 'live' },
-  sg: { underlying: 'NIFTY', data: null, timer: null },
+  sg: { underlying: 'NIFTY', data: null, timer: null, retry: null, days: [], pick: null, cpick: null, hpick: null, cexp: null, ccol: null, sexp: null, scale: 'raw', prev: true },
   hx: { instruments: null, symbol: null, tf: '1d', span: 365, type: 'candle', data: null, vol: { market: '', date: '', sort: 'volume', n: 20 } },
   dt: null, dtMarkets: null, dtRange: 'ohlc',
   cSymbol: null, cMarket: null, cList: [], cMinutes: 1, cBins: 40, cSource: 'auto', cData: null,
@@ -147,7 +147,7 @@ function resizeVisible() {
 
 /* ---------------------------------------------------------------- sections and sub-tabs */
 /* the days a section can show: the Candles section also reads days that only have REST minute candles */
-const daysFor = (tab) => (tab === 'candles' ? state.meta.candle_days : state.meta.days);
+const daysFor = (tab) => (tab === 'candles' ? state.meta.candle_days : tab === 'signals' ? [...new Set([...(state.sg.days || []), ...state.meta.days])].sort().reverse() : state.meta.days);
 function syncDays(tab) {                               // limit the date picker to this section's days; move to the nearest one if needed
   const days = daysFor(tab), picker = $('date');
   if (!days.length) return false;
@@ -171,9 +171,9 @@ function setTab(tab, load = true) {
   showSub(tab, state.sub[tab], false);
   const dayPicker = document.querySelector('label.day');
   if (dayPicker) dayPicker.hidden = tab === 'data' || tab === 'history';                                  // the Data tab is not about one trading day
-  clearInterval(state.sg.timer);
+  clearInterval(state.sg.timer); clearTimeout(state.sg.retry);
   if (!load) return;
-  if (tab === 'signals') { loadSignals().catch(fail); state.sg.timer = setInterval(() => loadSignals().catch(fail), 15000); return; }
+  if (tab === 'signals') { $('date').value = state.day; loadSignals().catch(fail); state.sg.timer = setInterval(() => loadSignals().catch(fail), 15000); return; }
   if (tab === 'history') { loadHistory().catch(fail); return; }
   if (tab === 'data') { loadData().catch(fail); return; }
   if (!syncDays(tab)) { setStatus('No data for this section yet', 'err'); return; }
@@ -957,7 +957,7 @@ $('date').onchange = (e) => {
     clearTimeout(note._t); note._t = setTimeout(() => { note.hidden = true; }, 8000);
   }
   e.target.value = day;
-  state.day = day; state.foContractData = null; state.greeksData = null; setTab(state.tab);
+  state.day = day; state.foContractData = null; state.greeksData = null; state.sg.moved = true; setTab(state.tab);
 };
 /* ================================================================ History: prices and volume per instrument */
 const HX_TF = [['1d', 'Daily'], ['1m', '1 minute'], ['5m', '5 minutes'], ['15m', '15 minutes'], ['60m', '1 hour']];
@@ -1355,8 +1355,11 @@ window.addEventListener('resize', () => {                // re-layout charts whe
 init();
 
 
-/* ===================== Signals tab (SCRUM-199): read only, refreshed every 15 s while open ===================== */
-const escHtml = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+/* ===================== Signals tab (SCRUM-199, SCRUM-206): families, a signal's day, by strike, chain and smile, history ===================== */
+const escHtml = esc;
+const IST_MS = 5.5 * 3600e3;
+const ist = (iso) => (iso ? new Date(Date.parse(iso + (/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? '' : 'Z')) + IST_MS).toISOString().slice(0, 19) : null);   // naive UTC iso -> IST wall clock, for the time axes
+const SG_COLORS = () => { const t = theme(); return [t.acc, t.orange, t.teal, t.purple, t.yellow, t.up, t.down, t.fg2]; };
 function spark(series) {
   const pts = (series || []).filter((p) => p[1] != null);
   if (pts.length < 2) return '';
@@ -1366,34 +1369,297 @@ function spark(series) {
 }
 const zCell = (z) => (z == null ? '<span class="muted">–</span>' : `<span class="${Math.abs(z) >= 2 ? (z > 0 ? 'pos' : 'neg') : ''}">${fmt(z, 1)}</span>`);
 const timeIst = (iso) => (iso ? new Date(iso + (iso.endsWith('Z') ? '' : 'Z')).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '–');
+const sgKey = (s) => `${s.signal}|${s.bucket}`;
+const sgFind = (key) => ((state.sg.data && state.sg.data.signals) || []).find((s) => sgKey(s) === key);
+const sgReq = {};                                                                     // the newest request per view: a slow answer for an older choice is dropped
+const sgNext = (name) => (sgReq[name] = (sgReq[name] || 0) + 1);
+const sgParams = (extra = {}) => Object.fromEntries(Object.entries(Object.assign({ underlying: state.sg.underlying, date: state.day || '' }, extra)).filter(([, v]) => v !== '' && v != null));
+const sgToday = () => new Date().toISOString().slice(0, 10);
+
 async function loadSignals() {
   state.sg.underlying = $('sg-underlying').value || state.sg.underlying;
-  state.sg.data = await api('/api/signals/live', { underlying: state.sg.underlying });
+  const id = sgNext('live');
+  const j = await api('/api/signals/live', sgParams());
+  if (id !== sgReq.live) return;
+  state.sg.data = j;
+  state.sg.days = j.days || [];
+  if (!j.signals.length && j.days.length && !j.days.includes(state.day) && !state.sg.moved) {    // the viewer opens on the newest day with prices: move to the newest day with signals, once
+    state.sg.moved = true; state.day = j.days[0]; $('date').value = state.day;
+    const note = $('date-note'); note.textContent = `No signals on that day · showing ${niceDate(state.day)}`; note.hidden = false;
+    clearTimeout(note._t); note._t = setTimeout(() => { note.hidden = true; }, 8000);
+    return loadSignals();
+  }
   renderSignals();
+  if (j.load && !j.load.loaded) {                                                     // the first read of a day takes a while: say so and look again
+    setStatus(`Reading ${state.day}'s signals: ${fmtInt(j.load.files_done)} of ${fmtInt(j.load.files_total)} files`, 'busy');
+    clearTimeout(state.sg.retry); state.sg.retry = setTimeout(() => { if (state.tab === 'signals') loadSignals().catch(fail); }, 3000);
+    return;
+  }
+  refreshSgSub();
+}
+function refreshSgSub() {
+  const sub = state.sub.signals;
+  if (sub === 'chart') loadSgChart().catch(fail);
+  else if (sub === 'strike') loadSgStrike().catch(fail);
+  else if (sub === 'chain') loadSgChain().catch(fail);
+  else if (sub === 'history') loadSgHistory().catch(fail);
 }
 function renderSignals() {
   const j = state.sg.data;
   if (!j) return;
   renderKpis('sg-cards', [
-    ['Status', j.newest ? (j.stale ? 'Stale' : 'Live') : 'No data', j.newest ? `newest ${timeIst(j.newest)} IST` : 'the runner has not written today'],
-    ['Cadence', j.cadence.length ? j.cadence.join(' · ') : '–', 'bucket widths in the table'],
+    ['Status', j.newest ? (j.stale ? 'Stale' : 'Live') : 'No data', j.newest ? `newest ${timeIst(j.newest)} IST` : (j.days.length ? `no rows on ${j.date}` : 'the engines have not written rows yet')],
+    ['Cadence', j.cadence.length ? j.cadence.join(' · ') : '–', 'bucket widths'],
     ['Live signals', fmtInt(new Set(j.signals.map((s) => s.signal)).size), j.date],
     ['Daily signals', fmtInt(j.daily.length), 'from the last close'],
   ]);
-  const rows = j.signals.map((s) => {
-    // engine v2 on the bus: the forming bucket (provisional) or a final row newer than the store
+  // overview: one panel per family
+  const fams = [];
+  j.signals.forEach((s) => { let f = fams.find((x) => x.key === s.family); if (!f) { f = { key: s.family, label: s.family_label, rows: [] }; fams.push(f); } f.rows.push(s); });
+  $('sg-families').innerHTML = fams.map((f) => `<div class="panel"><header><h3>${escHtml(f.label)}<span class="hint">${f.rows.length} series</span></h3></header>
+    <div class="table-wrap"><table class="sg-table sg-fixed"><colgroup><col style="width:25%"><col style="width:8%"><col style="width:15%"><col style="width:14%"><col style="width:12%"><col style="width:7%"><col style="width:19%"></colgroup><thead><tr><th>Signal</th><th>Bucket</th><th>As of (IST)</th><th>Column</th><th class="num">Value</th><th class="num">z</th><th>Today</th></tr></thead><tbody>${f.rows.map((s) => {
     const now = s.now && s.headline != null && s.now.values[s.headline] != null ? s.now : null;
     const v = now ? now.values[s.headline] : (s.headline != null ? s.values[s.headline] : null);
     const asOf = now ? `${timeIst(now.known_at)}${now.provisional ? ' <span class="muted">forming</span>' : ''}` : timeIst(s.known_at);
-    return `<tr><td>${escHtml(s.signal)}</td><td>${escHtml(s.bucket)}</td><td>${asOf}</td><td>${escHtml(s.headline || '')}</td>
-      <td class="num">${fmt(v, 4)}</td><td class="num">${zCell(s.headline != null ? s.z[s.headline] : null)}</td><td>${spark(s.series)}</td></tr>`;
-  }).join('');
-  $('sg-live').innerHTML = `<thead><tr><th>Signal</th><th>Bucket</th><th>As of (IST)</th><th>Value</th><th class="num"></th><th class="num">z</th><th>Today</th></tr></thead><tbody>${rows ||
-    '<tr><td colspan="7" class="muted">No live rows for this day yet.</td></tr>'}</tbody>`;
-  $('sg-note').textContent = j.stale && j.newest ? 'Stale: the newest bucket is older than two buckets. Check the F&O feed and logs/signals-live.log.' : '';
-  $('sg-daily').innerHTML = `<thead><tr><th>Signal</th><th>Session</th><th>Values</th></tr></thead><tbody>${j.daily.map((d) =>
-    `<tr><td>${escHtml(d.signal)}</td><td>${escHtml(d.date)}</td><td class="wrap">${Object.entries(d.values).slice(0, 6).map(([k, x]) => `${escHtml(k)} ${fmt(x, 4)}`).join(' · ')}</td></tr>`).join('') ||
-    '<tr><td colspan="3" class="muted">The nightly job has not written any daily signals yet.</td></tr>'}</tbody>`;
-  setStatus(j.newest ? `${state.sg.underlying}: ${j.signals.length} live series · newest ${timeIst(j.newest)} IST` : `${state.sg.underlying}: no live rows today`);
+    const tag = s.kind === 'contract' ? ` <span class="sg-tag" title="one row per contract; the table shows ${s.front_future ? "the front future's" : 'the median across contracts'}">${fmtInt(s.contracts)} contracts</span>`
+      : s.kind === 'events' ? ` <span class="sg-tag">${fmtInt(s.events)} events</span>` : '';
+    const lbl = s.kind === 'events' ? `${s.headline || ''}` : (s.headline || '');
+    return `<tr class="clk" data-key="${escHtml(sgKey(s))}" tabindex="0" title="${escHtml(s.doc)}"><td>${escHtml(s.signal)}${tag}</td><td>${escHtml(s.bucket)}</td><td>${asOf}</td><td>${escHtml(lbl)}</td>
+      <td class="num">${fmt(v, 4)}</td><td class="num">${zCell(s.headline != null ? s.z[s.headline] : null)}</td><td>${spark(s.series)}</td></tr>`; }).join('')}</tbody></table></div></div>`).join('')
+    || '<div class="panel"><div class="body muted">No live rows for this day yet.</div></div>';
+  $('sg-families').querySelectorAll('tr.clk').forEach((tr) => {
+    const go = () => { state.sg.pick = tr.dataset.key; showSub('signals', 'chart'); refreshSgSub(); };
+    tr.onclick = go; tr.onkeydown = (e) => { if (e.key === 'Enter') go(); };
+  });
+  $('sg-note').textContent = j.stale && j.newest ? 'Stale: the newest bucket is older than two buckets. Check the F&O feed and the engines (python -m signals watch).' : '';
+  $('sg-daily').innerHTML = `<thead><tr><th>Signal</th><th>Family</th><th>Session</th><th>Values</th></tr></thead><tbody>${j.daily.map((d) =>
+    `<tr title="${escHtml(d.doc || '')}"><td>${escHtml(d.signal)}</td><td>${escHtml(d.family_label || '')}</td><td>${escHtml(d.date)}</td><td class="wrap">${Object.entries(d.values).slice(0, 6).map(([k, x]) => `${escHtml(k)} ${fmt(x, 4)}`).join(' · ')}</td></tr>`).join('') ||
+    '<tr><td colspan="4" class="muted">The nightly job has not written any daily signals yet.</td></tr>'}</tbody>`;
+  fillSgPickers();
+  setStatus(j.newest ? `${state.sg.underlying}: ${j.signals.length} live series · newest ${timeIst(j.newest)} IST` : `${state.sg.underlying}: no live rows on ${j.date}`);
 }
-if ($('sg-underlying')) $('sg-underlying').onchange = () => loadSignals().catch(fail);
+function sgOptions(filter, selected) {                                                // <option>s of the live signals, grouped by family
+  const j = state.sg.data;
+  const groups = [];
+  ((j && j.signals) || []).filter(filter).forEach((s) => {
+    let g = groups.find((x) => x.group === s.family_label);
+    if (!g) { g = { group: s.family_label, items: [] }; groups.push(g); }
+    g.items.push([sgKey(s), `${s.signal} · ${s.bucket}`]);
+  });
+  return groups;
+}
+function fillSgPickers() {
+  const j = state.sg.data;
+  if (!j) return;
+  const all = sgOptions(() => true), con = sgOptions((s) => s.kind === 'contract');
+  if (all.length && !sgFind(state.sg.pick)) state.sg.pick = all[0].items[0][0];
+  if (con.length && !((j.signals.find((s) => sgKey(s) === state.sg.cpick) || {}).kind === 'contract')) state.sg.cpick = con[0].items[0][0];
+  fillSelect($('sg-pick'), all, state.sg.pick);
+  fillSelect($('sg-cpick'), con, state.sg.cpick);
+  const hist = [...all.map((g) => ({ group: g.group, items: g.items })), { group: 'Daily signals', items: j.daily.map((d) => [d.signal + '|1d', d.signal]) }];
+  if (!state.sg.hpick) state.sg.hpick = (all[0] && all[0].items[0][0]) || '';
+  fillSelect($('sg-hpick'), hist, state.sg.hpick);
+}
+
+/* ---- one signal's day */
+const stdz = (v) => { const x = v.filter((a) => a != null); const m = x.reduce((a, b) => a + b, 0) / (x.length || 1); const sd = Math.sqrt(x.reduce((a, b) => a + (b - m) ** 2, 0) / (x.length || 1)) || 1; return v.map((a) => (a == null ? null : (a - m) / sd)); };
+async function loadSgChart() {
+  const key = state.sg.pick;
+  const s = sgFind(key);
+  if (!s) { $('sg-chart-msg').hidden = false; $('sg-chart-msg').textContent = 'No signal chosen yet.'; return; }
+  const id = sgNext('chart');
+  const d = await api('/api/signals/series', sgParams({ signal: s.signal, bucket: s.bucket }));
+  if (id !== sgReq.chart) return;
+  state.sg.series = d;
+  renderSgChart();
+}
+function renderSgChart() {
+  const d = state.sg.series;
+  if (!d) return;
+  const s = sgFind(`${d.signal}|${d.bucket}`) || {};
+  $('sg-chart-title').textContent = `${d.signal} · ${d.bucket}`;
+  $('sg-chart-hint').textContent = `${d.family_label || ''}${d.kind === 'contract' ? (s.front_future ? " · the front future's series" : ' · median across contracts') : ''} · times in IST`;
+  $('sg-chart-doc').textContent = d.doc || '';
+  const msg = $('sg-chart-msg'), ev = $('sg-events');
+  msg.hidden = true; $('sg-events-panel').hidden = true;
+  if (d.kind === 'events') {
+    $('chart-sg').closest('.panel').hidden = true; $('sg-z-panel').hidden = true; $('sg-events-panel').hidden = false;
+    ev.innerHTML = `<thead><tr><th>Time (IST)</th><th>Symbol</th><th class="num">Lots</th><th class="num">Price</th><th class="num">Side</th><th class="num">OI change</th></tr></thead><tbody>${(d.events || []).slice().reverse().map((e) =>
+      `<tr><td>${timeIst(e.known_at)}</td><td>${escHtml(e.symbol || '')}</td><td class="num">${fmt(e.lots, 0)}</td><td class="num">${fmt(e.ltp)}</td><td class="num ${e.sign > 0 ? 'pos' : 'neg'}">${e.sign > 0 ? 'buy' : 'sell'}</td><td class="num">${fmt(e.oi_jump, 0)}</td></tr>`).join('')
+      || '<tr><td colspan="6" class="muted">No block prints yet.</td></tr>'}</tbody>`;
+    return;
+  }
+  $('chart-sg').closest('.panel').hidden = false; $('sg-z-panel').hidden = false;
+  const cols = Object.keys(d.series);
+  if (!d.t.length || !cols.length) { msg.hidden = false; msg.textContent = 'No rows for this signal on this day yet.'; Plotly.purge('chart-sg'); Plotly.purge('chart-sg-z'); $('sg-z-panel').hidden = true; $('sg-legend').innerHTML = ''; return; }
+  const colors = SG_COLORS(), T = theme(), x = d.t.map(ist), norm = state.sg.scale === 'z';
+  const traces = [], items = [];
+  cols.forEach((c, i) => {
+    const y = norm ? stdz(d.series[c]) : d.series[c];
+    traces.push({ type: 'scatter', mode: 'lines', x, y, name: c, line: { color: colors[i % colors.length], width: 1.6 }, connectgaps: false, hovertemplate: `${c} %{y:.4f}<extra></extra>` });
+    items.push({ name: c, color: colors[i % colors.length], traces: [traces.length - 1 - 0], off: i > 0 });
+  });
+  if (state.sg.prev && d.prev && d.prev.series[cols[0]]) {                            // the previous session on the same clock, for the headline
+    const c = cols[0], y = norm ? stdz(d.prev.series[c]) : d.prev.series[c];
+    traces.push({ type: 'scatter', mode: 'lines', x: d.prev.t.map(ist), y, name: `${c} on ${d.prev.date}`, line: { color: colors[0], width: 1.2, dash: 'dot' }, opacity: 0.55, hovertemplate: `${d.prev.date} %{y:.4f}<extra></extra>` });
+    items.push({ name: `${d.prev.date}`, color: colors[0], kind: 'dash', traces: [traces.length - 1] });
+  }
+  plot('chart-sg', traces, baseLayout({ margin: { l: phone() ? 46 : 70, r: 14, t: 8, b: 30 }, xaxis: timeAxis(), yaxis: valAxis(), hovermode: 'x unified' }), items);
+  // the time-of-day z of the headline, with the +-2 band
+  const head = d.headline && d.z[d.headline] ? d.headline : Object.keys(d.z)[0];
+  const zt = [], zi = [];
+  if (head) {
+    zt.push({ type: 'scatter', mode: 'lines', x, y: d.z[head], name: `${head} z`, line: { color: colors[0], width: 1.4 }, hovertemplate: 'z %{y:.2f}<extra></extra>' });
+    zt.push({ type: 'scatter', mode: 'lines', x: [x[0], x[x.length - 1]], y: [2, 2], line: { color: T.up, width: 1, dash: 'dot' }, hoverinfo: 'skip', showlegend: false });
+    zt.push({ type: 'scatter', mode: 'lines', x: [x[0], x[x.length - 1]], y: [-2, -2], line: { color: T.down, width: 1, dash: 'dot' }, hoverinfo: 'skip', showlegend: false });
+    zi.push({ name: `${head}: against the same time of day in the last 20 sessions`, color: colors[0], traces: [0] });
+    plot('chart-sg-z', zt, baseLayout({ margin: { l: phone() ? 46 : 70, r: 14, t: 8, b: 30 }, xaxis: timeAxis(), yaxis: valAxis({ zeroline: true }) }), zi);
+    $('sg-z-panel').hidden = false;
+  } else {
+    Plotly.purge('chart-sg-z'); legend('chart-sg-z', []); $('sg-z-panel').hidden = true;
+  }
+  syncGroup('sg', ['chart-sg', 'chart-sg-z']);
+  const last = d.series[cols[0]][d.series[cols[0]].length - 1];
+  $('sg-chart-kpi').textContent = `${cols[0]} ${fmt(last, 4)}${head && d.z[head] ? ` · z ${fmt(d.z[head][d.z[head].length - 1], 1)}` : ''} · ${fmtInt(d.n)} rows today`;
+  requestAnimationFrame(resizeVisible);
+}
+
+/* ---- per-contract signals by strike */
+async function loadSgStrike() {
+  const s = sgFind(state.sg.cpick);
+  if (!s) { $('sg-strike-msg').hidden = false; $('sg-strike-msg').textContent = 'No per-contract signal has rows on this day yet.'; return; }
+  const id = sgNext('strike');
+  const d = await api('/api/signals/contracts', sgParams({ signal: s.signal, bucket: s.bucket, expiry: state.sg.cexp || '', column: state.sg.ccol || '' }));
+  if (id !== sgReq.strike) return;
+  state.sg.contracts = d;
+  state.sg.cexp = d.expiry; state.sg.ccol = d.column;
+  renderSgStrike();
+}
+function renderSgStrike() {
+  const d = state.sg.contracts;
+  if (!d) return;
+  fillSelect($('sg-cexp'), d.expiries.map((e) => [e, e]), d.expiry);
+  fillSelect($('sg-ccol'), d.columns.map((c) => [c, c]), d.column);
+  $('sg-strike-doc').textContent = d.doc || '';
+  const msg = $('sg-strike-msg');
+  msg.hidden = true;
+  const T = theme(), snap = d.snapshot;
+  if (!snap || !snap.rows.length) { msg.hidden = false; msg.textContent = 'No snapshot for this expiry yet.'; Plotly.purge('chart-sg-strike'); return; }
+  const side = (r) => String(r.cp || '')[0];
+  const mk = (sd, name, color) => { const r = snap.rows.filter((q) => side(q) === sd && q.values[d.column] != null); return { type: 'scatter', mode: 'lines+markers', x: r.map((q) => q.strike), y: r.map((q) => q.values[d.column]), name, line: { color, width: 1.6 }, marker: { size: 5 }, hovertemplate: `${name} %{x}: %{y:.4f}<extra></extra>` }; };
+  const traces = [mk('C', 'Calls', T.up), mk('P', 'Puts', T.down)];
+  $('sg-strike-hint').textContent = `${d.column} by strike at ${timeIst(snap.known_at)} IST · expiry ${d.expiry}`;
+  plot('chart-sg-strike', traces, baseLayout({ margin: { l: phone() ? 46 : 70, r: 14, t: 8, b: 36 }, xaxis: Object.assign(valAxis(), { title: { text: 'strike', font: { size: 11 } } }), yaxis: valAxis(), hovermode: 'x unified' }),
+    [{ name: 'Calls', color: T.up, traces: [0] }, { name: 'Puts', color: T.down, traces: [1] }]);
+  const cols = d.columns.slice(0, 5);
+  $('sg-strike-table').innerHTML = `<thead><tr><th class="num">Strike</th><th>C/P</th>${cols.map((c) => `<th class="num">${escHtml(c)}</th>`).join('')}<th class="num">z</th></tr></thead><tbody>${snap.rows.map((r) =>
+    `<tr><td class="num">${fmt(r.strike, 0)}</td><td>${escHtml(String(r.cp || ''))}</td>${cols.map((c) => `<td class="num">${fmt(r.values[c], 4)}</td>`).join('')}<td class="num">${zCell(r.z[d.column])}</td></tr>`).join('')}</tbody>`;
+  // strike x time, one panel for calls and one for puts
+  const h = d.heat;
+  const heat = (id, key, title) => {
+    if (!h || !h[key].length) { Plotly.purge(id); return; }
+    const z = h[key].flat().filter((v) => v != null), signed = z.length && Math.min(...z) < 0 && Math.max(...z) > 0;
+    const m = signed ? Math.max(Math.abs(Math.min(...z)), Math.abs(Math.max(...z))) : null;
+    Plotly.react(id, [{ type: 'heatmap', x: h.times.map(ist), y: h.strikes, z: h[key], colorscale: signed ? 'RdBu' : 'Viridis', reversescale: signed, zmid: signed ? 0 : undefined, zmin: signed ? -m : undefined, zmax: signed ? m : undefined,
+      colorbar: { thickness: 8, len: 0.9, tickfont: { size: 10 } }, hovertemplate: `${title} %{y} %{x|%H:%M}: %{z:.4f}<extra></extra>` }],
+      baseLayout({ margin: { l: phone() ? 46 : 60, r: 6, t: 8, b: 30 }, xaxis: timeAxis(), yaxis: valAxis({ title: { text: title, font: { size: 11 } } }) }), config());
+  };
+  heat('chart-sg-heat-c', 'call', 'Calls: strike');
+  heat('chart-sg-heat-p', 'put', 'Puts: strike');
+  requestAnimationFrame(resizeVisible);
+}
+
+/* ---- chain: the chain signals over the day, the IV smile */
+async function loadSgChain() {
+  const id = sgNext('chain');
+  const [c, sm] = await Promise.all([api('/api/signals/chain', sgParams()), api('/api/signals/smile', sgParams({ expiry: state.sg.sexp || '' })).catch((e) => ({ error: e.message }))]);
+  if (id !== sgReq.chain) return;
+  state.sg.chain = c; state.sg.smile = sm;
+  if (sm && sm.expiry) state.sg.sexp = sm.expiry;
+  renderSgChain();
+}
+function renderSgChain() {
+  const c = state.sg.chain, sm = state.sg.smile;
+  if (!c) return;
+  const colors = SG_COLORS();
+  $('sg-chain-panels').innerHTML = c.panels.map((p, i) => `<div class="panel"><header><h3>${escHtml(p.title)}</h3></header><div class="body sg-grid">${p.charts.map((ch, j) =>
+    `<div class="sg-mini" title="${escHtml(ch.doc)}"><div class="sg-mini-head"><b>${escHtml(ch.signal)}</b><span class="muted">${escHtml(ch.column)} · ${escHtml(ch.bucket)}</span><span class="sg-last">${fmt(ch.last, 4)} ${zCell(ch.z)}</span></div><div id="sgc-${i}-${j}" class="plot h-sm"></div></div>`).join('')}</div></div>`).join('')
+    || '<div class="panel"><div class="body muted">No chain signals have rows on this day yet.</div></div>';
+  c.panels.forEach((p, i) => p.charts.forEach((ch, j) => {
+    Plotly.react(`sgc-${i}-${j}`, [{ type: 'scatter', mode: 'lines', x: ch.t.map(ist), y: ch.v, line: { color: colors[(i + j) % colors.length], width: 1.4 }, hovertemplate: `${ch.column} %{y:.4f}<extra></extra>` }],
+      baseLayout({ margin: { l: 46, r: 6, t: 4, b: 22 }, xaxis: timeAxis(), yaxis: valAxis() }), Object.assign(config(), { displayModeBar: false }));
+  }));
+  const msg = $('sg-smile-msg'), T = theme();
+  if (!sm || sm.error || !sm.latest) {
+    msg.hidden = false; msg.textContent = sm && sm.error ? `Smile unavailable: ${sm.error}` : 'No option ticks with IV for this day in the lake yet.';
+    ['chart-sg-smile', 'chart-sg-smile-heat', 'chart-sg-atm'].forEach((id) => Plotly.purge(id)); return;
+  }
+  msg.hidden = true;
+  fillSelect($('sg-sexp'), sm.expiries.map((e) => [e, e]), sm.expiry);
+  const L = sm.latest;
+  $('sg-smile-hint').textContent = `vendor IV by strike at ${timeIst(L.at)} IST · expiry ${sm.expiry} · ATM ${fmt(L.atm_strike, 0)}`;
+  plot('chart-sg-smile', [{ type: 'scatter', mode: 'lines+markers', x: L.strikes, y: L.call.map((v) => (v == null ? null : v * 100)), name: 'Calls', line: { color: T.up, width: 1.6 }, marker: { size: 4 }, hovertemplate: 'call %{x}: %{y:.2f}%<extra></extra>' },
+    { type: 'scatter', mode: 'lines+markers', x: L.strikes, y: L.put.map((v) => (v == null ? null : v * 100)), name: 'Puts', line: { color: T.down, width: 1.6 }, marker: { size: 4 }, hovertemplate: 'put %{x}: %{y:.2f}%<extra></extra>' }],
+    baseLayout({ margin: { l: phone() ? 46 : 60, r: 14, t: 8, b: 36 }, xaxis: Object.assign(valAxis(), { title: { text: 'strike', font: { size: 11 } } }), yaxis: valAxis({ ticksuffix: '%' }), hovermode: 'x unified' }),
+    [{ name: 'Calls', color: T.up, traces: [0] }, { name: 'Puts', color: T.down, traces: [1] }]);
+  const O = sm.over_time;
+  Plotly.react('chart-sg-smile-heat', [{ type: 'heatmap', x: O.times.map(ist), y: O.strikes, z: O.iv.map((r) => r.map((v) => (v == null ? null : v * 100))), colorscale: 'Viridis',
+    colorbar: { thickness: 8, len: 0.9, ticksuffix: '%', tickfont: { size: 10 } }, hovertemplate: 'strike %{y} %{x|%H:%M}: %{z:.2f}%<extra></extra>' }],
+    baseLayout({ margin: { l: phone() ? 46 : 60, r: 6, t: 8, b: 30 }, xaxis: timeAxis(), yaxis: valAxis({ title: { text: 'strike', font: { size: 11 } } }) }), config());
+  Plotly.react('chart-sg-atm', [{ type: 'scatter', mode: 'lines', x: sm.atm.map((a) => ist(a.t)), y: sm.atm.map((a) => (a.iv == null ? null : a.iv * 100)), line: { color: T.acc, width: 1.6 }, hovertemplate: 'ATM IV %{y:.2f}%<extra></extra>' }],
+    baseLayout({ margin: { l: phone() ? 46 : 60, r: 14, t: 8, b: 30 }, xaxis: timeAxis(), yaxis: valAxis({ ticksuffix: '%' }) }), config());
+  requestAnimationFrame(resizeVisible);
+}
+
+/* ---- a signal across days */
+async function loadSgHistory() {
+  const [sid, bucket] = (state.sg.hpick || '').split('|');
+  if (!sid) return;
+  const id = sgNext('hist');
+  const d = await api('/api/signals/history', { underlying: state.sg.underlying, signal: sid, bucket: bucket === '1d' ? '1min' : bucket });
+  if (id !== sgReq.hist) return;
+  state.sg.hist = d;
+  renderSgHistory();
+}
+function renderSgHistory() {
+  const d = state.sg.hist;
+  if (!d) return;
+  const msg = $('sg-hist-msg'), tbl = $('sg-htable');
+  $('sg-hist-doc').textContent = d.doc || '';
+  if (!d.available) {
+    msg.hidden = false; msg.textContent = 'The nightly job has not written history for this signal yet (python -m signals nightly, then the history steps in the runbook).';
+    tbl.innerHTML = ''; Plotly.purge('chart-sg-hist'); $('chart-sg-hist').closest('.panel').hidden = true; return;
+  }
+  msg.hidden = true;
+  if (d.kind === 'daily') {
+    $('chart-sg-hist').closest('.panel').hidden = true;
+    const keys = [...new Set(d.days.flatMap((r) => Object.keys(r.values)))].slice(0, 8);
+    tbl.innerHTML = `<thead><tr><th>Session</th>${keys.map((k) => `<th class="num">${escHtml(k)}</th>`).join('')}</tr></thead><tbody>${d.days.slice().reverse().map((r) =>
+      `<tr><td>${escHtml(r.date)}</td>${keys.map((k) => `<td class="num">${fmt(r.values[k], 4)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+    return;
+  }
+  $('chart-sg-hist').closest('.panel').hidden = false;
+  const colors = SG_COLORS(), T = theme();
+  const traces = d.paths.map((p, i) => ({ type: 'scatter', mode: 'lines', x: p.minutes.map((m) => new Date(Date.UTC(2000, 0, 1) + (m * 60e3) + IST_MS).toISOString().slice(0, 19)), y: p.v, name: p.date,
+    line: { color: colors[i % colors.length], width: i === d.paths.length - 1 ? 2 : 1.2 }, opacity: i === d.paths.length - 1 ? 1 : 0.7, hovertemplate: `${p.date} %{y:.4f}<extra></extra>` }));
+  plot('chart-sg-hist', traces, baseLayout({ margin: { l: phone() ? 46 : 70, r: 14, t: 8, b: 30 }, xaxis: timeAxis(), yaxis: valAxis(), hovermode: 'x unified' }),
+    d.paths.map((p, i) => ({ name: p.date, color: colors[i % colors.length], traces: [i] })));
+  $('sg-hist-hint').textContent = `${d.headline || ''} through the day, last ${d.paths.length} sessions · times in IST`;
+  const h = d.headline;
+  tbl.innerHTML = `<thead><tr><th>Session</th><th class="num">Rows</th><th class="num">Open</th><th class="num">Close</th><th class="num">Low</th><th class="num">High</th><th class="num">Mean</th></tr></thead><tbody>${d.days.slice().reverse().map((r) => {
+    const c = (r.columns || {})[h] || {};
+    return `<tr><td>${escHtml(r.date)}</td><td class="num">${fmtInt(r.n)}</td><td class="num">${fmt(c.open, 4)}</td><td class="num">${fmt(c.close, 4)}</td><td class="num">${fmt(c.low, 4)}</td><td class="num">${fmt(c.high, 4)}</td><td class="num">${fmt(c.mean, 4)}</td></tr>`; }).join('')}</tbody>`;
+  requestAnimationFrame(resizeVisible);
+}
+
+/* ---- wiring */
+if ($('sg-underlying')) $('sg-underlying').onchange = () => { state.sg.pick = state.sg.cpick = state.sg.hpick = null; state.sg.cexp = state.sg.ccol = state.sg.sexp = null; loadSignals().catch(fail); };
+$('sg-pick').onchange = (e) => { state.sg.pick = e.target.value; loadSgChart().catch(fail); };
+$('sg-cpick').onchange = (e) => { state.sg.cpick = e.target.value; state.sg.cexp = state.sg.ccol = null; loadSgStrike().catch(fail); };
+$('sg-cexp').onchange = (e) => { state.sg.cexp = e.target.value; loadSgStrike().catch(fail); };
+$('sg-ccol').onchange = (e) => { state.sg.ccol = e.target.value; loadSgStrike().catch(fail); };
+$('sg-sexp').onchange = (e) => { state.sg.sexp = e.target.value; loadSgChain().catch(fail); };
+$('sg-hpick').onchange = (e) => { state.sg.hpick = e.target.value; loadSgHistory().catch(fail); };
+$('sg-scale').querySelectorAll('button').forEach((b) => b.onclick = () => { state.sg.scale = b.dataset.s; $('sg-scale').querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b)); renderSgChart(); });
+$('sg-prev').onchange = (e) => { state.sg.prev = e.target.checked; renderSgChart(); };
+document.querySelectorAll('.subtabs[data-tab="signals"] button').forEach((b) => b.addEventListener('click', () => { if (state.sg.data) refreshSgSub(); }));

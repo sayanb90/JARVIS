@@ -323,6 +323,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         """A per-contract signal by strike (newest snapshot) and as strike x time."""
         from . import signals_view
         day = _sg_args(underlying, date, signal, bucket)
+        expiry, column = expiry or None, column or None
         if expiry is not None and not DATE_RE.match(expiry):
             raise HTTPException(400, "bad expiry")
         if column is not None and not re.fullmatch(r"[A-Za-z0-9_]{1,40}", column):
@@ -341,6 +342,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         """The IV smile from the option ticks, by strike now and by strike over the last hours (cached 30 s: it scans tick files)."""
         from . import signals_view
         day = _sg_args(underlying, date)
+        expiry = expiry or None
         if expiry is not None and not DATE_RE.match(expiry):
             raise HTTPException(400, "bad expiry")
         return JSONResponse(cached(f"sg-smile:{underlying}:{day}:{expiry}", 30, lambda: signals_view.smile(lake_path, underlying, day, expiry)))
