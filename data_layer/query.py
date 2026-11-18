@@ -62,6 +62,11 @@ def _cached(key: tuple, compute):
 
 
 _QUERY_SLOTS = threading.BoundedSemaphore(VIEWER_QUERIES)
+QUERY_WAIT_S = 25.0
+
+
+class QueryBusy(RuntimeError):
+    """Every query slot has been taken for QUERY_WAIT_S: the caller gets a quick "busy" instead of waiting until the proxy gives up (a 504)."""
 
 
 def _memory_limit() -> str:
@@ -184,8 +189,12 @@ class Lake:
         return self.con.execute(query, params or [])
 
     def sql(self, query: str, params: list | None = None) -> pd.DataFrame:
-        with _QUERY_SLOTS:                              # at most VIEWER_QUERIES at once: every connection may use its whole memory limit
+        if not _QUERY_SLOTS.acquire(timeout=QUERY_WAIT_S):          # at most VIEWER_QUERIES at once: every connection may use its whole memory limit
+            raise QueryBusy("the viewer is busy with other queries; try again in a few seconds")
+        try:
             return self._exec(query, params).df()
+        finally:
+            _QUERY_SLOTS.release()
 
     def tables(self) -> list[str]:
         return [r[0] for r in self._exec("SHOW TABLES").fetchall()]

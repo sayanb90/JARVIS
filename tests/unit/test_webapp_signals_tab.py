@@ -318,3 +318,25 @@ def test_lake_opens_without_reading_every_tick_file_and_creates_the_bar_views_wh
     eager = query.Lake(tmp_path)
     eager._views_for("SHOW TABLES")
     assert not eager._pending and set(eager.tables()) == set(q.tables())
+
+
+def test_a_busy_viewer_answers_503_quickly_and_the_direct_timing_mode_reports_each_call(tmp_path, monkeypatch, capsys):
+    """18 Nov 2026: two slow queries held both query slots, every other request waited behind them and the proxy answered 504.  A request that cannot get a
+    slot in QUERY_WAIT_S now gets a 503.  perf --direct times each heavy lake call and the Signals load in a process of its own (seconds, peak memory)."""
+    from data_layer import query
+    monkeypatch.setattr(query, "QUERY_WAIT_S", 0.2)
+    write_fake_lake(tmp_path / "lake")
+    held = [query._QUERY_SLOTS.acquire() for _ in range(query.VIEWER_QUERIES)]
+    try:
+        c = TestClient(create_app(tmp_path / "lake"))
+        r = c.get("/api/symbols", params={"date": "2026-03-31"})
+        assert r.status_code == 503 and "busy" in r.json()["detail"] and r.headers["Retry-After"]
+    finally:
+        for _ in held:
+            query._QUERY_SLOTS.release()
+    assert TestClient(create_app(tmp_path / "lake")).get("/api/perf").json()["rss_mb_now"] > 0
+    monkeypatch.setenv("JARVIS_LAKE", str(tmp_path / "lake")); monkeypatch.setenv("JARVIS_SIGNAL_STORE", str(tmp_path / "store"))
+    from webapp import perf
+    assert perf.main(["--direct", "--limit", "120", "--report", str(tmp_path / "direct.txt")]) == 0
+    text = (tmp_path / "direct.txt").read_text()
+    assert "direct timings" in text and "F&O chain" in text and "Signals tab: the first read" in text and "peak MB" in text
