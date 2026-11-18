@@ -705,3 +705,43 @@ def test_an_engine_started_from_saved_anchors_gives_the_rows_of_one_that_compute
     mp.write_text(json.dumps(meta))
     (an.folder(tmp_path, d, "NIFTY") / "contract_table.parquet").write_bytes(b"not parquet")
     assert an.load(tmp_path, d, "NIFTY", ids, list(groups)) is None
+
+
+def test_normalise_output_sort_and_the_one_row_fast_path_equal_the_pandas_versions(day):
+    """17 Nov 2026: normalise_output builds one frame and orders it with numpy (sort_values took 1.5 ms of a 1 ms signal's output), and an engine
+    builds a one-row native output once as the final frame.  Same rows, same order, same dtypes as the pandas chain."""
+    from signals.engine.core import Anchors
+    from signals.framework import REGISTRY, _sorted, normalise_output
+    rng = np.random.default_rng(3)
+    ts = pd.Timestamp("2026-03-31 04:00:00")
+    n = 120
+    syms = np.array([f"S{i:03d}" for i in range(12)])
+    df = pd.DataFrame({"ts": ts, "known_at": ts + pd.Timedelta("1s"), "symbol": rng.choice(syms, n),
+                       "expiry": rng.choice([pd.Timestamp("2026-04-07").date(), pd.Timestamp("2026-04-14").date()], n),
+                       "strike": np.where(rng.random(n) < 0.1, np.nan, rng.choice([100.0, 110.0, 120.0], n)),
+                       "cp": rng.choice(["CE", "PE", "FUT"], n), "v": rng.random(n)})
+    order = ["ts", "known_at", "expiry", "strike", "cp", "symbol"]
+    want = df.sort_values(order).reset_index(drop=True)
+    got = _sorted(df, order)
+    pd.testing.assert_frame_equal(got, want)
+    srt = want.copy()
+    assert _sorted(srt, order) is srt                                     # already in order: returned as it is
+    df2 = df.assign(known_at=ts + pd.to_timedelta(rng.integers(0, 3, n), unit="s"))
+    pd.testing.assert_frame_equal(_sorted(df2, order), df2.sort_values(order).reset_index(drop=True))
+    spec = REGISTRY["book_pressure"][0]
+    out = normalise_output(spec, df, "NIFTY")
+    assert list(out.columns)[:3] == ["underlying", "ts", "known_at"] and (out["underlying"] == "NIFTY").all()
+    assert not df.equals(out) and list(df.columns) == ["ts", "known_at", "symbol", "expiry", "strike", "cp", "v"]      # the caller's frame is untouched
+    # one-row fast path equals the general path
+    hist, ticks, d = day
+    t = _cut(ticks, d, 3)
+    cad = {"pcr_full": "1s", "gex": "1s", "term_slope": "1s", "book_pressure": "1s"}
+    eng = OperatorEngine("NIFTY", trim(hist), cad, d)
+    g = eng.groups["1s"]
+    one = pd.DataFrame({"ts": [ts], "known_at": [ts + pd.Timedelta("1s")], "a": [1.5], "n": [3]})
+    upto = ts + pd.Timedelta("2s")
+    fast = eng._emit(g, "book_pressure", one, upto)
+    from signals.engine.core import _select
+    slow = eng._finish_rows(g, "book_pressure", _select(normalise_output(REGISTRY["book_pressure"][0], one, "NIFTY"), g.since, upto, eng.day, own=True))
+    pd.testing.assert_frame_equal(fast, slow)
+    assert eng._emit(g, "book_pressure", one.assign(known_at=ts + pd.Timedelta("9s")), upto) is None

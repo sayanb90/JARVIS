@@ -164,14 +164,52 @@ def normalise_output(spec: Spec, out: Optional[pd.DataFrame], underlying: str) -
         return pd.DataFrame(columns=["underlying", key, "known_at"])
     if key not in out.columns or "known_at" not in out.columns:
         raise ValueError(f"{spec.id}: output needs columns {key!r} and 'known_at', has {list(out.columns)}")
-    out = out.assign(underlying=underlying)                                  # a new frame: the caller's is not touched
     if not pd.api.types.is_datetime64_any_dtype(out["known_at"]):            # already datetimes in every engine output: no conversion
-        out["known_at"] = pd.to_datetime(out["known_at"])
-    cols = ["underlying", key, "known_at"] + [c for c in out.columns if c not in ("underlying", key, "known_at")]
-    out = out[cols]
+        out = out.assign(known_at=pd.to_datetime(out["known_at"]))
+    # one new frame built from the columns (underlying, key, known_at first): the caller's is not touched, and the assign / select / reset_index
+    # chain it replaces copied the frame three times (about 0.4 ms of 1 per signal and bucket, at 27 signals a second)
+    rest = [c for c in out.columns if c not in ("underlying", key, "known_at")]
+    data = {"underlying": underlying, key: out[key].array, "known_at": out["known_at"].array}
+    for c in rest:
+        data[c] = out[c].array
+    out = pd.DataFrame(data, index=pd.RangeIndex(len(out)))
     if len(out) > 1:                                                         # one row has nothing to sort (a signal row per bucket: most)
-        out = out.sort_values([key, "known_at"] + [c for c in ("snap", "expiry", "strike", "cp", "symbol", "bucket", "group", "participant", "hour", "leg") if c in out.columns])
-    return out.reset_index(drop=True)
+        order = [key, "known_at"] + [c for c in ("snap", "expiry", "strike", "cp", "symbol", "bucket", "group", "participant", "hour", "leg") if c in out.columns]
+        out = _sorted(out, order)
+    return out
+
+
+def _sorted(df: pd.DataFrame, order: list) -> pd.DataFrame:
+    """df.sort_values(order) (stable) without its overhead (about 1.5 ms a sort at 300 rows, 13 per-contract signals a second): the key columns as
+    numpy arrays, constant ones left out, text to sorted integer codes, one stable lexsort; the frame is returned as it is when already in order."""
+    keys = []
+    for c in order:
+        x = df[c].to_numpy()
+        kind = x.dtype.kind
+        if kind == "f":
+            if len(x) and (x[0] == x).all() and not np.isnan(x[0]):
+                continue                                                      # constant; NaN sorts last in numpy as in pandas, so it stays a key
+        elif kind == "M":
+            if (x[0] == x).all() and not np.isnat(x[0]):
+                continue
+            if np.isnat(x).any():
+                return df.sort_values(order).reset_index(drop=True)
+        else:
+            try:
+                if (x[0] == x).all():
+                    continue
+                x = pd.factorize(x, sort=True)[0]
+                if (x < 0).any():                                             # missing values in text: pandas decides
+                    return df.sort_values(order).reset_index(drop=True)
+            except TypeError:
+                return df.sort_values(order).reset_index(drop=True)
+        keys.append(x)
+    if not keys:
+        return df
+    idx = np.lexsort(keys[::-1])                                              # the last key is the primary one; the sort is stable
+    if (idx == np.arange(len(idx))).all():
+        return df
+    return df.take(idx).reset_index(drop=True)
 
 
 def _ns_cols(df: pd.DataFrame, cols) -> pd.DataFrame:

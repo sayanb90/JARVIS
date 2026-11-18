@@ -555,9 +555,9 @@ class OperatorEngine:
             tp = operators.TapeTable(self.ticks.window(ts, upto), g.natives.meta, b, g.td)
             res = g.natives.run(tp, chain_live=bk.chain("live") if g.needs_live else None, book=self.session.options)
             for sid, df in res.items():
-                part = _select(normalise_output(REGISTRY[sid][0], df, self.underlying), g.since, upto, self.day, own=True)
+                part = self._emit(g, sid, df, upto)
                 if part is not None:
-                    out.append(self._finish_rows(g, sid, part))
+                    out.append(part)
             g.timings["native"] = g.timings.get("native", 0.0) + _time.perf_counter() - n0
         at = None
         if g.needs_chain or g.cnatives is not None:
@@ -581,9 +581,9 @@ class OperatorEngine:
             t_fut = ((pd.Timestamp(fut[1]).value + EXPIRY_NS - (b + g.td)) / YEAR_NS) if fut[1] is not None else math.nan
             res = g.cnatives.run(b, bk.chain("bar"), bk.chain("live") if g.cnatives.needs_live else None, at, (fut[0], t_fut), g.since)
             for sid, df in res.items():
-                part = _select(normalise_output(REGISTRY[sid][0], df, self.underlying), g.since, upto, self.day, own=True)
+                part = self._emit(g, sid, df, upto)
                 if part is not None:
-                    out.append(self._finish_rows(g, sid, part))
+                    out.append(part)
             g.timings["chain_native"] = g.timings.get("chain_native", 0.0) + _time.perf_counter() - t1
             t1 = _time.perf_counter()
         if not g.windows:                                  # every signal of the group is native: no frames, no shared inputs
@@ -652,6 +652,31 @@ def _finish(self, g: Group, sid: str, part: pd.DataFrame) -> pd.DataFrame:
 
 
 OperatorEngine._finish_rows = _finish
+
+
+def _emit(self, g: Group, sid: str, df: Optional[pd.DataFrame], upto: pd.Timestamp) -> Optional[pd.DataFrame]:
+    """A native operator's output as final rows: normalise, select the rows first known in (since, upto], add signal, bucket and underlying.
+    Most signals give one row per bucket: that is built once as the final frame (the three steps copied it three times, about 0.4 ms of 1 ms per
+    signal and bucket, 27 signals a second); several rows, a baseline to apply or an own `signal` column take the general path."""
+    spec = REGISTRY[sid][0]
+    if df is not None and len(df) == 1 and "signal" not in df.columns and not (self.baselines.get(g.cadence) or {}).get(sid) is not None:
+        key = "ts" if spec.grid == "1m" else "date"
+        if key in df.columns and "known_at" in df.columns and pd.api.types.is_datetime64_any_dtype(df["known_at"]):
+            ka = df["known_at"].iloc[0]
+            since, day = g.since, self.day
+            if not ((ka <= upto) and ((ka > since) if since is not None else (ka >= day))):
+                return None
+            data = {"signal": sid, "underlying": self.underlying, key: df[key].array, "known_at": df["known_at"].array}
+            for c in df.columns:
+                if c not in ("underlying", key, "known_at"):
+                    data[c] = df[c].array
+            data["bucket"] = g.cadence
+            return pd.DataFrame(data, index=pd.RangeIndex(1))
+    part = _select(normalise_output(spec, df, self.underlying), g.since, upto, self.day, own=True)
+    return self._finish_rows(g, sid, part) if part is not None else None
+
+
+OperatorEngine._emit = _emit
 
 
 def _select(df: Optional[pd.DataFrame], since: Optional[pd.Timestamp], upto: pd.Timestamp, day: pd.Timestamp, own: bool = False) -> Optional[pd.DataFrame]:
