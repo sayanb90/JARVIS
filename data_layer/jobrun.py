@@ -23,6 +23,7 @@ States of a job, from its schedule and its records:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -222,7 +223,22 @@ class Job:
 
 
 _WRAP = re.compile(r"python\S*\s+-m\s+data_layer\.jobrun\s+run\s+([A-Za-z0-9_.-]+)\s")
-_LOG = re.compile(r">>\s*(logs/[A-Za-z0-9_./-]+)")
+_LOG = re.compile(r">>?\s*[\"']?([^\s\"';&|<>]+\.(?:log|txt))")
+ALIASES = {"@hourly": "0 * * * *", "@daily": "0 0 * * *", "@midnight": "0 0 * * *", "@weekly": "0 0 * * 0", "@monthly": "0 0 1 * *",
+           "@yearly": "0 0 1 1 *", "@annually": "0 0 1 1 *"}              # @reboot has no schedule: such a line is not listed
+
+
+def _log_of(command: str) -> Optional[str]:
+    """The log file a cron line redirects to, as a path under the project's logs/ folder ("logs/x.log"), whether the line spells it
+    relative (logs/x.log), with a variable ($JARVIS/logs/x.log) or absolute (/home/x/JARVIS/logs/x.log).  None when it is elsewhere."""
+    m = _LOG.search(command)
+    if not m:
+        return None
+    path = m.group(1)
+    if path.startswith("logs/"):
+        return path
+    i = path.rfind("/logs/")
+    return path[i + 1:] if i >= 0 else None
 
 
 def _slug(s: str) -> str:
@@ -232,8 +248,13 @@ def _slug(s: str) -> str:
 def derive_name(command: str, log: Optional[str]) -> str:
     if log:
         return _slug(Path(log).stem)
-    m = re.search(r"python\S*\s+(?:-m\s+)?([\w.]+)", command)
-    return _slug(re.sub(r"^data_layer\.", "", m.group(1))) if m else _slug(command)[:40]
+    c = re.sub(r"\bcd\s+\S+\s*&&\s*", "", command)                 # cd $JARVIS &&
+    c = re.sub(r"\s*\d*>>?\s*\S+|\s*\d*>&\d", "", c)                   # redirects, 2>&1
+    m = re.search(r"python\S*\s+(?:-m\s+)?([\w.]+)", c)
+    if m:
+        return _slug(re.sub(r"^data_layer\.", "", m.group(1)))
+    first = c.split()[0] if c.split() else command
+    return _slug(Path(first).stem) or "job"
 
 
 def parse_crontab(text: str) -> list[Job]:
@@ -244,15 +265,25 @@ def parse_crontab(text: str) -> list[Job]:
         line = raw.strip()
         if not line or line.startswith("#") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*=", line):
             continue
-        parts = line.split(None, 5)
-        if len(parts) < 6:
-            continue
-        try:
-            sched = Schedule.parse(" ".join(parts[:5]))
-        except ValueError:
-            continue
-        cmd = parts[5]
-        log = (m.group(1) if (m := _LOG.search(cmd)) else None)
+        if line.startswith("@"):
+            parts = line.split(None, 1)
+            if len(parts) < 2 or parts[0].lower() not in ALIASES:
+                continue
+            try:
+                sched = dataclasses.replace(Schedule.parse(ALIASES[parts[0].lower()]), text=parts[0].lower())
+            except ValueError:
+                continue
+            cmd = parts[1]
+        else:
+            parts = line.split(None, 5)
+            if len(parts) < 6:
+                continue
+            try:
+                sched = Schedule.parse(" ".join(parts[:5]))
+            except ValueError:
+                continue
+            cmd = parts[5]
+        log = _log_of(cmd)
         w = _WRAP.search(cmd)
         name = w.group(1) if w else derive_name(cmd, log)
         if name in seen:                                      # two lines with one name (the two F&O shards): number them
@@ -265,11 +296,36 @@ def parse_crontab(text: str) -> list[Job]:
 
 
 def load_crontab(root: Path | None = None) -> list[Job]:
+    """The jobs of the repo's deploy/crontab (the template).  The Jobs tab uses load_jobs, which prefers the crontab that is installed."""
     p = (root or lake_mod.ROOT) / "deploy" / "crontab"
     try:
         return parse_crontab(p.read_text())
     except OSError:
         return []
+
+
+def installed_crontab(run=subprocess.run) -> Optional[str]:
+    """The text of the crontab of the user this process runs as (`crontab -l`; read-only), or None when there is none or it cannot be read."""
+    try:
+        r = run(["crontab", "-l"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 and r.stdout.strip() else None
+
+
+def load_jobs(root: Path | None = None, run=subprocess.run) -> tuple[list[Job], str]:
+    """(jobs, where they came from).  In order: the file named by JARVIS_CRONTAB_FILE, the installed crontab (`crontab -l`), the repo's
+    deploy/crontab.  Nothing here ever writes a crontab."""
+    f = os.environ.get("JARVIS_CRONTAB_FILE", "").strip()
+    if f:
+        try:
+            return parse_crontab(Path(f).read_text()), f"file {f}"
+        except OSError:
+            pass                                              # unreadable: fall through to the installed crontab
+    text = installed_crontab(run)
+    if text is not None:
+        return parse_crontab(text), "installed crontab (crontab -l)"
+    return load_crontab(root), "deploy/crontab in the repo (no installed crontab was found)"
 
 
 # ---------------------------------------------------------------------------------------------- the state of a job
@@ -373,7 +429,7 @@ def _is_jobrun(pid) -> bool:
 
 
 def _find(name: str, root: Path | None) -> tuple[Job, State]:
-    jobs = load_crontab(root)
+    jobs, _ = load_jobs(root)
     job = next((j for j in jobs if j.name == name), None)
     if job is None:
         raise ControlError("no such job")                      # only a job named in deploy/crontab can be touched: the command is never from the caller
@@ -482,7 +538,10 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "compact":
         print(f"{compact()} records kept")
         return 0
-    rows = states(load_crontab(), load_runs())
+    jobs, source = load_jobs()
+    rows = states(jobs, load_runs())
+    if not a.json:
+        print(f"jobs from: {source}")
     if a.json:
         print(json.dumps([x.as_dict() for x in rows], indent=1))
     else:

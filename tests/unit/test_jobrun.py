@@ -262,3 +262,60 @@ def test_command_line_accepts_both_the_argv_form_and_the_shell_form(tmp_path, mo
     assert jr.main(["run", "a", "--", sys.executable, "-c", "import sys; sys.exit(5)"]) == 5
     assert jr.main(["run", "b", "--shell", "exit 6"]) == 6
     assert [(r["job"], r["code"]) for r in jr.load_runs(tmp_path) if r["ev"] == "end"] == [("a", 5), ("b", 6)]
+
+
+# -- the installed crontab (SCRUM-207) ----------------------------------------------------------
+class Done:
+    def __init__(self, out="", code=0):
+        self.stdout, self.returncode = out, code
+
+
+INSTALLED = """JARVIS=/home/tradestone/JARVIS
+PATH=/home/tradestone/JARVIS/.venv/bin:/usr/bin
+@daily cd $JARVIS && python -m data_layer.fx refresh >> /home/tradestone/JARVIS/logs/fx.log 2>&1
+@reboot cd $JARVIS && python -m data_layer.something
+*/5 * * * * cd /home/tradestone/JARVIS && python -m data_layer.health > $JARVIS/logs/health.log 2>&1
+0 23 * * 1-5 cd $JARVIS && python -m data_layer.jobrun run ohlc-daily --shell 'python scheduler.py --job ohlc-daily >> logs/scheduler.log 2>&1'
+30 1 * * * /usr/bin/backup.sh >> /var/log/backup.log 2>&1
+45 2 * * * cd $JARVIS && python -m data_layer.rates daily >/dev/null 2>&1
+"""
+
+
+def test_installed_crontab_lines_are_read_as_they_are_spelled():
+    jobs = {j.name: j for j in jr.parse_crontab(INSTALLED)}
+    assert set(jobs) == {"fx", "health", "ohlc-daily", "backup", "rates"}                # @reboot has no schedule: skipped
+    assert jobs["fx"].schedule_text == "@daily" and jobs["fx"].schedule.matches(datetime(2026, 11, 18, 0, 0))
+    assert jobs["fx"].log == "logs/fx.log"                                               # absolute path -> under logs/
+    assert jobs["health"].log == "logs/health.log" and jobs["health"].schedule.matches(datetime(2026, 11, 18, 12, 35))
+    assert jobs["ohlc-daily"].wrapped and jobs["ohlc-daily"].log == "logs/scheduler.log"
+    assert jobs["backup"].log is None                                                     # a log outside the project cannot be tailed
+    assert jobs["rates"].log is None and not any(j.wrapped for n, j in jobs.items() if n != "ohlc-daily")
+
+
+def test_load_jobs_prefers_the_installed_crontab_then_the_repo_file(tmp_path, monkeypatch):
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy" / "crontab").write_text("0 1 * * * cd $JARVIS && python -m data_layer.fx refresh >> logs/fx.log 2>&1\n")
+    jobs, src = jr.load_jobs(tmp_path, run=lambda *a, **k: Done(INSTALLED))
+    assert src.startswith("installed crontab") and len(jobs) == 5
+    jobs, src = jr.load_jobs(tmp_path, run=lambda *a, **k: Done("", 1))                   # "no crontab for user"
+    assert "repo" in src and [j.name for j in jobs] == ["fx"]
+    jobs, src = jr.load_jobs(tmp_path, run=lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("crontab")))     # no crontab command
+    assert "repo" in src
+    jobs, src = jr.load_jobs(tmp_path, run=lambda *a, **k: Done("# only a comment\n"))
+    assert src.startswith("installed") and jobs == []                                     # an installed crontab with no jobs is the truth
+
+
+def test_crontab_file_setting_wins_and_a_bad_path_falls_through(tmp_path, monkeypatch):
+    f = tmp_path / "ct"
+    f.write_text("0 5 * * * cd $JARVIS && python -m data_layer.rates daily >> logs/rates.log 2>&1\n")
+    monkeypatch.setenv("JARVIS_CRONTAB_FILE", str(f))
+    jobs, src = jr.load_jobs(tmp_path, run=lambda *a, **k: Done(INSTALLED))
+    assert src == f"file {f}" and [j.name for j in jobs] == ["rates"]
+    monkeypatch.setenv("JARVIS_CRONTAB_FILE", str(tmp_path / "missing"))
+    assert jr.load_jobs(tmp_path, run=lambda *a, **k: Done(INSTALLED))[1].startswith("installed")
+
+
+def test_installed_crontab_never_writes_anything():
+    seen = []
+    jr.installed_crontab(run=lambda cmd, **k: seen.append(cmd) or Done(INSTALLED))
+    assert seen == [["crontab", "-l"]]                                                    # only ever the listing form

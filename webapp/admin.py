@@ -478,7 +478,7 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
     root = data_dir.parent
 
     def job_states():
-        return jobrun.states(jobrun.load_crontab(root), jobrun.load_runs(root), root=root)
+        return jobrun.states(jobrun.load_jobs(root)[0], jobrun.load_runs(root), root=root)
 
     @r.get("/api/jobs")
     def jobs():
@@ -487,7 +487,7 @@ def admin_router(lake_dir: Path, data_dir: Path | None = None) -> APIRouter | No
         for s in rows:
             counts[s["state"]] = counts.get(s["state"], 0) + 1
         return JSONResponse({"now": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "counts": counts, "jobs": rows,
-                             "control": control_on()}, headers=noindex)
+                             "control": control_on(), "source": jobrun.load_jobs(root)[1]}, headers=noindex)
 
     def control_on() -> bool:
         import os
