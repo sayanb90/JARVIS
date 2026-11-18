@@ -15,7 +15,7 @@ HOST_SETTINGS = ("UPSTOX_ACCESS_TOKEN", "UPSTOX_EXTENDED_TOKEN", "UPSTOX_ANALYTI
                  "JARVIS_ENV", "JARVIS_BACKUP_DIR", "JARVIS_GREEKS", "JARVIS_GREEKS_RATE", "JARVIS_GREEKS_CARRY",
                  "JARVIS_GREEKS_IV_SCALE", "JARVIS_GREEKS_THETA_BASIS", "JARVIS_SYSMON", "JARVIS_SYSMON_INTERVAL_S",
                  "JARVIS_EXT_FIELDS", "JARVIS_INDEX_KEYS", "JARVIS_COMPACT_MEMORY_GB", "JARVIS_VIEWER_MEMORY_GB", "JARVIS_TICK_STORE",
-                 "WEBAPP_PASSWORD", "WEBAPP_USER", "ADMIN_PASSWORD", "ADMIN_USER")
+                 "WEBAPP_PASSWORD", "WEBAPP_USER", "ADMIN_PASSWORD", "ADMIN_USER", "JARVIS_JOB_CONTROL", "JARVIS_CRONTAB_FILE")
 
 
 @pytest.fixture(autouse=True)
@@ -31,6 +31,9 @@ def _hermetic_settings(tmp_path, monkeypatch):
     absent = tmp_path / "no-such.env"
     monkeypatch.setattr(lake, "ENV_FILE", absent)
     monkeypatch.setattr(auth, "ENV_PATH", absent)
+    from data_layer import jobrun                                       # the Jobs tab must not read the crontab of the machine the tests run on
+    real = jobrun.installed_crontab
+    monkeypatch.setattr(jobrun, "installed_crontab", lambda run=None: None if run is None else real(run))
 
 
 @pytest.fixture()

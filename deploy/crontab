@@ -101,6 +101,10 @@ JARVIS_SHADOW_PARITY=1
 45 3 * * 1-5   cd $JARVIS && python -m data_layer.jobrun run paper-nifty --shell 'nice -n 10 python -m trading paper --underlying NIFTY --until 10:00 >> logs/paper-nifty.log 2>&1'
 40 11 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run signals-health --shell 'python -m signals health >> logs/signals-health.log 2>&1'
 15 12 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run signals-nightly --shell 'nice -n 19 ionice -c3 python -m signals nightly >> logs/signals-nightly.log 2>&1'
+# Signal history backfill (SCRUM-214): every signal that 1-minute candles can produce, month by month from 2022-11, oldest first.  Resumable: a
+# finished month is never redone, the open month grows by the days since the last run, and once everything is covered this is a quick
+# no-op.  Gated by the IV check, stops after 6 hours or when memory is short, refuses 03:40-10:05 UTC.  Progress: python -m signals backfill status
+0 14 * * *     cd $JARVIS && python -m data_layer.jobrun run signal-backfill --shell 'nice -n 19 ionice -c3 python -m signals backfill run --max-minutes 360 >> logs/signal-backfill.log 2>&1'
 # Storage by dataset (lake, signal store, research snapshots, logs; hard links counted once), growth per session and runway; one JSON
 # line a day in logs/storage.jsonl.  Raw tick days older than 30 days are flagged as offload candidates (Backblaze B2 or similar).
 20 13 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run storage --shell 'nice -n 19 python -m data_layer.storage report >> logs/storage.log 2>&1'

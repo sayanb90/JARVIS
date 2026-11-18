@@ -490,3 +490,18 @@ def test_control_off_answers_before_asking_for_a_password(client, lake, monkeypa
     control_world(lake, monkeypatch, on=False)
     r = client.post("/admin/api/jobs/start", json={"name": "quick"}, auth=A, headers=H_NO_CONFIRM)
     assert r.status_code == 403 and "JARVIS_JOB_CONTROL" in r.json()["detail"]
+
+
+def test_jobs_tab_lists_the_installed_crontab_and_names_its_source(client, lake, monkeypatch):
+    jobs_world(lake)                                                                      # a repo deploy/crontab with fx, health, rates
+    (lake.root / "logs").mkdir(exist_ok=True)
+    (lake.root / "logs" / "mine.log").write_text("from the installed crontab\n")
+    own = lake.root / "installed.txt"
+    own.write_text("5 4 * * * cd /home/x/JARVIS && python -m data_layer.mine run >> /home/x/JARVIS/logs/mine.log 2>&1\n")
+    monkeypatch.setenv("JARVIS_CRONTAB_FILE", str(own))
+    body = client.get("/admin/api/jobs", auth=A).json()
+    assert [j["name"] for j in body["jobs"]] == ["mine"] and body["jobs"][0]["state"] == "untracked" and body["jobs"][0]["log_written"]
+    assert body["source"].startswith("file ")
+    assert "from the installed crontab" in client.get("/admin/api/jobs/log", params={"name": "mine"}, auth=A).json()["text"]
+    monkeypatch.delenv("JARVIS_CRONTAB_FILE")
+    assert "repo" in client.get("/admin/api/jobs", auth=A).json()["source"]

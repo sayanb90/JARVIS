@@ -307,6 +307,7 @@ async function loadJobs() {
   setStatus('Loading jobs…', 'busy');
   jobsData = await api('/admin/api/jobs');
   renderJobs();
+  $('jobs-sub').textContent = `Jobs from the ${jobsData.source}, their state from the job heartbeat, and the tail of each log. Times are UTC.`;
   setStatus(`${jobsData.jobs.length} jobs, ${jobsData.now} UTC`);
   if (openJob) loadLog().catch(fail);
 }

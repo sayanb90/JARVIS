@@ -309,8 +309,13 @@ def smoke(root: Optional[Path] = None) -> dict:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["backfill"]:                                      # its own options: python -m signals backfill --help
+        from signals import backfill_job
+        return backfill_job.main(args[1:])
     ap = argparse.ArgumentParser(prog="python -m signals", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("backfill", help="the history of every candle-based signal since 2022, resumable (plan | run | status)", add_help=False)
     ls = sub.add_parser("list")
     ls.add_argument("--family")
     for name in ("run", "validate-iv"):
