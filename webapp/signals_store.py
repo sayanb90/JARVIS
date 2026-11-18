@@ -40,6 +40,24 @@ MAX_DAYS = 3                     # days kept in memory
 BUS_COLS = ("t_vendor", "t_recv", "t_emit", "provisional")
 
 
+def rss_mb() -> float:
+    try:
+        import os
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20
+    except (OSError, ValueError):
+        return 0.0
+
+
+def mem_guard_mb() -> float:
+    """Stop reading files above this resident size (the viewer service is capped at 1500 MB and is OOM-killed above it: 7 times in 25 minutes on 18 Nov 2026)."""
+    import os
+    try:
+        return float(os.environ.get("JARVIS_VIEWER_MEM_GUARD_MB", 1100))
+    except ValueError:
+        return 1100.0
+
+
 def is_future(symbols: pd.Series) -> pd.Series:
     return symbols.astype(str).str.contains("_FUT_", regex=False)
 
@@ -83,7 +101,7 @@ class LiveDay:
             try:
                 con = duckdb.connect()
                 con.execute("SET threads=2")
-                con.execute("SET memory_limit='600MB'")
+                con.execute("SET memory_limit='400MB'")
                 df = con.execute(sql + (where if with_filter else "")).df()
                 con.close()
                 return df
@@ -104,6 +122,12 @@ class LiveDay:
                 self.files_total = len(self.seen) + len(files)
             body = max(len(files) - TAIL_FILES, 0) if len(files) > 2 * TAIL_FILES else 0       # a few new files: read them whole
             for i in range(0, len(files), BATCH):
+                if rss_mb() > mem_guard_mb():                  # better a partial day and a message than a killed viewer
+                    with self.lock:
+                        self.error = f"memory guard: read {len(self.seen)} of {self.files_total} files, the viewer is at {rss_mb():.0f} MB (limit {mem_guard_mb():.0f} MB)"
+                        self.loaded = True
+                    log.warning("signals tab: %s", self.error)
+                    return
                 batch = files[i:i + BATCH]
                 k = min(max(body - i, 0), len(batch))            # the first k files of this batch are thinned, the rest (the newest files) read whole
                 parts = [self._read(batch[:k], thin=True) if k else None, self._read(batch[k:]) if k < len(batch) else None]
@@ -116,6 +140,7 @@ class LiveDay:
             with self.lock:
                 self.last_refresh = time.monotonic()
                 self.loaded = True
+                self.error = None
 
     def ensure(self, wait_s: float = 20.0) -> "LiveDay":
         """First call: load in a background thread and wait up to `wait_s`.  Later calls: read the new files (cheap)."""

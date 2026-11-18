@@ -273,3 +273,17 @@ def test_every_api_call_is_timed_and_the_perf_route_and_sweep_report_it(store, m
         server.should_exit = True; th.join(10)
     text = (tmp_path / "perf.txt").read_text()
     assert "first" in text and "/api/signals/live" in text and "the viewer's own timings" in text
+
+
+def test_the_loader_stops_at_a_memory_guard_instead_of_being_killed(store, monkeypatch):
+    """18 Nov 2026: the viewer (capped at 1500 MB) was OOM-killed seven times in 25 minutes by the first read of a day.  Above the guard the loader stops,
+    keeps what it has, and says so; the page still answers."""
+    signals_store.forget()
+    monkeypatch.setattr(signals_store, "rss_mb", lambda: 5000.0)
+    s = signals_view.summary(store, "NIFTY", DAY.date(), NOW, wait_s=30)
+    assert s["load"]["loaded"] is True and "memory guard" in s["load"]["error"] and s["signals"] == []
+    monkeypatch.setattr(signals_store, "rss_mb", lambda: 100.0)
+    signals_store.get_day(store, DAY.date()).last_refresh = 0
+    s2 = signals_view.summary(store, "NIFTY", DAY.date(), NOW)
+    assert s2["load"]["error"] is None and len(s2["signals"]) == 5                          # the next refresh reads the rest
+    signals_store.forget()
