@@ -1431,7 +1431,7 @@ function renderSignals() {
     const go = () => { state.sg.pick = tr.dataset.key; showSub('signals', 'chart'); refreshSgSub(); };
     tr.onclick = go; tr.onkeydown = (e) => { if (e.key === 'Enter') go(); };
   });
-  $('sg-note').textContent = j.store && !j.store.exists ? `The signal store ${j.store.path} does not exist on this machine: set JARVIS_SIGNAL_STORE for the viewer (its service reads .env, not the crontab) and restart it.`
+  $('sg-note').textContent = j.load && j.load.error ? `Showing part of the day: ${j.load.error}` : j.store && !j.store.exists ? `The signal store ${j.store.path} does not exist on this machine: set JARVIS_SIGNAL_STORE for the viewer (its service reads .env, not the crontab) and restart it.`
     : (j.stale && j.newest ? 'Stale: the newest bucket is older than two buckets. Check the F&O feed and the engines (python -m signals watch).'
       : (!j.signals.length && j.store ? `No live rows for ${j.date} in ${j.store.path}${j.store.from_env ? '' : ' (JARVIS_SIGNAL_STORE is not set for the viewer)'}.` : ''));
   $('sg-daily').innerHTML = `<thead><tr><th>Signal</th><th>Family</th><th>Session</th><th>Values</th></tr></thead><tbody>${j.daily.map((d) =>
