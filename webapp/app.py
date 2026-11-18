@@ -280,10 +280,10 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             raise HTTPException(503, "no live book: the feed is not running, or this instrument is not subscribed")
         return JSONResponse(_json_safe(book))
 
-    @app.get("/api/signals/live")
-    def signals_live(underlying: str = "NIFTY", date: str | None = None):
-        """The live signal table of a day (signals/live_runner.py and the feed's order-book signals), read only."""
-        from . import signals_view
+    def _signal_store() -> Path:
+        return Path(os.getenv("JARVIS_SIGNAL_STORE") or "/srv/jarvis-research/store")
+
+    def _sg_args(underlying: str, date: str | None = None, signal: str | None = None, bucket: str | None = None):
         if not re.fullmatch(r"[A-Z]{2,20}", underlying):
             raise HTTPException(400, "bad underlying")
         day = None
@@ -292,13 +292,65 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
                 day = pd.Timestamp(date).date()
             except ValueError:
                 raise HTTPException(400, "bad date")
-        store = Path(os.getenv("JARVIS_SIGNAL_STORE") or "/srv/jarvis-research/store")
-        out = signals_view.summary(store, underlying, day)
+        if signal is not None and not re.fullmatch(r"[a-z0-9_]{2,60}", signal):
+            raise HTTPException(400, "bad signal")
+        if bucket is not None and not re.fullmatch(r"[0-9]{1,3}(s|min)", bucket):
+            raise HTTPException(400, "bad bucket")
+        return day
+
+    @app.get("/api/signals/live")
+    def signals_live(underlying: str = "NIFTY", date: str | None = None):
+        """The live signal table of a day (signals/live_runner.py and the feed's order-book signals), read only."""
+        from . import signals_view
+        day = _sg_args(underlying, date)
+        out = signals_view.summary(_signal_store(), underlying, day)
         if day is None or day == datetime.utcnow().date():
             live = _signal_bus()
             if live is not None:                          # engine v2 on the bus: the forming bucket, not only the stored rows
                 out = live.overlay(out)
         return JSONResponse(_json_safe(out))
+
+    @app.get("/api/signals/series")
+    def signals_series(underlying: str, signal: str, bucket: str, date: str | None = None, columns: str | None = None):
+        """One signal's day: every numeric column with its time-of-day z, and the previous session's series to compare."""
+        from . import signals_view
+        day = _sg_args(underlying, date, signal, bucket)
+        cols = [c for c in (columns or "").split(",") if re.fullmatch(r"[A-Za-z0-9_]{1,40}", c)] or None
+        return JSONResponse(_json_safe(signals_view.series(_signal_store(), underlying, signal, bucket, day, cols)))
+
+    @app.get("/api/signals/contracts")
+    def signals_contracts(underlying: str, signal: str, bucket: str, date: str | None = None, expiry: str | None = None, column: str | None = None):
+        """A per-contract signal by strike (newest snapshot) and as strike x time."""
+        from . import signals_view
+        day = _sg_args(underlying, date, signal, bucket)
+        if expiry is not None and not DATE_RE.match(expiry):
+            raise HTTPException(400, "bad expiry")
+        if column is not None and not re.fullmatch(r"[A-Za-z0-9_]{1,40}", column):
+            raise HTTPException(400, "bad column")
+        return JSONResponse(_json_safe(signals_view.contracts(_signal_store(), underlying, signal, bucket, day, expiry, column)))
+
+    @app.get("/api/signals/chain")
+    def signals_chain(underlying: str, date: str | None = None):
+        """The chain signals (skew, curvature, risk reversal, term slope, PCR, GEX, VRP ...) as small series."""
+        from . import signals_view
+        day = _sg_args(underlying, date)
+        return JSONResponse(_json_safe(signals_view.chain(_signal_store(), underlying, day)))
+
+    @app.get("/api/signals/smile")
+    def signals_smile(underlying: str, date: str | None = None, expiry: str | None = None):
+        """The IV smile from the option ticks, by strike now and by strike over the last hours (cached 30 s: it scans tick files)."""
+        from . import signals_view
+        day = _sg_args(underlying, date)
+        if expiry is not None and not DATE_RE.match(expiry):
+            raise HTTPException(400, "bad expiry")
+        return JSONResponse(cached(f"sg-smile:{underlying}:{day}:{expiry}", 30, lambda: signals_view.smile(lake_path, underlying, day, expiry)))
+
+    @app.get("/api/signals/history")
+    def signals_history(underlying: str, signal: str, bucket: str = "1min"):
+        """A signal across days from the nightly store."""
+        from . import signals_view
+        _sg_args(underlying, None, signal, bucket)
+        return JSONResponse(_json_safe(signals_view.history(_signal_store(), underlying, signal, bucket)))
 
     bus_state: dict = {}
 
