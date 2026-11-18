@@ -46,7 +46,7 @@
   <section id="view-instrument" class="view">
     <div class="page-head">
       <div><h1 id="eq-title">Equities</h1><p class="sub" id="eq-sub"></p></div>
-      <div class="toolbar">
+      <div class="sg-toolbar">
         <label class="field wide"><span>Instrument</span><select id="symbol"></select></label>
         <label class="field"><span>Precision</span><select id="width"></select></label>
         <label class="field"><span>Volatility window</span><select id="volwin"></select></label>
@@ -92,7 +92,7 @@
   <section id="view-overview" class="view" hidden>
     <div class="page-head">
       <div><h1>Market</h1><p class="sub" id="mk-sub"></p></div>
-      <div class="toolbar">
+      <div class="sg-toolbar">
         <label class="field"><span>Show</span><select id="heat-n"><option value="10">Top 10</option><option value="20" selected>Top 20</option><option value="50">Top 50</option><option value="0">All</option></select></label>
         <label class="field"><span>Colour by</span><select id="heat-metric"><option value="realised_vol_pct">Volatility</option><option value="return_pct">Return</option><option value="median_spread_bps">Spread</option></select></label>
       </div>
@@ -127,7 +127,7 @@
   <section id="view-fo" class="view" hidden>
     <div class="page-head">
       <div><h1 id="fo-title">Derivatives</h1><p class="sub" id="fo-sub"></p></div>
-      <div class="toolbar">
+      <div class="sg-toolbar">
         <label class="field"><span>Underlying</span><select id="underlying"></select></label>
         <label class="field"><span>Option expiry</span><select id="expiry"></select></label>
       </div>
@@ -309,22 +309,80 @@
     </div>
   </section>
 
-  <!-- ===================== Signals (SCRUM-199) ===================== -->
+  <!-- ===================== Signals (SCRUM-199, SCRUM-206) ===================== -->
   <section id="view-signals" class="view" hidden>
     <div class="page-head">
-      <div><h1>Signals</h1><p class="sub" id="sg-sub">Live values each bucket, beside the daily signals from the last close.</p></div>
+      <div><h1>Signals</h1><p class="sub" id="sg-sub">Every live signal by family, its day, the per-contract signals by strike, the chain and the IV smile, and the signals across days.</p></div>
       <label class="field"><span>Underlying</span><select id="sg-underlying"><option>NIFTY</option><option>BANKNIFTY</option><option>SENSEX</option></select></label>
     </div>
     <div id="sg-cards" class="kpis"></div>
     <nav class="subtabs" role="tablist" aria-label="Signal views" data-tab="signals">
-      <button role="tab" data-sub="live">Live</button>
+      <button role="tab" data-sub="live">Overview</button>
+      <button role="tab" data-sub="chart">Signal chart</button>
+      <button role="tab" data-sub="strike">By strike</button>
+      <button role="tab" data-sub="chain">Chain and smile</button>
+      <button role="tab" data-sub="history">History</button>
       <button role="tab" data-sub="daily">Daily</button>
     </nav>
+
     <div class="subview stack" data-sub="live">
-      <div class="panel"><header><h3>Latest bucket<span class="hint">z: against the same time of day in the last 20 sessions</span></h3></header>
-        <div class="table-wrap"><table id="sg-live"></table></div></div>
+      <div id="sg-families" class="stack"></div>
       <p class="note" id="sg-note"></p>
+      <p class="note">Click a signal for its day. z compares the value with the same time of day in the last 20 sessions. Per-contract signals show the front future's value when they have one, else the median across contracts; their strikes are under By strike.</p>
     </div>
+
+    <div class="subview stack" data-sub="chart" hidden>
+      <div class="sg-toolbar">
+        <label class="field"><span>Signal</span><select id="sg-pick"></select></label>
+        <div class="field"><span>Scale</span><div class="seg" id="sg-scale" role="group" aria-label="Scale"><button type="button" data-s="raw" aria-pressed="true">Raw</button><button type="button" data-s="z" aria-pressed="false">Standardised</button></div></div>
+        <label class="sg-check"><input type="checkbox" id="sg-prev" checked> Previous session</label>
+        <span class="muted" id="sg-chart-kpi"></span>
+      </div>
+      <p class="muted" id="sg-chart-msg" hidden></p>
+      <div class="panel"><header><h3 id="sg-chart-title">Signal</h3><span class="hint" id="sg-chart-hint"></span><div class="legend" id="sg-legend" data-for="chart-sg"></div></header>
+        <div class="body"><p class="note sg-doc" id="sg-chart-doc"></p><div id="chart-sg" class="plot h-xl" role="img" aria-label="The signal through the day"></div></div></div>
+      <div class="panel" id="sg-z-panel"><header><h3>Against its usual</h3><div class="legend" data-for="chart-sg-z"></div></header>
+        <div class="body"><div id="chart-sg-z" class="plot h-md" role="img" aria-label="The time-of-day z-score of the signal"></div><p class="muted" id="sg-z-msg" hidden></p></div></div>
+      <div class="panel" id="sg-events-panel" hidden><header><h3>Block prints</h3></header><div class="table-wrap"><table id="sg-events" class="sg-table"></table></div></div>
+    </div>
+
+    <div class="subview stack" data-sub="strike" hidden>
+      <div class="sg-toolbar">
+        <label class="field"><span>Signal</span><select id="sg-cpick"></select></label>
+        <label class="field"><span>Expiry</span><select id="sg-cexp"></select></label>
+        <label class="field"><span>Column</span><select id="sg-ccol"></select></label>
+      </div>
+      <p class="muted" id="sg-strike-msg" hidden></p>
+      <div class="panel"><header><h3>By strike<span class="hint" id="sg-strike-hint"></span></h3><div class="legend" data-for="chart-sg-strike"></div></header>
+        <div class="body"><p class="note sg-doc" id="sg-strike-doc"></p><div id="chart-sg-strike" class="plot h-lg" role="img" aria-label="The signal by strike, calls and puts"></div></div></div>
+      <div class="sg-two">
+        <div class="panel"><header><h3>Calls over the day<span class="hint">one snapshot a minute</span></h3></header><div class="body"><div id="chart-sg-heat-c" class="plot h-lg" role="img" aria-label="Calls: strike by time"></div></div></div>
+        <div class="panel"><header><h3>Puts over the day<span class="hint">one snapshot a minute</span></h3></header><div class="body"><div id="chart-sg-heat-p" class="plot h-lg" role="img" aria-label="Puts: strike by time"></div></div></div>
+      </div>
+      <div class="panel"><header><h3>Newest snapshot</h3></header><div class="table-wrap"><table id="sg-strike-table" class="sg-table"></table></div></div>
+    </div>
+
+    <div class="subview stack" data-sub="chain" hidden>
+      <div id="sg-chain-panels" class="stack"></div>
+      <div class="sg-toolbar"><label class="field"><span>Smile expiry</span><select id="sg-sexp"></select></label></div>
+      <p class="muted" id="sg-smile-msg" hidden></p>
+      <div class="sg-two">
+        <div class="panel"><header><h3>IV smile<span class="hint" id="sg-smile-hint"></span></h3><div class="legend" data-for="chart-sg-smile"></div></header><div class="body"><div id="chart-sg-smile" class="plot h-lg" role="img" aria-label="Implied volatility by strike, calls and puts"></div></div></div>
+        <div class="panel"><header><h3>Smile over the day<span class="hint">IV by strike, every 5 minutes</span></h3></header><div class="body"><div id="chart-sg-smile-heat" class="plot h-lg" role="img" aria-label="Implied volatility by strike and time"></div></div></div>
+      </div>
+      <div class="panel"><header><h3>ATM IV<span class="hint">the strike nearest the money</span></h3></header><div class="body"><div id="chart-sg-atm" class="plot h-md" role="img" aria-label="At-the-money implied volatility through the day"></div></div></div>
+      <p class="note">The smile is the vendor's IV on the option ticks (the lake), the last value in each 5 minutes. The chain signals above are the engines' own values.</p>
+    </div>
+
+    <div class="subview stack" data-sub="history" hidden>
+      <div class="sg-toolbar"><label class="field"><span>Signal</span><select id="sg-hpick"></select></label></div>
+      <p class="muted" id="sg-hist-msg" hidden></p>
+      <div class="panel"><header><h3>Across sessions<span class="hint" id="sg-hist-hint"></span></h3><div class="legend" data-for="chart-sg-hist"></div></header>
+        <div class="body"><p class="note sg-doc" id="sg-hist-doc"></p><div id="chart-sg-hist" class="plot h-lg" role="img" aria-label="The signal through each of the last sessions"></div></div></div>
+      <div class="panel"><div class="table-wrap"><table id="sg-htable" class="sg-table"></table></div></div>
+      <p class="note">From the signal store the nightly job writes (the live engines' rows replayed over the day's ticks); days before the first nightly run are not here.</p>
+    </div>
+
     <div class="subview stack" data-sub="daily" hidden>
       <div class="panel"><header><h3>Daily signals<span class="hint">known at the last close</span></h3></header>
         <div class="table-wrap"><table id="sg-daily"></table></div></div>
