@@ -117,13 +117,16 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
 
     @app.middleware("http")
     async def time_requests(request: Request, call_next):
-        t0 = time.perf_counter()
+        from .signals_store import rss_mb
+        t0, m0 = time.perf_counter(), rss_mb()
         resp = await call_next(request)
         dt = time.perf_counter() - t0
         path = request.url.path
         if path.startswith("/api/") and path != "/api/perf":
-            st = timing.setdefault(path, {"n": 0, "total": 0.0, "max": 0.0, "last": 0.0, "slowest_query": ""})
+            st = timing.setdefault(path, {"n": 0, "total": 0.0, "max": 0.0, "last": 0.0, "slowest_query": "", "rss_max": 0.0, "grow_max": 0.0})
             st["n"] += 1; st["total"] += dt; st["last"] = dt
+            m1 = rss_mb()
+            st["rss_max"], st["grow_max"] = max(st["rss_max"], m1), max(st["grow_max"], m1 - m0)       # the process's memory after, and the most one call added
             if dt >= st["max"]:
                 st["max"], st["slowest_query"] = dt, request.url.query[:200]
             if dt >= 1.0:
@@ -131,11 +134,19 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         resp.headers["Server-Timing"] = f"app;dur={dt * 1000:.0f}"
         return resp
 
+    from data_layer.query import QueryBusy
+
+    @app.exception_handler(QueryBusy)
+    async def query_busy(request: Request, exc: QueryBusy):
+        return JSONResponse({"detail": str(exc)}, status_code=503, headers={"Retry-After": "10"})
+
     @app.get("/api/perf")
     def perf():
+        from .signals_store import rss_mb
         """How long each API route has taken since the viewer started: calls, mean, slowest (and its query), last."""
         return {"routes": sorted(({"route": k, "calls": v["n"], "mean_s": round(v["total"] / v["n"], 3), "max_s": round(v["max"], 3), "last_s": round(v["last"], 3),
-                                   "slowest_query": v["slowest_query"]} for k, v in timing.items()), key=lambda r: -r["max_s"])}
+                                   "slowest_query": v["slowest_query"], "rss_mb_max": round(v["rss_max"]), "most_added_mb": round(v["grow_max"])}
+                                  for k, v in timing.items()), key=lambda r: -r["max_s"]), "rss_mb_now": round(rss_mb())}
     from .admin import admin_router
     admin = admin_router(lake_path)
     if admin is not None:                            # only when a login exists: WEBAPP_USER/PASSWORD (also covers the viewer) or ADMIN_USER/PASSWORD
