@@ -155,6 +155,7 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
         lake = Lake(lake_dir)
         tables = lake.tables()
     except Exception as exc:                                  # one damaged Parquet file must not hide every other check
+        lake = None          # Lake() binds its bar views lazily since 18 Nov 2026 (SCRUM-206), so a damaged file surfaces in tables(): the lake is then not open
         lake_error = str(exc).splitlines()[0][:200]
         r.line("FAIL", f"the lake cannot be opened: {lake_error}")
 
