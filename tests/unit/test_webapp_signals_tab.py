@@ -224,3 +224,52 @@ def test_the_store_is_found_from_the_checkout_when_the_viewer_has_no_environment
     j2 = c.get("/api/signals/live", params={"underlying": "NIFTY", "date": "2026-11-13"}).json()
     assert j2["signals"] == [] and j2["store"]["exists"] in (True, False) and j2["store"]["from_env"] is False
     signals_store.forget()
+
+
+def test_thinning_inside_duckdb_keeps_exactly_what_the_tab_shows(tmp_path, monkeypatch):
+    """The first read of a day drops the per-contract option rows that are not at a full minute before they reach pandas (nine in ten); what the
+    tab shows must not change: the same summary, strike snapshot and heatmap as when every row is read."""
+    signals_store.forget()
+    for k in range(6):                                                    # six files of 100 s each, so the thinned part and the whole-read tail both occur
+        write_rows(contract_rows("book_pressure", 100, start=100 * k), tmp_path, prefix=f"engine-NIFTY-1s-{k}")
+        write_rows(single_rows("skew", 2, start=2 * k), tmp_path, prefix=f"engine-NIFTY-1m-{k}")
+    out = {}
+    for name, tail in (("thin", 1), ("whole", 10_000)):
+        signals_store.forget()
+        monkeypatch.setattr(signals_store, "TAIL_FILES", tail)
+        s = signals_view.summary(tmp_path, "NIFTY", DAY.date(), NOW)
+        c = signals_view.contracts(tmp_path, "NIFTY", "book_pressure", "1s", DAY.date())
+        sr = signals_view.series(tmp_path, "NIFTY", "book_pressure", "1s", DAY.date())
+        out[name] = (s["signals"], c["snapshot"], c["heat"], sr["t"], sr["series"])
+    assert out["thin"] == out["whole"]
+    assert len(out["thin"][2]["times"]) == 10 and len(out["thin"][3]) == 600
+    signals_store.forget()
+
+
+def test_every_api_call_is_timed_and_the_perf_route_and_sweep_report_it(store, monkeypatch, tmp_path, capsys):
+    """SCRUM-206: "the viewer takes forever" needed numbers: /api/perf lists calls, mean and slowest per route (and the slowest query), a request over
+    a second is logged, every response carries Server-Timing, and python -m webapp.perf times each tab's requests twice."""
+    monkeypatch.setenv("JARVIS_SIGNAL_STORE", str(store))
+    c = TestClient(create_app(tmp_path / "lake"))
+    r = c.get("/api/signals/live", params={"underlying": "NIFTY", "date": "2026-11-13"})
+    assert r.headers["Server-Timing"].startswith("app;dur=")
+    c.get("/api/signals/chain", params={"underlying": "NIFTY", "date": "2026-11-13"})
+    routes = {x["route"]: x for x in c.get("/api/perf").json()["routes"]}
+    assert routes["/api/signals/live"]["calls"] == 1 and routes["/api/signals/live"]["max_s"] >= 0 and "underlying=NIFTY" in routes["/api/signals/live"]["slowest_query"]
+    assert "/api/perf" not in routes
+    from webapp import perf
+    import threading, socket, time, uvicorn
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    write_fake_lake(tmp_path / "lake")
+    server = uvicorn.Server(uvicorn.Config(create_app(tmp_path / "lake"), host="127.0.0.1", port=port, log_level="warning"))
+    th = threading.Thread(target=server.run, daemon=True); th.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.1)
+    try:
+        assert perf.main(["--base", f"http://127.0.0.1:{port}", "--report", str(tmp_path / "perf.txt")]) == 0
+    finally:
+        server.should_exit = True; th.join(10)
+    text = (tmp_path / "perf.txt").read_text()
+    assert "first" in text and "/api/signals/live" in text and "the viewer's own timings" in text

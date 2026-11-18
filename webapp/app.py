@@ -29,6 +29,7 @@ for remote access, and/or set WEBAPP_USER and WEBAPP_PASSWORD to require HTTP Ba
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import re
 import secrets
@@ -112,6 +113,29 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     app = FastAPI(title="JARVIS intraday viewer", docs_url=None, redoc_url=None, dependencies=[Depends(auth)])
     app.add_middleware(GZipMiddleware, minimum_size=1000)
     app.state.lake_path = lake_path
+    timing: dict[str, dict] = {}                     # route -> {n, total, max, last, bytes}: what /api/perf reports (SCRUM-206: "the viewer loads forever")
+
+    @app.middleware("http")
+    async def time_requests(request: Request, call_next):
+        t0 = time.perf_counter()
+        resp = await call_next(request)
+        dt = time.perf_counter() - t0
+        path = request.url.path
+        if path.startswith("/api/") and path != "/api/perf":
+            st = timing.setdefault(path, {"n": 0, "total": 0.0, "max": 0.0, "last": 0.0, "slowest_query": ""})
+            st["n"] += 1; st["total"] += dt; st["last"] = dt
+            if dt >= st["max"]:
+                st["max"], st["slowest_query"] = dt, request.url.query[:200]
+            if dt >= 1.0:
+                logging.getLogger("webapp").warning("slow request: %s?%s took %.1f s (status %s)", path, request.url.query[:200], dt, resp.status_code)
+        resp.headers["Server-Timing"] = f"app;dur={dt * 1000:.0f}"
+        return resp
+
+    @app.get("/api/perf")
+    def perf():
+        """How long each API route has taken since the viewer started: calls, mean, slowest (and its query), last."""
+        return {"routes": sorted(({"route": k, "calls": v["n"], "mean_s": round(v["total"] / v["n"], 3), "max_s": round(v["max"], 3), "last_s": round(v["last"], 3),
+                                   "slowest_query": v["slowest_query"]} for k, v in timing.items()), key=lambda r: -r["max_s"])}
     from .admin import admin_router
     admin = admin_router(lake_path)
     if admin is not None:                            # only when a login exists: WEBAPP_USER/PASSWORD (also covers the viewer) or ADMIN_USER/PASSWORD

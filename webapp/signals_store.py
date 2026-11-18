@@ -30,7 +30,8 @@ import pandas as pd
 
 log = logging.getLogger("webapp.signals")
 
-BATCH = 100                      # files per DuckDB read
+BATCH = 50                       # files per DuckDB read
+TAIL_FILES = 4                   # the newest files are read whole (the newest snapshot of every per-contract signal is in them)
 MIN_REFRESH_S = 3.0              # look for new files at most this often
 HIST_SECONDS = 60                # per-contract signals keep the snapshot at second 0 of each minute
 EVENT_SIGNALS = {"block_prints"}
@@ -71,18 +72,23 @@ class LiveDay:
         return sorted(folder.glob("*.parquet")) if folder.is_dir() else []
 
     @staticmethod
-    def _read(paths: list) -> Optional[pd.DataFrame]:
+    def _read(paths: list, thin: bool = False) -> Optional[pd.DataFrame]:
+        """The rows of `paths`.  With `thin` the per-contract option rows are dropped inside DuckDB except the full minute (what `hist` keeps anyway):
+        nine rows in ten never reach pandas, which is what made the first read of a day take minutes and gigabytes (measured 18 Nov 2026)."""
         import duckdb
-        try:
-            con = duckdb.connect()
-            con.execute("SET threads=2")
-            con.execute("SET memory_limit='700MB'")
-            q = "[" + ", ".join("'" + str(p).replace("'", "''") + "'" for p in paths) + "]"
-            df = con.execute(f"SELECT * FROM read_parquet({q}, union_by_name=true)").df()
-            con.close()
-            return df
-        except Exception as exc:                      # noqa: BLE001 -- mixed column types or a half-written file: file by file
-            log.warning("signals tab: batch read failed (%s); reading the files one by one", exc)
+        q = "[" + ", ".join("'" + str(p).replace("'", "''") + "'" for p in paths) + "]"
+        sql = f"SELECT * FROM read_parquet({q}, union_by_name=true)"
+        where = " WHERE symbol IS NULL OR contains(symbol, '_FUT_') OR date_trunc('minute', known_at) = known_at OR signal = 'block_prints'"
+        for with_filter in ((True, False) if thin else (False,)):
+            try:
+                con = duckdb.connect()
+                con.execute("SET threads=2")
+                con.execute("SET memory_limit='600MB'")
+                df = con.execute(sql + (where if with_filter else "")).df()
+                con.close()
+                return df
+            except Exception as exc:                  # noqa: BLE001 -- no symbol column in these files, mixed column types, or a half-written file
+                log.info("signals tab: batch read (filter=%s) failed: %s", with_filter, str(exc)[:120])
         parts = []
         for p in paths:
             try:
@@ -96,9 +102,13 @@ class LiveDay:
             files = [f for f in self._files() if f.name not in self.seen]
             with self.lock:
                 self.files_total = len(self.seen) + len(files)
+            body = max(len(files) - TAIL_FILES, 0) if len(files) > 2 * TAIL_FILES else 0       # a few new files: read them whole
             for i in range(0, len(files), BATCH):
                 batch = files[i:i + BATCH]
-                df = self._read(batch)
+                k = min(max(body - i, 0), len(batch))            # the first k files of this batch are thinned, the rest (the newest files) read whole
+                parts = [self._read(batch[:k], thin=True) if k else None, self._read(batch[k:]) if k < len(batch) else None]
+                parts = [x for x in parts if x is not None and len(x)]
+                df = pd.concat(parts, ignore_index=True) if len(parts) > 1 else (parts[0] if parts else None)
                 if df is not None and len(df):
                     self._ingest(df)
                 with self.lock:
