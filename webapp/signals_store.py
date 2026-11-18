@@ -31,7 +31,9 @@ import pandas as pd
 log = logging.getLogger("webapp.signals")
 
 BATCH = 50                       # files per DuckDB read
-TAIL_FILES = 4                   # the newest files are read whole (the newest snapshot of every per-contract signal is in them)
+TAIL_FILES = 4                   # the newest files are read whole (the newest snapshot of every per-contract signal is in them) ...
+TAIL_MAX_BYTES = 50 * 2**20      # ... when they are small: a compacted day is one file of 1 GB and is always thinned
+BATCH_ROWS = 196_608             # rows per streamed pandas frame
 MIN_REFRESH_S = 3.0              # look for new files at most this often
 HIST_SECONDS = 60                # per-contract signals keep the snapshot at second 0 of each minute
 EVENT_SIGNALS = {"block_prints"}
@@ -90,29 +92,48 @@ class LiveDay:
         return sorted(folder.glob("*.parquet")) if folder.is_dir() else []
 
     @staticmethod
-    def _read(paths: list, thin: bool = False) -> Optional[pd.DataFrame]:
-        """The rows of `paths`.  With `thin` the per-contract option rows are dropped inside DuckDB except the full minute (what `hist` keeps anyway):
-        nine rows in ten never reach pandas, which is what made the first read of a day take minutes and gigabytes (measured 18 Nov 2026)."""
+    def _batches(paths: list, thin: bool = False):
+        """The rows of `paths` as pandas frames of at most BATCH_ROWS rows, streamed: a compacted day is ONE file of 60 M rows and 136 columns (1.1 GB, 18 Nov
+        2026) and the whole result as one pandas frame was 2.7 GB even after the thinning, because every signal shares those 136 columns.  With `thin` the
+        per-contract option rows that are not at a full minute are dropped inside DuckDB (what `hist` keeps anyway).  A frame is reduced by _ingest before the
+        next is read, and _ingest keeps only each signal's own (not all-null) columns."""
         import duckdb
         q = "[" + ", ".join("'" + str(p).replace("'", "''") + "'" for p in paths) + "]"
         sql = f"SELECT * FROM read_parquet({q}, union_by_name=true)"
         where = " WHERE symbol IS NULL OR contains(symbol, '_FUT_') OR date_trunc('minute', known_at) = known_at OR signal = 'block_prints'"
         for with_filter in ((True, False) if thin else (False,)):
+            con = None
             try:
                 con = duckdb.connect()
                 con.execute("SET threads=2")
                 con.execute("SET memory_limit='400MB'")
-                df = con.execute(sql + (where if with_filter else "")).df()
+                con.execute(sql + (where if with_filter else ""))
+                while True:                                # chunks of about BATCH_ROWS rows (100 DuckDB vectors of 2048), never the whole result
+                    chunk = con.fetch_df_chunk(max(BATCH_ROWS // 2048, 1))
+                    if chunk is None or not len(chunk):
+                        break
+                    yield chunk
                 con.close()
-                return df
+                return
             except Exception as exc:                  # noqa: BLE001 -- no symbol column in these files, mixed column types, or a half-written file
                 log.info("signals tab: batch read (filter=%s) failed: %s", with_filter, str(exc)[:120])
-        parts = []
-        for p in paths:
+                if con is not None:
+                    try:
+                        con.close()
+                    except Exception:                 # noqa: BLE001
+                        pass
+                if with_filter is False or not thin:
+                    break
+        for p in paths:                               # last resort, file by file (small files only)
             try:
-                parts.append(pd.read_parquet(p))
+                if Path(p).stat().st_size < 64 * 2**20:
+                    yield pd.read_parquet(p)
             except Exception:                         # noqa: BLE001
                 continue
+
+    @staticmethod
+    def _read(paths: list, thin: bool = False) -> Optional[pd.DataFrame]:
+        parts = list(LiveDay._batches(paths, thin))
         return pd.concat(parts, ignore_index=True) if parts else None
 
     def refresh(self) -> None:
@@ -120,7 +141,8 @@ class LiveDay:
             files = [f for f in self._files() if f.name not in self.seen]
             with self.lock:
                 self.files_total = len(self.seen) + len(files)
-            body = max(len(files) - TAIL_FILES, 0) if len(files) > 2 * TAIL_FILES else 0       # a few new files: read them whole
+            whole = set(files[-TAIL_FILES:]) if len(files) > 2 * TAIL_FILES else set(files)       # the newest few files (all of a short list) are read whole ...
+            thin_of = {f: not (f in whole and f.stat().st_size <= TAIL_MAX_BYTES) for f in files}    # ... unless they are big: a compacted day is one 1 GB file
             for i in range(0, len(files), BATCH):
                 if rss_mb() > mem_guard_mb():                  # better a partial day and a message than a killed viewer
                     with self.lock:
@@ -129,12 +151,16 @@ class LiveDay:
                     log.warning("signals tab: %s", self.error)
                     return
                 batch = files[i:i + BATCH]
-                k = min(max(body - i, 0), len(batch))            # the first k files of this batch are thinned, the rest (the newest files) read whole
-                parts = [self._read(batch[:k], thin=True) if k else None, self._read(batch[k:]) if k < len(batch) else None]
-                parts = [x for x in parts if x is not None and len(x)]
-                df = pd.concat(parts, ignore_index=True) if len(parts) > 1 else (parts[0] if parts else None)
-                if df is not None and len(df):
-                    self._ingest(df)
+                groups: list = []                                  # runs of files with the same treatment, in order
+                for f in batch:
+                    if groups and groups[-1][1] == thin_of[f]:
+                        groups[-1][0].append(f)
+                    else:
+                        groups.append(([f], thin_of[f]))
+                for chunk, thin in groups:
+                    for df in self._batches(chunk, thin=thin):
+                        if len(df):
+                            self._ingest(df)
                 with self.lock:
                     self.seen.update(f.name for f in batch)
             with self.lock:
