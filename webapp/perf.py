@@ -38,7 +38,15 @@ day, sym, und, store = {day!r}, {sym!r}, {und!r}, {store!r}
 t0 = time.perf_counter()
 rows = None
 {body}
-print(json.dumps({{"secs": round(time.perf_counter() - t0, 2), "rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024, "rows": rows}}))
+def _hwm_mb():                                  # this process's own peak (ru_maxrss would also carry the parent's peak across exec)
+    try:
+        for line in open("/proc/self/status"):
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+sys.stdout.write("\n@@RESULT " + json.dumps({{"secs": round(time.perf_counter() - t0, 2), "rss_mb": _hwm_mb(), "rows": rows}}) + "\n")
 """
 
 DIRECT_CALLS = [
@@ -61,6 +69,9 @@ def direct(day, limit, report) -> int:
     def out(s=""):
         print(s, flush=True)
         lines.append(s)
+        if report:                                                              # after every line: a crash or a stop keeps what was measured
+            with open(report, "w") as fh:
+                fh.write("\n".join(lines) + "\n")
 
     from data_layer.query import Lake
     q = Lake()
@@ -75,8 +86,9 @@ def direct(day, limit, report) -> int:
         code = _CHILD.format(day=day, sym=sym, und="NIFTY", store=store, body=body.replace("\\n", "\n"))
         try:
             r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=limit)
-            if r.returncode == 0 and r.stdout.strip():
-                j = json.loads(r.stdout.strip().splitlines()[-1])
+            hit = [x for x in r.stdout.replace("\r", "\n").splitlines() if x.startswith("@@RESULT ")]
+            if r.returncode == 0 and hit:                                       # a progress bar or any other output before the marker is ignored
+                j = json.loads(hit[-1][len("@@RESULT "):])
                 out(f"{j['secs']:8.1f} {j['rss_mb']:8d} {j['rows']!s:>9}  {name}")
             else:
                 out(f"{'failed':>8} {'':>8} {'':>9}  {name}: {(r.stderr or '').strip().splitlines()[-1:] }")
