@@ -362,3 +362,31 @@ def test_the_market_overview_in_batches_gives_the_same_rows_and_the_direct_repor
     assert perf.main(["--direct", "--date", day, "--limit", "60", "--report", str(tmp_path / "d.txt")]) == 0
     text = (tmp_path / "d.txt").read_text()
     assert "noisy" in text and "7" in text and "failed" not in text
+
+
+def test_a_compacted_day_in_one_wide_file_loads_in_chunks_and_gives_the_same_tab(tmp_path, monkeypatch):
+    """18 Nov 2026 (VPS): the day's live rows had been compacted into ONE file, 1.1 GB, 60.5 M rows, 136 columns (every signal's columns side by side).  Even
+    thinned, the result as one pandas frame was about 2.7 GB and every read was OOM-killed.  The rows now stream in chunks and each signal keeps only its
+    own columns; the tab must be the same as from the engines' small files, and a big file is always thinned."""
+    import duckdb
+    from webapp import signals_store as ss
+    small, wide = tmp_path / "small", tmp_path / "wide"
+    fill(small)
+    folder = wide / "live" / f"date={DAY.date()}"
+    folder.mkdir(parents=True)
+    extra = ", ".join(f"CAST(NULL AS DOUBLE) AS pad{i}" for i in range(100))
+    duckdb.connect().execute(f"COPY (SELECT *, {extra} FROM read_parquet('{small}/live/date={DAY.date()}/*.parquet', union_by_name=true)) TO '{folder}/live-compacted.parquet' (FORMAT PARQUET)")
+    monkeypatch.setattr(ss, "BATCH_ROWS", 4096)                                  # several chunks, so the streaming is exercised
+    monkeypatch.setattr(ss, "TAIL_MAX_BYTES", 1)                                 # the one file counts as big: thinned
+    out = {}
+    for name, store_ in (("small", small), ("wide", wide)):
+        ss.forget()
+        s = signals_view.summary(store_, "NIFTY", DAY.date(), NOW)
+        c = signals_view.contracts(store_, "NIFTY", "book_pressure", "1s", DAY.date())
+        sr = signals_view.series(store_, "NIFTY", "skew", "1min", DAY.date())
+        out[name] = ([{k: v for k, v in x.items() if k not in ("n",)} for x in s["signals"]], c["heat"], sr["series"], sr["z"])
+    assert out["small"][1:] == out["wide"][1:]
+    a, b = out["small"][0], out["wide"][0]
+    assert [x["signal"] for x in a] == [x["signal"] for x in b] and all("pad0" not in x["columns"] for x in b)      # a signal keeps its own columns only
+    assert [x["values"] for x in a if x["kind"] != "contract"] == [x["values"] for x in b if x["kind"] != "contract"]
+    ss.forget()
