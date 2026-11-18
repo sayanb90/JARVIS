@@ -281,7 +281,13 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         return JSONResponse(_json_safe(book))
 
     def _signal_store() -> Path:
-        return Path(os.getenv("JARVIS_SIGNAL_STORE") or "/srv/jarvis-research/store")
+        """$JARVIS_SIGNAL_STORE, else the checkout's own store/ when it holds live rows (the viewer service runs in the checkout but reads only .env,
+        not the crontab's settings: on 18 Nov 2026 it looked in /srv/jarvis-research/store, which does not exist there), else the research default."""
+        env = os.getenv("JARVIS_SIGNAL_STORE")
+        if env:
+            return Path(env)
+        local = Path.cwd() / "store"
+        return local if (local / "live").is_dir() else Path("/srv/jarvis-research/store")
 
     def _sg_args(underlying: str, date: str | None = None, signal: str | None = None, bucket: str | None = None):
         if not re.fullmatch(r"[A-Z]{2,20}", underlying):
@@ -303,7 +309,9 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         """The live signal table of a day (signals/live_runner.py and the feed's order-book signals), read only."""
         from . import signals_view
         day = _sg_args(underlying, date)
-        out = signals_view.summary(_signal_store(), underlying, day)
+        store = _signal_store()
+        out = signals_view.summary(store, underlying, day)
+        out["store"] = {"path": str(store), "exists": store.is_dir(), "from_env": bool(os.getenv("JARVIS_SIGNAL_STORE"))}
         if day is None or day == datetime.utcnow().date():
             live = _signal_bus()
             if live is not None:                          # engine v2 on the bus: the forming bucket, not only the stored rows

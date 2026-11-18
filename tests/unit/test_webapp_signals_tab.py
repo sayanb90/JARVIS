@@ -208,3 +208,19 @@ def test_iv_smile_from_the_option_ticks(tmp_path):
     ot = s["over_time"]
     assert len(ot["iv"]) == len(ot["strikes"]) and len(ot["iv"][0]) == len(ot["times"]) and s["atm"]
     assert signals_view.smile(tmp_path, "BANKNIFTY", TICK_DAY)["latest"] is None
+
+
+def test_the_store_is_found_from_the_checkout_when_the_viewer_has_no_environment(tmp_path, monkeypatch):
+    """18 Nov 2026: the viewer service reads only .env, so JARVIS_SIGNAL_STORE (set in the crontab) was missing and it read a folder that does not
+    exist.  It now uses <working directory>/store when that holds live rows, and says which store it reads."""
+    signals_store.forget()
+    monkeypatch.delenv("JARVIS_SIGNAL_STORE", raising=False)
+    fill(tmp_path / "store")
+    monkeypatch.chdir(tmp_path)
+    c = TestClient(create_app(tmp_path / "lake"))
+    j = c.get("/api/signals/live", params={"underlying": "NIFTY", "date": "2026-11-13"}).json()
+    assert j["store"] == {"path": str(tmp_path / "store"), "exists": True, "from_env": False} and j["signals"]
+    monkeypatch.chdir(tmp_path / "store")                                                   # no store/ here: the research default, reported as missing
+    j2 = c.get("/api/signals/live", params={"underlying": "NIFTY", "date": "2026-11-13"}).json()
+    assert j2["signals"] == [] and j2["store"]["exists"] in (True, False) and j2["store"]["from_env"] is False
+    signals_store.forget()

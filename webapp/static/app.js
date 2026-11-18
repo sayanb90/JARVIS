@@ -1431,7 +1431,9 @@ function renderSignals() {
     const go = () => { state.sg.pick = tr.dataset.key; showSub('signals', 'chart'); refreshSgSub(); };
     tr.onclick = go; tr.onkeydown = (e) => { if (e.key === 'Enter') go(); };
   });
-  $('sg-note').textContent = j.stale && j.newest ? 'Stale: the newest bucket is older than two buckets. Check the F&O feed and the engines (python -m signals watch).' : '';
+  $('sg-note').textContent = j.store && !j.store.exists ? `The signal store ${j.store.path} does not exist on this machine: set JARVIS_SIGNAL_STORE for the viewer (its service reads .env, not the crontab) and restart it.`
+    : (j.stale && j.newest ? 'Stale: the newest bucket is older than two buckets. Check the F&O feed and the engines (python -m signals watch).'
+      : (!j.signals.length && j.store ? `No live rows for ${j.date} in ${j.store.path}${j.store.from_env ? '' : ' (JARVIS_SIGNAL_STORE is not set for the viewer)'}.` : ''));
   $('sg-daily').innerHTML = `<thead><tr><th>Signal</th><th>Family</th><th>Session</th><th>Values</th></tr></thead><tbody>${j.daily.map((d) =>
     `<tr title="${escHtml(d.doc || '')}"><td>${escHtml(d.signal)}</td><td>${escHtml(d.family_label || '')}</td><td>${escHtml(d.date)}</td><td class="wrap">${Object.entries(d.values).slice(0, 6).map(([k, x]) => `${escHtml(k)} ${fmt(x, 4)}`).join(' · ')}</td></tr>`).join('') ||
     '<tr><td colspan="4" class="muted">The nightly job has not written any daily signals yet.</td></tr>'}</tbody>`;
