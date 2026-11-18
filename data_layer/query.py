@@ -19,6 +19,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import threading
+
 import duckdb
 import pandas as pd
 
@@ -28,7 +30,9 @@ from .lake import LAKE_DIR
 PE_MAX, ROIC_MIN, LT_DEBT_FCF_MAX, PFCF_MAX = 22.5, 0.09, 5.0, 20.0
 TRADING_DAYS = 250
 FO_REGEX = tick_store.FO_REGEX                  # lake symbols of futures and options
-VIEWER_MEMORY_GB = 2.0                         # DuckDB memory per query connection; beyond it sorts and joins spill to disk (SCRUM-129)
+VIEWER_MEMORY_GB = 0.6                         # DuckDB memory per query connection; beyond it sorts and joins spill to disk (SCRUM-129).  Was 2.0 until 18 Nov 2026: above the
+                                               # viewer service's MemoryMax (1500M), so a heavy day query was OOM-killed (the viewer restarted 7 times in 25 minutes)
+VIEWER_QUERIES = 2                             # queries running at once in the viewer process (each connection has its own memory limit)
 
 _NULLABLE = {"oi": "DOUBLE", "bid": "DOUBLE", "ask": "DOUBLE", "bid_qty": "DOUBLE", "ask_qty": "DOUBLE", "vol_today": "DOUBLE"}   # as the feed writes them
 
@@ -57,6 +61,9 @@ def _cached(key: tuple, compute):
     return _CACHE[key]
 
 
+_QUERY_SLOTS = threading.BoundedSemaphore(VIEWER_QUERIES)
+
+
 def _memory_limit() -> str:
     try:
         gb = float(os.environ.get("JARVIS_VIEWER_MEMORY_GB") or VIEWER_MEMORY_GB)
@@ -69,7 +76,11 @@ class Lake:
     def __init__(self, lake_dir: Path | str | None = None) -> None:
         self.dir = Path(lake_dir) if lake_dir else LAKE_DIR
         self.con = duckdb.connect()
+        # The bars_* views read the footer of every parquet file of every day when they are created (union_by_name): about 1 s and 200 MB for 12,000 tick
+        # files, held until the connection is dropped, and the page makes several requests at once.  They are created when a query first names them.
+        self._pending: dict = {}                                      # view name -> SQL, or a function that builds it
         self.con.execute(f"SET memory_limit='{_memory_limit()}'")
+        self.con.execute("SET threads=2")
         self.con.execute(f"SET temp_directory='{Path(tempfile.gettempdir()) / 'jarvis-viewer-spill'}'")
         for name in ("income_statement", "balance_sheet", "cash_flow", "ratios", "pillar_metrics"):
             f = self.dir / "fundamentals" / f"{name}.parquet"
@@ -83,25 +94,26 @@ class Lake:
         for iv in bar_ivs:
             if iv == "1s":
                 continue                                             # handled below: may be ticks-derived too
-            self.con.execute(
-                f"CREATE VIEW bars_{iv} AS SELECT * FROM "
-                f"read_parquet('{self.dir}/bars/interval={iv}/date=*/*.parquet', union_by_name=true)")
+            self._pending[f"bars_{iv}"] = (f"SELECT * FROM "
+                                           f"read_parquet('{self.dir}/bars/interval={iv}/date=*/*.parquet', union_by_name=true)")
         tick_patterns = [pat for pat, probe in ((f"{self.dir}/ticks/date=*/*.parquet", "date=*/*.parquet"),
                                                 (f"{self.dir}/ticks/segment=*/date=*/*.parquet", "segment=*/date=*/*.parquet"))
                          if any((self.dir / "ticks").glob(probe))]            # the older layout and the segment layout (SCRUM-133)
         has_ticks = bool(tick_patterns)
         self.has_ticks = has_ticks
         if "1s" in bar_ivs or has_ticks:
-            parts = []
-            legacy_1s_dates = set()
-            if "1s" in bar_ivs:
-                legacy_1s_dates = {p.name.split("=", 1)[1] for p in (self.dir / "bars" / "interval=1s").glob("date=*")
-                                   if any(p.glob("*.parquet"))}
-                parts.append(f"SELECT * FROM read_parquet("
-                            f"'{self.dir}/bars/interval=1s/date=*/*.parquet', union_by_name=true)")
-            if has_ticks:
-                parts.append(self._ticks_bars_sql(tick_patterns, exclude_dates=legacy_1s_dates or None))
-            self.con.execute(f"CREATE VIEW bars_1s AS {' UNION ALL BY NAME '.join(parts)}")
+            def build_bars_1s() -> str:                              # built when a query names bars_1s: its DESCRIBE reads the footer of every tick file
+                parts = []
+                legacy_1s_dates = set()
+                if "1s" in bar_ivs:
+                    legacy_1s_dates = {p.name.split("=", 1)[1] for p in (self.dir / "bars" / "interval=1s").glob("date=*")
+                                       if any(p.glob("*.parquet"))}
+                    parts.append(f"SELECT * FROM read_parquet("
+                                f"'{self.dir}/bars/interval=1s/date=*/*.parquet', union_by_name=true)")
+                if has_ticks:
+                    parts.append(self._ticks_bars_sql(tick_patterns, exclude_dates=legacy_1s_dates or None))
+                return ' UNION ALL BY NAME '.join(parts)
+            self._pending["bars_1s"] = build_bars_1s
 
     # -- raw ticks -> bar-shaped rows (SCRUM-77: the live feed stores ticks, not 1-second bars) -----
     @staticmethod
@@ -114,7 +126,10 @@ class Lake:
         BarAggregator.add's semantics); bid/ask/bid_qty/ask_qty/oi are the last value seen in the bucket.
         """
         try:
-            cols = {r[0] for r in duckdb.connect().execute(f"DESCRIBE SELECT * FROM {_rp(pattern)}").fetchall()}
+            probe = duckdb.connect()
+            probe.execute("SET memory_limit='300MB'")                  # a bare connection may use 80% of the machine
+            cols = {r[0] for r in probe.execute(f"DESCRIBE SELECT * FROM {_rp(pattern)}").fetchall()}
+            probe.close()
         except Exception:                                            # noqa: BLE001 -- no readable file: behave as before
             cols = {"ts"}
         ev, od = Lake._time_exprs(cols)
@@ -158,19 +173,30 @@ class Lake:
         return ev, tick_store.order_expr([c for c in ("rts", "fts", "ts") if c in cols])
 
     # -- generic ------------------------------------------------------------
+    def _views_for(self, query: str) -> None:
+        """Create the bars_* views this query names (all of them for SHOW TABLES)."""
+        for name in [n for n in self._pending if n in query or "SHOW TABLES" in query]:
+            sql = self._pending.pop(name)
+            self.con.execute(f"CREATE VIEW {name} AS {sql() if callable(sql) else sql}")
+
+    def _exec(self, query: str, params: list | None = None):
+        self._views_for(query)
+        return self.con.execute(query, params or [])
+
     def sql(self, query: str, params: list | None = None) -> pd.DataFrame:
-        return self.con.execute(query, params or []).df()
+        with _QUERY_SLOTS:                              # at most VIEWER_QUERIES at once: every connection may use its whole memory limit
+            return self._exec(query, params).df()
 
     def tables(self) -> list[str]:
-        return [r[0] for r in self.con.execute("SHOW TABLES").fetchall()]
+        return [r[0] for r in self._exec("SHOW TABLES").fetchall()]
 
     # -- universe -----------------------------------------------------------
     def symbols(self, market: str | None = None) -> list[str]:
         q = "SELECT symbol FROM pillar_metrics" + (" WHERE market = ?" if market else "") + " ORDER BY symbol"
-        return [r[0] for r in self.con.execute(q, [market] if market else []).fetchall()]
+        return [r[0] for r in self._exec(q, [market] if market else []).fetchall()]
 
     def markets(self) -> list[str]:
-        return [r[0] for r in self.con.execute(
+        return [r[0] for r in self._exec(
             "SELECT DISTINCT market FROM pillar_metrics ORDER BY 1").fetchall()]
 
     # -- prices -------------------------------------------------------------
@@ -184,7 +210,7 @@ class Lake:
             [market] if market else [])
 
     def latest_price(self, symbol: str) -> float | None:
-        r = self.con.execute(
+        r = self._exec(
             "SELECT close FROM ohlc WHERE symbol = ? ORDER BY date DESC LIMIT 1", [symbol]).fetchone()
         return r[0] if r else None
 
@@ -227,7 +253,7 @@ class Lake:
         if frame is not None:
             self.con.register("_rollup_src", frame)
             src = "_rollup_src"
-        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        cols = {r[0] for r in self._exec(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         oi_col = f", {last('oi')}" if "oi" in cols else ""                      # futures and options carry open interest
         return self.sql(f"""
             SELECT symbol, market, bucket AS ts,
@@ -329,7 +355,7 @@ class Lake:
         if not files:
             return pd.DataFrame()
         src = _rp(files)
-        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        cols = {r[0] for r in self._exec(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         ev, od = self._time_exprs(cols)
         return self.sql(f"""
             WITH raw AS (SELECT symbol, ltp, vol_today, bid, ask, bid_qty, ask_qty, oi, {ev} AS _ev, {od} AS _ord
@@ -367,7 +393,7 @@ class Lake:
         rise of the cumulative volume, the first tick only sets the baseline, a fall counts as zero), last close, first and last open
         interest.  The same numbers the bars give, from one pass over the matching rows (SCRUM-130: this took 7 s through the bars)."""
         src = _rp(files)
-        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        cols = {r[0] for r in self._exec(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         ev, od = self._time_exprs(cols)
         df = self.sql(f"""
             WITH raw AS (SELECT symbol, ltp, vol_today, oi, {ev} AS _ev, {od} AS _ord
@@ -405,7 +431,7 @@ class Lake:
         if not any(folder.glob("*.parquet")):
             return pd.DataFrame(columns=cols)
         pattern = f"{folder}/*.parquet"
-        have = {r[0] for r in self.con.execute(
+        have = {r[0] for r in self._exec(
             f"DESCRIBE SELECT * FROM read_parquet('{pattern}', union_by_name=true)").fetchall()}
         oi_sql = (", arg_max(oi, ts) FILTER (WHERE oi IS NOT NULL) AS oi_last, "
                  "arg_min(oi, ts) FILTER (WHERE oi IS NOT NULL) AS oi_first") if "oi" in have \
@@ -437,13 +463,13 @@ class Lake:
         if not files:
             return None
         src = _rp(files)
-        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        cols = {r[0] for r in self._exec(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         return src if set(self.CORE_GREEKS) <= cols else None
 
     def _greek_exprs(self, src: str) -> tuple[str, str, str]:
         """(the last-value-per-group expression for each Greek, event time, arrival order).  A Greek the files do not carry (theta, vega
         and rho under JARVIS_GREEKS=core) is NULL here and computed afterwards."""
-        cols = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+        cols = {r[0] for r in self._exec(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         ev, od = self._time_exprs(cols)
         exprs = ", ".join(f"arg_max({g}, _ord) FILTER (WHERE {g} IS NOT NULL) AS {g}" if g in cols else f"CAST(NULL AS DOUBLE) AS {g}"
                           for g in self.GREEKS)
@@ -491,13 +517,13 @@ class Lake:
             return pd.DataFrame(columns=["ts", *self.GREEKS])
         last, ev, od = self._greek_exprs(src)
         if width_s == 0:                                                   # ticks: every row that carries a Greek, as it arrived
-            have = {r[0] for r in self.con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
+            have = {r[0] for r in self._exec(f"DESCRIBE SELECT * FROM {src}").fetchall()}
             sel = ", ".join(g if g in have else f"CAST(NULL AS DOUBLE) AS {g}" for g in self.GREEKS)
-            df = self.con.execute(f"""
+            df = self._exec(f"""
                 SELECT _ev AS ts, {sel} FROM (SELECT *, {ev} AS _ev, {od} AS _ord FROM {src} WHERE symbol = ?)
                 WHERE {' OR '.join(f"{g} IS NOT NULL" for g in self.CORE_GREEKS if g in have)} ORDER BY _ord""", [symbol]).df()
         else:
-            df = self.con.execute(f"""
+            df = self._exec(f"""
                 WITH t AS (SELECT *, {ev} AS _ev, {od} AS _ord FROM {src} WHERE symbol = ?),
                      b AS (SELECT *, date_trunc('day', _ev) + to_seconds(13500 + CAST(floor(
                                   (epoch(_ev - date_trunc('day', _ev)) - 13500) / {int(width_s)}) AS BIGINT) * {int(width_s)}
@@ -528,7 +554,7 @@ class Lake:
         last, ev, od = self._greek_exprs(src)
         self.con.register("_g_wanted", pd.DataFrame({"symbol": symbols}))
         try:
-            df = self.con.execute(f"""
+            df = self._exec(f"""
                 SELECT symbol, {last} FROM (SELECT *, {ev} AS _ev, {od} AS _ord FROM {src})
                 WHERE symbol IN (SELECT symbol FROM _g_wanted) GROUP BY symbol""").df()
         finally:
