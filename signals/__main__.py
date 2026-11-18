@@ -217,6 +217,12 @@ def nightly(lake: Path, root: Path, day: Optional[date] = None, underlyings=UNDE
         raise SystemExit("no 1-minute bars in the lake")
     day = bars_day or tick_day
     log(f"nightly: batch signals for {bars_day}, live-era replay and live table for {tick_day}")
+    if tick_day:                                 # the day's index, VIX and futures minutes from our own ticks (the vendor's candles of it arrive the next day)
+        try:
+            from data_layer.bars_from_ticks import build_day
+            build_day(lake, tick_day, log=log)
+        except Exception as exc:                 # noqa: BLE001 -- the replay and the batch signals do not depend on it
+            log(f"bars from ticks {tick_day} failed: {exc!r}")
     prov = {}
     if (Path(lake) / "manifest.json").exists():
         from research.access import provenance_of
@@ -331,6 +337,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     nt.add_argument("--lake", type=Path, default=None, help="default: the latest research snapshot, else the lake")
     nt.add_argument("--root", type=Path, default=None, help="default: $JARVIS_SIGNAL_STORE or <research root>/store")
     nt.add_argument("--date", type=date.fromisoformat)
+    an = sub.add_parser("anchors", help="save the pre-open anchors the live engines load at their start (cron, 03:30 UTC)")
+    an.add_argument("--lake", type=Path, default=None)
+    an.add_argument("--root", type=Path, default=None)
+    an.add_argument("--underlying", default="NIFTY,BANKNIFTY")
+    an.add_argument("--day", type=date.fromisoformat, default=None, help="default: today (UTC)")
     lv = sub.add_parser("live", help="compute the live signals during the session (cron, 03:44 UTC)")
     lv.add_argument("--lake", type=Path, default=None, help="default: the production lake (live ticks are not in snapshots)")
     lv.add_argument("--root", type=Path, default=None)
@@ -383,6 +394,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         res = nightly(a.lake or default_lake(), a.root or default_store(), a.date, log=say)
         say(json.dumps(res))
         return 0
+    if a.cmd == "anchors":
+        from signals.live_runner import cap_memory
+        cap_memory(var="JARVIS_SIGNAL_NIGHTLY_MAX_MB", default=10240)
+        from signals import anchors
+        return anchors.main([x for kv in (("--underlying", a.underlying), ("--day", str(a.day) if a.day else None),
+                                          ("--lake", str(a.lake) if a.lake else None), ("--root", str(a.root) if a.root else None))
+                             for x in kv if x is not None])
     if a.cmd == "live":
         import logging
         from data_layer.lake import ENV_FILE, LAKE_DIR

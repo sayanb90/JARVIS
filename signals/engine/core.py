@@ -188,6 +188,17 @@ class Anchors:
             self.daily_signals = daily_inputs(self.underlying, h, self.ids)
         self.contract_table = Context(self.underlying, raw).get("contract_table")
 
+    @classmethod
+    def restore(cls, underlying: str, day, ids: list, hist: dict, fixed: dict, hist_atm: pd.DataFrame, daily_signals: dict,
+                contract_table: pd.DataFrame, hist_prov: dict, volume_slot_daily: Optional[pd.DataFrame] = None) -> "Anchors":
+        """The anchors of signals/anchors.py (saved by the pre-open job) without computing them: `history` is the trimmed `hist`, which holds
+        what the engine reads of it (contracts, participant, events)."""
+        a = object.__new__(cls)
+        a.underlying, a.day, a.ids, a.history, a.hist = underlying, pd.Timestamp(day).normalize(), list(ids), hist, hist
+        a.volume_slot_daily, a.daily_signals, a.index_sessions, a.option_sessions = volume_slot_daily, daily_signals, 30, 1
+        a.fixed, a.hist_atm, a.hist_prov, a.contract_table = fixed, hist_atm, hist_prov, contract_table
+        return a
+
     def providers(self, cadence: str) -> dict:
         if cadence not in self.hist_prov:
             c = Context(self.underlying, self.hist, bucket=cadence)
@@ -251,12 +262,13 @@ class OperatorEngine:
 
     def __init__(self, underlying: str, history: dict, cadence: dict, day, baselines: Optional[dict] = None,
                  volume_slot_daily: Optional[pd.DataFrame] = None, daily_signals: Optional[dict] = None, reorder_ms: int = 0,
-                 r: float = 0.065, native: Optional[Iterable[str]] = None):
+                 r: float = 0.065, native: Optional[Iterable[str]] = None, anchors: Optional["Anchors"] = None):
         self.underlying = underlying
         self.day = pd.Timestamp(day).normalize()
         self.cadence = dict(cadence)
         ids = sorted(self.cadence)
-        self.anchors = Anchors(underlying, history, self.day, ids, volume_slot_daily=volume_slot_daily, daily_signals=daily_signals)
+        self.anchors = anchors if anchors is not None else Anchors(underlying, history, self.day, ids, volume_slot_daily=volume_slot_daily,
+                                                                 daily_signals=daily_signals)       # ready (signals/anchors.py) or computed from the history
         groups = cadence_mod.groups(self.cadence)
         self._nat = tuple(operators.NATIVE + chain_ops.CHAIN_NATIVE if native is None else native)
         self._meta = operators.contract_meta(self.anchors.contract_table)
@@ -287,6 +299,19 @@ class OperatorEngine:
         self.trigger = (0, 0)                           # (vendor time, receive time) of the tick that closed the last buckets
         self.last_tick_mono: Optional[float] = None
         self.errors = 0                                 # batches or timer steps that raised (logged, the session continues)
+        self.reads_ticks = self._reads_ticks()          # does any signal of this process read ticks (the tape operators, a signal with ticks_fo)?
+
+    def _reads_ticks(self) -> bool:
+        """The tape operators read the bucket's ticks, and a signal that declares `ticks_fo` among its inputs reads them as a frame.  None of the five
+        one-minute signals does: their process (signals live --cadences 1min) used to copy a 7-minute window of ticks for each of their lookback
+        groups at every close, for nothing (about 2 of the 3.4 s of a close on 17 Nov 2026)."""
+        for g in self.groups.values():
+            if g.natives is not None:
+                return True
+            for sids in g.windows.values():
+                if any("ticks_fo" in REGISTRY[s][0].inputs for s in sids):
+                    return True
+        return False
 
     def _group(self, c: str, sids: list) -> Group:
         g = Group(c, list(sids), native=tuple(s for s in sids if s in self._nat))
@@ -333,6 +358,7 @@ class OperatorEngine:
         nt = Group(nc, t.ids, native=t.native)                      # recompute windows, keep_ns and needs_* for the merged list
         t.windows, t.keep_ns, t.needs_chain, t.needs_live = nt.windows, nt.keep_ns, nt.needs_chain, nt.needs_live
         self._attach(t)
+        self.reads_ticks = True
         self.ticks.keep = max(self.ticks.keep, pd.Timedelta(t.keep_ns + 2 * NS_MIN, unit="ns"))
         g.ids, g.native, g.windows, g.natives, g.cnatives = [], (), {}, None, None
         g.needs_chain = g.needs_live = False
@@ -429,7 +455,8 @@ class OperatorEngine:
                 t0 = _time.perf_counter()
                 part = df.iloc[i:j]
                 self.session.apply_frame(part)
-                self.ticks.add(part)
+                if self.reads_ticks:
+                    self.ticks.add(part)
                 self.stats["apply_s"] += _time.perf_counter() - t0
                 self.stats["ticks"] += j - i
                 i = j
@@ -463,7 +490,7 @@ class OperatorEngine:
                         if g.overruns >= OVERRUNS_BEFORE_FALLBACK:
                             self._coarsen(g, end)
             self.closed_to = end if self.closed_to is None else max(self.closed_to, end)
-        if self.closed_to is not None:
+        if self.closed_to is not None and self.reads_ticks:
             self.ticks.trim(pd.Timestamp(self.closed_to))
         res = _concat(out)
         self.stats["rows"] += len(res)
@@ -580,7 +607,8 @@ class OperatorEngine:
         for lb, sids in g.windows.items():
             lo = first_new - lb - tdd
             w = dict(raw)
-            w["ticks_fo"] = self.ticks.window(lo, upto)
+            if any("ticks_fo" in REGISTRY[s][0].inputs for s in sids):          # only a signal that reads ticks gets the window of them
+                w["ticks_fo"] = self.ticks.window(lo, upto)
             ho = raw.get("opt_1m")
             w["opt_1m"] = ho[pd.to_datetime(ho["ts"]) >= lo] if ho is not None and len(ho) else ho
             cw = [f for x, f in g.chain if x >= lo.value]
@@ -871,12 +899,22 @@ def start(lake, store, underlyings: Iterable[str], until_utc: str = "10:02", env
     if not cad:
         raise ValueError(f"no live signal runs at {only}")
     engines = []
+    from signals import anchors as anchors_mod
     for u in underlyings:
-        hist = history_for(Path(lake), u, day)
         groups = cadence_mod.groups(cad)
+        reorder = int(env.get("JARVIS_SIGNAL_REORDER_MS", REORDER_MS_DEFAULT))
+        saved = None if env.get("JARVIS_ANCHORS", "1").strip().lower() in ("0", "false", "no", "off") else \
+            anchors_mod.load(Path(store), day, u, sorted(cad), list(groups), log=log.warning)
+        if saved is not None:                           # the pre-open job's tables (signals anchors): seconds, not 100 s of history loading
+            anc, base = saved
+            log.info("%s: anchors loaded from %s", u, anchors_mod.folder(Path(store), day, u))
+            engines.append(OperatorEngine(u, anc.hist, cad, day, baselines=base, anchors=anc, reorder_ms=reorder))
+            continue
+        log.warning("%s: no saved anchors for %s; computing them from the history (slow start)", u, day)
+        hist = history_for(Path(lake), u, day)
         base = {c: load_baselines(Path(store), u, day, s, c) for c, s in groups.items()}
         engines.append(OperatorEngine(u, hist, cad, day, baselines=base, volume_slot_daily=slot_volume_history(Path(lake), u, day),
-                                      reorder_ms=int(env.get("JARVIS_SIGNAL_REORDER_MS", REORDER_MS_DEFAULT))))
+                                      reorder_ms=reorder))
     for e in engines:
         e.trigger = (0, 0)
     pub = bus.Publisher("signals-" + "-".join(underlyings) + tag, env=env) if bus.bus_enabled(env) else None

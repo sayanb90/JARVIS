@@ -184,3 +184,103 @@ def test_engine_live_cap_default_is_large_enough_and_signals_live_reads_dotenv()
     src = Path(lr.__file__).resolve().parent / "__main__.py"
     assert "load_dotenv(ENV_FILE)" in src.read_text()
     assert "load_dotenv(ENV_FILE)" in (Path(lr.__file__).resolve().parents[1] / "trading" / "paper.py").read_text()
+
+
+def test_history_load_can_skip_the_constituent_minutes_and_limit_the_cores(lake):
+    """17 Nov 2026: four engines loading 400 days of history at once took every core of the 4-core VPS for about 100 s (load average 6.05).  The
+    load is limited to JARVIS_LOAD_THREADS cores (default 2) and skips the constituents' minutes (only the basket research signals read them)."""
+    from signals import lakeio
+    assert lakeio.load_threads({}) == 2 and lakeio.load_threads({"JARVIS_LOAD_THREADS": "1"}) == 1 and lakeio.load_threads({"JARVIS_LOAD_THREADS": "0"}) == 1
+    assert lakeio.connect(1).execute("select current_setting('threads')").fetchone()[0] == 1
+    d1 = DAY
+    full = lakeio.load_raw(lake, "NIFTY", d1 - pd.Timedelta(days=10), d1, stocks=True)
+    lean = lakeio.load_raw(lake, "NIFTY", d1 - pd.Timedelta(days=10), d1, stocks=False, threads=1)
+    assert len(lean["stocks_1m"]) == 0 and set(lean["stocks_1m"].columns) <= set(full["stocks_1m"].columns)
+    for k in ("index_1m", "vix_1m", "fut_1m", "opt_1m"):                     # everything else is the same
+        pd.testing.assert_frame_equal(lean[k].reset_index(drop=True), full[k].reset_index(drop=True))
+
+
+def test_crontab_starts_the_one_minute_engines_after_the_fast_ones():
+    """Each engine loads 400 days of history at its start; four at once took the 4 cores (17 Nov 2026), so the one-minute engines start 3 and 5 minutes later."""
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    start = {}
+    for ln in (root / "deploy/crontab").read_text().splitlines():
+        m = re.match(r"^(\d+) 3 \* \* 1-5\s+cd \$JARVIS && python -m data_layer.jobrun run (signals-live-[a-z0-9-]+)", ln)
+        if m:
+            start[m.group(2)] = int(m.group(1))
+    assert start == {"signals-live-nifty": 44, "signals-live-nifty-1min": 47, "signals-live-banknifty": 44, "signals-live-banknifty-1min": 49}
+
+
+def _tick_rows(sym, t0, n, px0, vol0=0, step_s=7, oi=None, quote_only_from=None):
+    rows = []
+    for i in range(n):
+        t = t0 + pd.Timedelta(seconds=step_s * i)
+        quote_only = quote_only_from is not None and i >= quote_only_from
+        rows.append({"symbol": sym, "fts": t, "ts": t, "ltp": None if quote_only else px0 + 0.5 * i, "bid": px0 + 0.5 * i - 0.1, "ask": px0 + 0.5 * i + 0.1,
+                     "vol_today": float(vol0 + 10 * i), "oi": oi})
+    return rows
+
+
+def test_bars_from_ticks_follow_the_engine_rules_and_the_vendor_wins_where_both_exist(tmp_path):
+    """17 Nov 2026: the vendor's candles of a day arrive the next day, so the next open's history ended a session early.  The bars are built from the
+    day's ticks into lake/bars_ticks (not lake/bars: the candle job's gap detection counts rows there), and read_bars takes the vendor's row first."""
+    from data_layer import bars_from_ticks as bt
+    from signals import lakeio
+    lake = tmp_path / "lake"
+    day = pd.Timestamp("2026-11-16").date()
+    t0 = pd.Timestamp("2026-11-16 03:45:00")
+    pre = pd.Timestamp("2026-11-16 03:40:00")                                   # auction ticks before the open
+    eq = pd.DataFrame(_tick_rows("NSE_INDEX:Nifty 50", t0, 60, 24000.0) + _tick_rows("NSE_INDEX:Nifty 50", pre, 3, 23000.0)
+                      + _tick_rows("RELIANCE", t0, 20, 1300.0))                 # a stock: not a bar of this job
+    fo = pd.DataFrame(_tick_rows("NIFTY_FUT_24_NOV_26", t0, 60, 24050.0, vol0=1000, oi=500.0, quote_only_from=40)
+                      + _tick_rows("NIFTY_24000_CE_17_NOV_26", t0, 60, 120.0))   # an option: not a bar of this job
+    for seg, df in (("eq", eq), ("fo", fo)):
+        f = lake / "ticks" / f"segment={seg}" / f"date={day}"
+        f.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(f / "ticks.parquet", index=False)
+    assert bt.build_day(lake, day, log=lambda *a: None) > 0
+    out = pd.read_parquet(bt.out_dir(lake, day) / "bars.parquet")
+    assert set(out["symbol"]) == {"NSE_INDEX:Nifty 50", "NIFTY_FUT_24_NOV_26"} and set(out["src"]) == {"ticks"} and set(out["market"]) == {"IN"}
+    assert out["ts"].min() == t0 and not (lake / "bars").exists()                  # the auction ticks are out; nothing in the vendor table
+    idx = out[out["symbol"] == "NSE_INDEX:Nifty 50"].set_index("ts")
+    first = idx.loc[t0]                                                            # ticks at 0, 7, ..., 56 s of the first minute: 9 of them
+    assert (first["open"], first["close"], first["high"], first["low"]) == (24000.0, 24000.0 + 0.5 * 8, 24000.0 + 0.5 * 8, 24000.0)
+    fut = out[out["symbol"] == "NIFTY_FUT_24_NOV_26"].set_index("ts")
+    assert fut.loc[t0]["volume"] == 80                                              # counter 1000 at the first tick, 1080 at the last of the minute
+    assert fut.loc[t0 + pd.Timedelta(minutes=1)]["volume"] == 90                    # then 1170: the change since the previous minute
+    assert fut["oi"].dropna().eq(500.0).all()
+    late = fut[fut.index >= t0 + pd.Timedelta(minutes=5)]                          # quote-only ticks: the mid is the price
+    assert len(late) and late["close"].notna().all()
+    # the vendor's row wins where both exist; ours fills the minutes it lacks
+    vend = lake / "bars" / "interval=1m" / f"date={day}"
+    vend.mkdir(parents=True)
+    pd.DataFrame({"ts": [t0], "symbol": ["NSE_INDEX:Nifty 50"], "open": [1.0], "high": [2.0], "low": [0.5], "close": [1.5], "volume": [0], "oi": [None],
+                  "market": ["IN"]}).to_parquet(vend / "bars.parquet", index=False)
+    got = lakeio.read_bars(lake, day, day, "symbol = ?", ["NSE_INDEX:Nifty 50"]).set_index("ts")
+    assert got.loc[t0]["close"] == 1.5 and len(got) == len(idx)                    # minute 1 from the vendor, the others from the ticks
+    assert (got.drop(index=t0)["close"] == idx.drop(index=t0)["close"]).all()
+
+
+def test_anchors_job_saves_what_an_engine_loads_and_the_crontab_runs_it_before_the_engines(lake, tmp_path):
+    """17 Nov 2026: `python -m signals anchors` (cron 03:30 UTC) computes the engines' start-up numbers from the lake once and saves them; an engine
+    of the same day loads them (signals/anchors.load), another day's are not used."""
+    from pathlib import Path
+    from signals import anchors as an
+    import signals.__main__ as m
+    day = DAY + pd.Timedelta(days=1)
+    out = an.build(lake, tmp_path, "NIFTY", day, log=lambda *a: None)
+    assert (out / "manifest.json").exists() and (out / "contract_table.parquet").exists()
+    from signals.engine.core import live_signal_ids
+    from signals import cadence as cm
+    ids = live_signal_ids()
+    cad = cm.load(ids)
+    got = an.load(tmp_path, day, "NIFTY", sorted(cad), list(cm.groups(cad)))
+    assert got is not None and got[0].underlying == "NIFTY" and len(got[0].fixed["daily"]) > 0
+    assert an.load(tmp_path, DAY, "NIFTY", sorted(cad), list(cm.groups(cad))) is None
+    root = Path(__file__).resolve().parents[2]
+    lines = [l for l in (root / "deploy/crontab").read_text().splitlines() if l.strip() and not l.startswith("#")]
+    at = next(l for l in lines if "signals anchors" in l)
+    assert (int(at.split()[1]), int(at.split()[0])) < (3, 44) and (int(at.split()[1]), int(at.split()[0])) > (3, 25)
+    assert hasattr(m, "main")

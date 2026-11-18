@@ -22,6 +22,8 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+import os
+
 import duckdb
 import pandas as pd
 
@@ -49,19 +51,38 @@ def _day_files(base: Path, d0: date, d1: date) -> list[str]:
     return out
 
 
+def connect(threads: Optional[int] = None):
+    """A DuckDB connection; `threads` limits how many cores a read may take (the live engines load 400 days of history at their start, and four
+    of them at once took every core of the 4-core VPS for about 100 s, load average 6.05, 17 Nov 2026).  None: DuckDB's default."""
+    con = duckdb.connect()
+    if threads:
+        con.execute(f"SET threads = {int(threads)}")
+    return con
+
+
+def load_threads(env=None) -> int:
+    """Cores a startup history load may use (JARVIS_LOAD_THREADS, default 2)."""
+    return max(1, int((os.environ if env is None else env).get("JARVIS_LOAD_THREADS", 2)))
+
+
 def _q(files: list[str]) -> str:
     return "[" + ", ".join("'" + f.replace("'", "''") + "'" for f in files) + "]"
 
 
 def read_bars(lake_dir: Path, d0: date, d1: date, where: str, params: Optional[list] = None, con=None) -> pd.DataFrame:
-    files = _day_files(Path(lake_dir) / "bars" / "interval=1m", d0, d1)
+    """1-minute bars: the vendor candles (lake/bars) and, for the index, VIX and futures of a day the vendor has not served yet, the bars built from
+    our own ticks (lake/bars_ticks, data_layer/bars_from_ticks.py).  Where both have a (symbol, minute) the vendor's row is taken."""
+    vendor = _day_files(Path(lake_dir) / "bars" / "interval=1m", d0, d1)
+    ours = _day_files(Path(lake_dir) / "bars_ticks" / "interval=1m", d0, d1)
+    files = vendor + ours
     if not files:
         return pd.DataFrame(columns=["ts", "symbol", "open", "high", "low", "close", "volume", "oi"])
     con = con or duckdb.connect()
     cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({_q(files)}, union_by_name=true)").fetchall()}
     oi = "oi" if "oi" in cols else "CAST(NULL AS BIGINT) AS oi"
-    sql = (f"SELECT ts, symbol, open, high, low, close, volume, {oi} FROM read_parquet({_q(files)}, union_by_name=true) WHERE {where} "
-           "QUALIFY row_number() OVER (PARTITION BY symbol, ts ORDER BY ts) = 1 ORDER BY symbol, ts")
+    rank = "CASE WHEN filename LIKE '%/bars_ticks/%' THEN 1 ELSE 0 END" if ours else "0"
+    sql = (f"SELECT ts, symbol, open, high, low, close, volume, {oi} FROM read_parquet({_q(files)}, union_by_name=true, filename=true) WHERE {where} "
+           f"QUALIFY row_number() OVER (PARTITION BY symbol, ts ORDER BY {rank}, ts) = 1 ORDER BY symbol, ts")
     return con.execute(sql, params or []).df()
 
 
@@ -167,8 +188,10 @@ def read_events() -> pd.DataFrame:
                           "description": e.description} for e in ev])
 
 
-def load_raw(lake_dir: Path, underlying: str, d0: date, d1: date, option_from: Optional[date] = None, ticks: bool = True) -> dict:
-    con = duckdb.connect()
+def load_raw(lake_dir: Path, underlying: str, d0: date, d1: date, option_from: Optional[date] = None, ticks: bool = True,
+             stocks: bool = True, threads: Optional[int] = None) -> dict:
+    """`stocks=False` skips the minutes of the constituents (only the basket signals, which are research signals, read them); `threads` limits the cores."""
+    con = connect(threads)
     idx = INDEX_SYMBOL[underlying]
     index_1m = read_bars(lake_dir, d0, d1, "symbol = ?", [idx], con)
     vix_1m = read_bars(lake_dir, d0, d1, "symbol = ?", [VIX_SYMBOL], con)
@@ -176,7 +199,7 @@ def load_raw(lake_dir: Path, underlying: str, d0: date, d1: date, option_from: O
     opt_1m = read_bars(lake_dir, option_from or d0, d1, "regexp_matches(symbol, ?)", [f"^{underlying}_[0-9.]+_(CE|PE)_"], con)
     weights = read_weights(lake_dir, underlying)
     stocks_1m = pd.DataFrame(columns=["ts", "symbol", "open", "high", "low", "close", "volume"])
-    if len(weights):
+    if len(weights) and stocks:
         top = weights.sort_values("weight", ascending=False).groupby("date").head(TOP_N_STOCKS)
         syms = sorted(set(top["symbol"]))
         stocks_1m = read_bars(lake_dir, d0, d1, "list_contains(?, symbol)", [syms], con)
