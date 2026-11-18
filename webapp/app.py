@@ -76,6 +76,31 @@ def _json_safe(obj):
     return obj
 
 
+def overview_fingerprint(q: Lake, lake_path: Path, date: str, interval: str) -> tuple:
+    if interval == "1s":
+        return q.fingerprint(date)                             # the day's tick files (what the collector writes) and any legacy bars
+    folder = lake_path / "bars" / f"interval={interval}" / f"date={date}"
+    return tuple(("bars", f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in sorted(folder.glob("*.parquet")))
+
+
+def overview_payload(q: Lake, lake_path: Path, date: str, interval: str) -> list:
+    """One row per equity for the Market tab.  A finished day is computed once and kept on disk (webapp/daycache.py): 67 s on the VPS."""
+    from . import daycache
+
+    def compute():
+        rows = q.day_overview(date, interval, equities_only=True)      # futures and options are left out before any bar is built
+        rows = rows[~rows["symbol"].isin(q.fo_symbols())]
+        return _json_safe(rows.to_dict("records"))
+    return daycache.cached(lake_path, "overview", (date, interval), overview_fingerprint(q, lake_path, date, interval), compute)
+
+
+def chain_payload(q: Lake, lake_path: Path, date: str, underlying: str, expiry, interval: str) -> dict:
+    """The F&O chain snapshot (20 s on the VPS); a finished day is kept on disk."""
+    from . import daycache
+    return daycache.cached(lake_path, "chain", (date, underlying, expiry or "", interval), overview_fingerprint(q, lake_path, date, interval),
+                           lambda: _json_safe(q.fo_chain(date, underlying, expiry, interval)))
+
+
 def _check_date(d: str) -> str:
     if not DATE_RE.match(d):
         raise HTTPException(422, "date must be YYYY-MM-DD")
@@ -255,20 +280,13 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     @app.get("/api/overview")
     def overview(date: str):
         _check_date(date)
-        q = lake()
-        if interval == "1s":
-            fingerprint = q.fingerprint(date)                      # the day's tick files (what the collector writes) and any legacy bars
-        else:
-            folder = lake_path / "bars" / f"interval={interval}" / f"date={date}"
-            fingerprint = tuple((f.name, f.stat().st_mtime_ns) for f in sorted(folder.glob("*.parquet")))
-        if not fingerprint:
+        key_fp = overview_fingerprint(lake(), lake_path, date, interval)
+        if not key_fp:
             raise HTTPException(404, f"no bars for {date}")
-        key = (date, fingerprint)
+        key = (date, key_fp)
         if key not in overview_cache:
             overview_cache.clear()          # keep only the latest day in memory
-            rows = q.day_overview(date, interval, equities_only=True)      # futures and options are left out before any bar is built
-            rows = rows[~rows["symbol"].isin(q.fo_symbols())]
-            overview_cache[key] = _json_safe(rows.to_dict("records"))
+            overview_cache[key] = overview_payload(lake(), lake_path, date, interval)
         return overview_cache[key]
 
     @app.get("/api/fo/meta")
@@ -284,7 +302,7 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             raise HTTPException(422, "invalid underlying")
         if expiry is not None and not DATE_RE.match(expiry):
             raise HTTPException(422, "expiry must be YYYY-MM-DD")
-        data = lake().fo_chain(date, underlying, expiry, interval)
+        data = chain_payload(lake(), lake_path, date, underlying, expiry, interval)
         if not data:
             raise HTTPException(404, f"no derivatives for {underlying} on {date}")
         return JSONResponse(_json_safe(data))

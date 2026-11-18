@@ -18,6 +18,8 @@ loaded by a background thread: callers wait up to `wait_s` and otherwise get wha
 from __future__ import annotations
 
 import logging
+import os
+import pickle
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -40,6 +42,7 @@ EVENT_SIGNALS = {"block_prints"}
 MAX_EVENTS = 500
 MAX_DAYS = 3                     # days kept in memory
 BUS_COLS = ("t_vendor", "t_recv", "t_emit", "provisional")
+CACHE_SCHEMA = 1                 # bump when what is kept per signal changes: older caches are then ignored
 
 
 def rss_mb() -> float:
@@ -136,9 +139,68 @@ class LiveDay:
         parts = list(LiveDay._batches(paths, thin))
         return pd.concat(parts, ignore_index=True) if parts else None
 
+    # ------------------------------------------------------------------------------------------ the day's reduced copy on disk
+    def cache_file(self) -> Path:
+        base = Path(os.environ.get("JARVIS_VIEWER_CACHE") or (self.store / "viewer-cache"))
+        return base / f"signals-date={self.day}.pkl"
+
+    @staticmethod
+    def _fingerprint(files: list) -> list:
+        return [(f.name, f.stat().st_size, f.stat().st_mtime_ns) for f in files]
+
+    @staticmethod
+    def _cacheable(files: list) -> bool:
+        """Only a finished day: every file is the nightly compaction (the live files of a running day change every 15 s)."""
+        return bool(files) and all(f.name.startswith("live-compacted") for f in files)
+
+    def _load_cache(self, files: list) -> bool:
+        """The reduced day saved by an earlier read (or by `warm`), when the files it was made from are unchanged: seconds instead of a minute."""
+        path = self.cache_file()
+        if not self._cacheable(files) or not path.exists():
+            return False
+        try:
+            with open(path, "rb") as fh:
+                blob = pickle.load(fh)
+            if blob.get("schema") != CACHE_SCHEMA or blob.get("fingerprint") != self._fingerprint(files):
+                return False
+            with self.lock:
+                self.chunks = defaultdict(list, blob["chunks"])
+                self.seen = {f.name for f in files}
+                self.files_total = len(files)
+                self.last_refresh = time.monotonic()
+                self.loaded = True
+                self.error = None
+            log.info("signals tab: %s read from the cache %s", self.day, path)
+            return True
+        except Exception as exc:                      # noqa: BLE001 -- a damaged or foreign cache is just not used
+            log.warning("signals tab: cache %s not used: %r", path, exc)
+            return False
+
+    def _save_cache(self, files: list) -> None:
+        if not self._cacheable(files):
+            return
+        path = self.cache_file()
+        try:
+            merged = {}
+            for key in list(self.chunks):
+                df = self.frame(*key)
+                if df is not None:
+                    merged[key] = [df]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+            with open(tmp, "wb") as fh:
+                pickle.dump({"schema": CACHE_SCHEMA, "fingerprint": self._fingerprint(files), "chunks": merged}, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            tmp.replace(path)
+            log.info("signals tab: cache written %s (%.0f MB)", path, path.stat().st_size / 2**20)
+        except Exception as exc:                      # noqa: BLE001 -- the tab works without it
+            log.warning("signals tab: cache not written: %r", exc)
+
     def refresh(self) -> None:
         with self.refresh_lock:
-            files = [f for f in self._files() if f.name not in self.seen]
+            all_files = self._files()
+            if not self.seen and self._load_cache(all_files):
+                return
+            files = [f for f in all_files if f.name not in self.seen]
             with self.lock:
                 self.files_total = len(self.seen) + len(files)
             whole = set(files[-TAIL_FILES:]) if len(files) > 2 * TAIL_FILES else set(files)       # the newest few files (all of a short list) are read whole ...
@@ -167,6 +229,7 @@ class LiveDay:
                 self.last_refresh = time.monotonic()
                 self.loaded = True
                 self.error = None
+            self._save_cache(all_files)
 
     def ensure(self, wait_s: float = 20.0) -> "LiveDay":
         """First call: load in a background thread and wait up to `wait_s`.  Later calls: read the new files (cheap)."""
@@ -284,3 +347,32 @@ def forget() -> None:
     """Drop every cached day (tests)."""
     with _CACHE_LOCK:
         _CACHE.clear()
+
+
+def main(argv=None) -> int:
+    """python -m webapp.signals_store warm [--day D] [--store S]: read a finished day once, save its reduced copy (the nightly cron, after the compaction),
+    so the viewer's first read of it takes seconds.  Run outside the viewer's service (it needs about 3 GB for a minute)."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m webapp.signals_store")
+    ap.add_argument("action", choices=["warm"])
+    ap.add_argument("--day", type=date.fromisoformat, default=None, help="default: the newest day with live rows")
+    ap.add_argument("--store", type=Path, default=None)
+    a = ap.parse_args(argv)
+    env = os.getenv("JARVIS_SIGNAL_STORE")
+    store = a.store or (Path(env) if env else (Path.cwd() / "store" if (Path.cwd() / "store" / "live").is_dir() else Path("/srv/jarvis-research/store")))
+    day = a.day or (date.fromisoformat(live_days(store)[0]) if live_days(store) else None)
+    if day is None:
+        print("no live days in", store)
+        return 1
+    t0 = time.perf_counter()
+    ld = LiveDay(store, day)
+    if not ld._cacheable(ld._files()):
+        print(f"{day}: the day's rows are not compacted yet (the nightly job has not finished): nothing to warm")
+        return 0
+    ld.refresh()
+    print(f"{day}: {ld.progress()} in {time.perf_counter() - t0:.0f} s; cache {ld.cache_file()} exists={ld.cache_file().exists()}")
+    return 0 if ld.loaded and not ld.error else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
