@@ -4,6 +4,8 @@
 const { chromium } = require('playwright');
 const fail = (m) => { console.error('FAIL: ' + m); process.exitCode = 1; };
 const status = (p) => p.textContent('#status');
+// charts are drawn lazily (only near the screen), so a test that waits for one scrolls it into view first
+const reveal = (p, id) => p.evaluate((i) => { const e = document.getElementById(i); if (e) e.scrollIntoView({ block: 'center' }); }, id);
 const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById(i); return !!(d && d.data && d.querySelector('.main-svg')); }, id);
 (async () => {
   const base = process.argv[2];
@@ -129,6 +131,7 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   const oiTrace = await fo.evaluate(() => document.getElementById('fc-price').data.some((t) => t.name === 'Open interest'));
   if (!oiTrace) fail('contract chart has no open-interest series');
   if (!/sub=contract/.test(fo.url()) || !/contract=NIFTY_/.test(fo.url())) fail('contract not in the URL: ' + fo.url());
+  for (const id of ['fc-depth', 'fc-imb']) { await reveal(fo, id); await fo.waitForTimeout(400); }
   for (const id of ['fc-depth', 'fc-imb']) if (!(await plotted(fo, id))) fail('contract view is missing ' + id);
   await fo.click('.seg[data-book="fc"] button[data-mode="live"]');
   await fo.waitForSelector('#fo-contract-book-body .ladder5');
@@ -150,6 +153,7 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
   if (!/Live|Stale/.test(await sg.$eval('#sg-cards', (c) => c.textContent))) fail('Signals tab: status card');
   // SCRUM-206: a click on a signal opens its day chart; the other views load without errors
   await sg.click('#sg-families tr.clk');
+  await reveal(sg, 'chart-sg');
   await sg.waitForFunction(() => { const d = document.getElementById('chart-sg'); return !!(d && d.data && d.querySelector('.main-svg')); }, null, { timeout: 20000 })
     .catch(() => fail('Signals tab: the signal chart was not drawn'));
   for (const sub of ['strike', 'chain', 'history', 'daily']) { await sg.click(`.subtabs[data-tab="signals"] button[data-sub="${sub}"]`); await sg.waitForTimeout(800); }
@@ -198,10 +202,12 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
     // ---------------- History tab: prices and volume (the demo lake has no daily candles or 1-minute bars, so it must say so) ----------------
   {
     const hp = await open(1400, 1000, '#tab=history');
+    await reveal(hp, 'hx-chart');
     await hp.waitForFunction(() => { const m = document.getElementById('hx-msg'); const c = document.getElementById('hx-chart'); return (m && !m.hidden) || (c && c.data); }, null, { timeout: 30000 })
       .catch(() => fail('the History tab neither drew a chart nor said why not'));
     if (await hp.$eval('label.day', (e) => !e.hidden)) fail('the trading-day picker should be hidden on the History tab');
     await hp.click('.subtabs[data-tab="history"] button[data-sub="volume"]');
+    await reveal(hp, 'hv-chart');
     await hp.waitForFunction(() => { const m = document.getElementById('hv-msg'); const c = document.getElementById('hv-chart'); const s = document.getElementById('status').textContent;
       return (m && !m.hidden) || (c && c.data) || /tickers on|No prices|no daily/i.test(s); }, null, { timeout: 30000 }).catch(() => fail('the Most traded view neither drew a chart nor said why not'));
   }
@@ -215,6 +221,7 @@ const plotted = (p, id) => p.evaluate((i) => { const d = document.getElementById
     await dp.waitForSelector('#dt-table tbody tr', { timeout: 20000 });
     if (!(await dp.$$eval('#dt-table tbody tr', (r) => r.length))) fail('the dataset table is empty');
     if (await dp.$eval('label.day', (e) => !e.hidden)) fail('the trading-day picker should be hidden on the Data tab');
+    await reveal(dp, 'dt-range');
     await dp.waitForFunction(() => { const d = document.getElementById('dt-range'); return (d && d.data) || !document.getElementById('dt-range-msg').hidden; }, null, { timeout: 60000 }).catch(() => fail('the range chart or its message never appeared'));
     await dp.click('.subtabs[data-tab="data"] button[data-sub="run"]');
     await dp.waitForSelector('#dt-stages li', { timeout: 10000 }).catch(() => fail('the historical-run stages are missing'));
