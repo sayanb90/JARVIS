@@ -390,3 +390,17 @@ def test_a_compacted_day_in_one_wide_file_loads_in_chunks_and_gives_the_same_tab
     assert [x["signal"] for x in a] == [x["signal"] for x in b] and all("pad0" not in x["columns"] for x in b)      # a signal keeps its own columns only
     assert [x["values"] for x in a if x["kind"] != "contract"] == [x["values"] for x in b if x["kind"] != "contract"]
     ss.forget()
+
+
+def test_by_strike_shows_the_newest_row_of_each_contract_when_the_last_second_has_only_a_few(tmp_path):
+    """18 Nov 2026 (live): at 1 s only the contracts that traded in the last second have a row, so a snapshot of that instant had none of the nearest
+    expiry and the tab said 'No snapshot' (and the strike x time charts were hidden behind that message)."""
+    signals_store.forget()
+    write_rows(contract_rows("book_pressure", 600), tmp_path, prefix="engine-NIFTY-1s")
+    ts = T0 + pd.Timedelta(seconds=600)
+    write_rows([{"signal": "book_pressure", "bucket": "1s", "underlying": "NIFTY", "ts": ts, "known_at": ts + pd.Timedelta(seconds=1), "symbol": "NIFTY_24100_CE_2026-11-24",
+                 "expiry": "2026-11-24", "strike": 24100.0, "cp": "CE", "qi": 0.3, "micro_rel": 0.0}] * 2, tmp_path, prefix="engine-NIFTY-1s")
+    c = signals_view.contracts(tmp_path, "NIFTY", "book_pressure", "1s", DAY.date(), expiry=EXPS[0])
+    assert len(c["snapshot"]["rows"]) == 6 and all(r["expiry"] == EXPS[0] for r in c["snapshot"]["rows"])
+    assert c["heat"] is not None and len(c["heat"]["strikes"]) == 3
+    signals_store.forget()

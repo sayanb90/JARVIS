@@ -101,6 +101,34 @@ const config = () => ({ responsive: true, displaylogo: false, displayModeBar: !p
    plot(id, traces, layout, items) draws the chart with the series the viewer last chose to show or hide. */
 const legendOff = {};
 const isOff = (chartId, it) => legendOff[chartId + '|' + it.key] ?? !!it.off;
+/* Lazy charts: a Plotly figure is drawn only when its box is within 400 px of the screen (or when it first becomes visible), so a page with many
+   charts draws the few on screen first and the rest as the reader scrolls.  Hidden sub-tabs draw when shown. */
+(function lazyPlots() {
+  if (!window.Plotly || !('IntersectionObserver' in window) || window.JARVIS_EAGER_PLOTS) return;
+  const react = Plotly.react.bind(Plotly), purge = Plotly.purge.bind(Plotly), waiting = new Map();
+  const io = new IntersectionObserver((entries) => entries.forEach((e) => {
+    const a = e.isIntersecting && waiting.get(e.target);
+    if (a) { waiting.delete(e.target); io.unobserve(e.target); draw(...a); }
+  }), { rootMargin: '400px 0px' });
+  // handlers attached with el.on(...) before the figure exists are kept and attached once it is drawn
+  const draw = (n, ...rest) => {
+    const queued = n.__queued || [];
+    delete n.__queued; if (n.on && n.on.stub) delete n.on;
+    return react(n, ...rest).then((r) => { queued.forEach(([ev, fn]) => n.on(ev, fn)); return r; });
+  };
+  const node = (el) => (typeof el === 'string' ? document.getElementById(el) : el);
+  Plotly.react = (el, ...rest) => {
+    const n = node(el);
+    if (!n) return react(el, ...rest);
+    const r = n.getBoundingClientRect();
+    if (r.height > 0 && r.top < innerHeight + 400 && r.bottom > -400) { waiting.delete(n); return draw(n, ...rest); }
+    if (!n.on) { n.on = (ev, fn) => { (n.__queued = n.__queued || []).push([ev, fn]); }; n.on.stub = true; }
+    waiting.set(n, [n, ...rest]); io.observe(n);
+    return Promise.resolve(n);
+  };
+  Plotly.purge = (el) => { const n = node(el); if (n && waiting.delete(n)) io.unobserve(n); return n ? purge(n) : undefined; };
+})();
+
 function plot(chartId, traces, layout, items, cfg) {
   (items || []).forEach((it) => { it.key = it.key || it.name; if (isOff(chartId, it)) it.traces.forEach((i) => { traces[i].visible = false; }); });
   Plotly.react(chartId, traces, layout, cfg || config());
@@ -1546,16 +1574,19 @@ function renderSgStrike() {
   const msg = $('sg-strike-msg');
   msg.hidden = true;
   const T = theme(), snap = d.snapshot;
-  if (!snap || !snap.rows.length) { msg.hidden = false; msg.textContent = 'No snapshot for this expiry yet.'; Plotly.purge('chart-sg-strike'); return; }
+  const heatOnly = !snap || !snap.rows.length;
+  if (heatOnly) { msg.hidden = false; msg.textContent = 'No contract rows for this expiry yet.'; Plotly.purge('chart-sg-strike'); $('sg-strike-table').innerHTML = ''; }
   const side = (r) => String(r.cp || '')[0];
   const mk = (sd, name, color) => { const r = snap.rows.filter((q) => side(q) === sd && q.values[d.column] != null); return { type: 'scatter', mode: 'lines+markers', x: r.map((q) => q.strike), y: r.map((q) => q.values[d.column]), name, line: { color, width: 1.6 }, marker: { size: 5 }, hovertemplate: `${name} %{x}: %{y:.4f}<extra></extra>` }; };
+  if (!heatOnly) {
   const traces = [mk('C', 'Calls', T.up), mk('P', 'Puts', T.down)];
-  $('sg-strike-hint').textContent = `${d.column} by strike at ${timeIst(snap.known_at)} IST · expiry ${d.expiry}`;
+  $('sg-strike-hint').textContent = `${d.column} by strike, newest row of each contract (latest ${timeIst(snap.known_at)} IST) · expiry ${d.expiry}`;
   plot('chart-sg-strike', traces, baseLayout({ margin: { l: phone() ? 46 : 70, r: 14, t: 8, b: 36 }, xaxis: Object.assign(valAxis(), { title: { text: 'strike', font: { size: 11 } } }), yaxis: valAxis(), hovermode: 'x unified' }),
     [{ name: 'Calls', color: T.up, traces: [0] }, { name: 'Puts', color: T.down, traces: [1] }]);
   const cols = d.columns.slice(0, 5);
   $('sg-strike-table').innerHTML = `<thead><tr><th class="num">Strike</th><th>C/P</th>${cols.map((c) => `<th class="num">${escHtml(c)}</th>`).join('')}<th class="num">z</th></tr></thead><tbody>${snap.rows.map((r) =>
     `<tr><td class="num">${fmt(r.strike, 0)}</td><td>${escHtml(String(r.cp || ''))}</td>${cols.map((c) => `<td class="num">${fmt(r.values[c], 4)}</td>`).join('')}<td class="num">${zCell(r.z[d.column])}</td></tr>`).join('')}</tbody>`;
+  }
   // strike x time, one panel for calls and one for puts
   const h = d.heat;
   const heat = (id, key, title) => {
