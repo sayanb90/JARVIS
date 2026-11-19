@@ -550,3 +550,29 @@ def test_greeks_absent_on_days_stored_before_greeks_existed(tmp_path):
     cols = {c for f in folder.glob("*.parquet") for c in __import__("duckdb").sql(f"DESCRIBE SELECT * FROM read_parquet('{f}')").df()["column_name"]}
     assert not cols & {"iv", "delta", "theta", "gamma", "vega", "rho"}       # a stock's file never has the Greek columns; an old file did not either
     assert Lake(tmp_path).greeks_series("2026-10-23", "OLD").empty
+
+
+def test_a_finished_days_chain_and_overview_are_computed_once_and_kept_on_disk(tmp_path, monkeypatch):
+    """18 Nov 2026 (VPS): the market overview took 67 s and the F&O chain 20 s.  Once a day's files have been quiet for half an hour the answer is saved
+    (webapp/daycache.py) and served from the file, also by a new process; a day still being written is computed every time; a changed file is a new key."""
+    import os
+    import time
+    from webapp import daycache
+    seed_fo_chain(tmp_path)
+    params = {"date": "2026-10-23", "underlying": "NIFTY"}
+    calls = []
+    real = Lake.fo_chain
+    monkeypatch.setattr(Lake, "fo_chain", lambda self, *a, **k: (calls.append(a), real(self, *a, **k))[1])
+    c = TestClient(create_app(tmp_path))
+    first = c.get("/api/fo/chain", params=params).json()
+    assert len(calls) == 1 and not list((tmp_path / ".viewer-cache").glob("chain-*.json"))                # files just written: the day is not finished
+    old = time.time() - 3 * 3600
+    for f in tmp_path.rglob("*.parquet"):
+        os.utime(f, (old, old))                                                  # the day's files are now an hour or more old
+    assert c.get("/api/fo/chain", params=params).json() == first and len(calls) == 2
+    assert list((tmp_path / ".viewer-cache").glob("chain-*.json"))               # saved this time
+    assert TestClient(create_app(tmp_path)).get("/api/fo/chain", params=params).json() == first and len(calls) == 2       # a new process: from the file
+    f = next(x for x in tmp_path.rglob("*.parquet") if {"ticks", "bars", "greeks"} & set(x.relative_to(tmp_path).parts))
+    os.utime(f, (old + 5, old + 5))                                              # a file changed: computed again
+    assert c.get("/api/fo/chain", params=params).json() == first and len(calls) == 3
+    assert daycache.settled(()) is False and daycache.settled((("ticks", "a", int(time.time() * 1e9), 1),)) is False

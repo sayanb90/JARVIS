@@ -392,6 +392,37 @@ def test_a_compacted_day_in_one_wide_file_loads_in_chunks_and_gives_the_same_tab
     ss.forget()
 
 
+def test_a_finished_day_is_read_once_and_then_from_its_cache(tmp_path, monkeypatch):
+    """18 Nov 2026: the first read of a compacted day took 54 s (60 M rows).  After one read the reduced day is saved next to the store; the next read
+    (the viewer restarted, or another process) takes it from there, gives the same tab, and a changed source file makes it read the rows again."""
+    import duckdb
+    from webapp import signals_store as ss
+    small, wide = tmp_path / "small", tmp_path / "wide"
+    fill(small)
+    folder = wide / "live" / f"date={DAY.date()}"
+    folder.mkdir(parents=True)
+    duckdb.connect().execute(f"COPY (SELECT * FROM read_parquet('{small}/live/date={DAY.date()}/*.parquet', union_by_name=true)) TO '{folder}/live-compacted.parquet' (FORMAT PARQUET)")
+    monkeypatch.setattr(ss, "TAIL_MAX_BYTES", 1)
+    ss.forget()
+    first = signals_view.contracts(wide, "NIFTY", "book_pressure", "1s", DAY.date())
+    cache = wide / "viewer-cache" / f"signals-date={DAY.date()}.pkl"
+    assert cache.exists()
+    ss.forget()
+    monkeypatch.setattr(ss.LiveDay, "_batches", staticmethod(lambda *a, **k: (_ for _ in ()).throw(AssertionError("the rows were read again"))))
+    second = signals_view.contracts(wide, "NIFTY", "book_pressure", "1s", DAY.date())
+    assert second["heat"] == first["heat"] and second["snapshot"] == first["snapshot"] and second["load"]["loaded"]
+    # a source file that changed is not served from the old cache
+    (folder / "live-compacted.parquet").touch()
+    ss.forget()
+    assert "read again" in (signals_view.contracts(wide, "NIFTY", "book_pressure", "1s", DAY.date())["load"]["error"] or "")        # it tried to read the rows
+    # a running day (the engines' small files) is never cached
+    ss.forget()
+    fill(tmp_path / "live_day")
+    signals_view.summary(tmp_path / "live_day", "NIFTY", DAY.date(), NOW)
+    assert not (tmp_path / "live_day" / "viewer-cache").exists()
+    ss.forget()
+
+
 def test_by_strike_shows_the_newest_row_of_each_contract_when_the_last_second_has_only_a_few(tmp_path):
     """18 Nov 2026 (live): at 1 s only the contracts that traded in the last second have a row, so a snapshot of that instant had none of the nearest
     expiry and the tab said 'No snapshot' (and the strike x time charts were hidden behind that message)."""
