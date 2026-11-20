@@ -435,3 +435,48 @@ def test_by_strike_shows_the_newest_row_of_each_contract_when_the_last_second_ha
     assert len(c["snapshot"]["rows"]) == 6 and all(r["expiry"] == EXPS[0] for r in c["snapshot"]["rows"])
     assert c["heat"] is not None and len(c["heat"]["strikes"]) == 3
     signals_store.forget()
+
+
+def test_files_are_read_in_the_order_they_were_written_not_by_writer_name(tmp_path):
+    """19 Nov 2026: the futures book writer's files ('book-...') sort before every engine file, so a read that stopped at the memory guard had only the four
+    futures signals: no chain signals, no option rows (By strike empty).  Files are now read by the millisecond stamp in their name."""
+    folder = tmp_path / "live" / f"date={DAY.date()}"
+    folder.mkdir(parents=True)
+    for name in ("book-1000000000003-7.parquet", "engine-NIFTY-1s-1000000000001-8.parquet", "book-1000000000002-7.parquet", "engine-NIFTY-1m-1000000000004-8.parquet"):
+        (folder / name).touch()
+    got = [f.name for f in signals_store.LiveDay(tmp_path, DAY.date())._files()]
+    assert got == ["engine-NIFTY-1s-1000000000001-8.parquet", "book-1000000000002-7.parquet", "book-1000000000003-7.parquet", "engine-NIFTY-1m-1000000000004-8.parquet"]
+
+
+def test_a_day_compacted_while_the_viewer_holds_it_is_read_afresh(tmp_path, monkeypatch):
+    """20 Nov 2026: the viewer held 4350 small files of a day; the nightly job replaced them with one compacted file; 'read 4350 of 4351' then repeated for
+    hours, because the compacted file was added on top of the stale copy (and stopped by the guard)."""
+    import duckdb
+    fill(tmp_path)
+    signals_store.forget()
+    s1 = signals_view.summary(tmp_path, "NIFTY", DAY.date(), NOW, wait_s=30)
+    folder = tmp_path / "live" / f"date={DAY.date()}"
+    small = sorted(folder.glob("*.parquet"))
+    duckdb.connect().execute(f"COPY (SELECT * FROM read_parquet('{folder}/*.parquet', union_by_name=true)) TO '{tmp_path}/compacted.parquet' (FORMAT PARQUET)")
+    for f in small:
+        f.unlink()
+    (tmp_path / "compacted.parquet").replace(folder / "live-compacted.parquet")
+    monkeypatch.setattr(signals_store, "TAIL_MAX_BYTES", 1)
+    signals_store.get_day(tmp_path, DAY.date()).last_refresh = 0
+    s2 = signals_view.summary(tmp_path, "NIFTY", DAY.date(), NOW, wait_s=30)
+    assert s2["load"]["error"] is None and s2["load"]["files_done"] == 1 and s2["load"]["files_total"] == 1
+    assert [(x["signal"], x["bucket"], x["n"]) for x in s2["signals"]] == [(x["signal"], x["bucket"], x["n"]) for x in s1["signals"]]
+    signals_store.forget()
+
+
+def test_above_the_guard_the_loader_drops_the_other_cached_days_before_it_gives_up(tmp_path, monkeypatch):
+    """19 Nov 2026: the viewer was at 1.9 GB with other days in memory, 'read 0 of 2433 files'.  A day being read now takes the memory of the others."""
+    fill(tmp_path)
+    signals_store.forget()
+    other = signals_store.get_day(tmp_path, pd.Timestamp("2026-11-12").date(), wait_s=1)           # a day with no files, kept in the cache
+    assert (str(tmp_path), pd.Timestamp("2026-11-12").date()) in signals_store._CACHE
+    monkeypatch.setattr(signals_store, "rss_mb", lambda: 3000.0 if len(signals_store._CACHE) > 1 else 100.0)
+    s = signals_view.summary(tmp_path, "NIFTY", DAY.date(), NOW, wait_s=30)
+    assert s["load"]["error"] is None and len(s["signals"]) == 5
+    assert (str(tmp_path), pd.Timestamp("2026-11-12").date()) not in signals_store._CACHE
+    signals_store.forget()

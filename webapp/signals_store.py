@@ -17,9 +17,11 @@ loaded by a background thread: callers wait up to `wait_s` and otherwise get wha
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import pickle
+import re
 import threading
 import time
 from collections import OrderedDict, defaultdict
@@ -55,12 +57,24 @@ def rss_mb() -> float:
 
 
 def mem_guard_mb() -> float:
-    """Stop reading files above this resident size (the viewer service is capped at 1500 MB and is OOM-killed above it: 7 times in 25 minutes on 18 Nov 2026)."""
-    import os
+    """Stop reading files above this resident size.  The viewer service is capped at 3 GB (MemoryMax) and DuckDB gets 400 MB of it, so 2200 MB leaves room
+    for a request in flight.  (1100 MB was the guard of the 1.5 GB cap of 18 Nov 2026; on 19 Nov the viewer itself was at 1.1-1.9 GB before loading
+    anything, so a day could never finish loading.)"""
     try:
-        return float(os.environ.get("JARVIS_VIEWER_MEM_GUARD_MB", 1100))
+        return float(os.environ.get("JARVIS_VIEWER_MEM_GUARD_MB", 2200))
     except ValueError:
-        return 1100.0
+        return 2200.0
+
+
+_STAMP = re.compile(r"-(\d{13})-")
+
+
+def _by_time(path: Path) -> tuple:
+    """Files in the order they were written (the millisecond stamp in the name), not by writer name: the futures book writer's files ('book-...') sort before
+    every engine file ('engine-...'), so a read that stops early at a guard had only the four futures signals (19 Nov 2026), instead of the first part of
+    the day for every signal."""
+    m = _STAMP.search(path.name)
+    return (int(m.group(1)) if m else 0, path.name)
 
 
 def is_future(symbols: pd.Series) -> pd.Series:
@@ -92,7 +106,7 @@ class LiveDay:
     def _files(self) -> list:
         from signals.options.stream import live_dir
         folder = live_dir(self.store, self.day)
-        return sorted(folder.glob("*.parquet")) if folder.is_dir() else []
+        return sorted(folder.glob("*.parquet"), key=_by_time) if folder.is_dir() else []
 
     @staticmethod
     def _batches(paths: list, thin: bool = False):
@@ -195,9 +209,24 @@ class LiveDay:
         except Exception as exc:                      # noqa: BLE001 -- the tab works without it
             log.warning("signals tab: cache not written: %r", exc)
 
+    def _over_guard(self) -> bool:
+        """True when the viewer is above the memory guard even after the other cached days are dropped (this one is being read)."""
+        if rss_mb() <= mem_guard_mb():
+            return False
+        evict_others(self)
+        gc.collect()
+        return rss_mb() > mem_guard_mb()
+
     def refresh(self) -> None:
         with self.refresh_lock:
             all_files = self._files()
+            if self.seen and self._cacheable(all_files) and not self.seen <= {f.name for f in all_files}:
+                # the nightly job replaced the day's small files by one compacted file while this process held the day: what is held is stale, and the
+                # compacted file must not be added on top of it (20 Nov 2026: 4350 small files held, 'read 4350 of 4351' repeated for hours)
+                with self.lock:
+                    self.chunks = defaultdict(list)
+                    self.seen = set()
+                    self.loaded = False
             if not self.seen and self._load_cache(all_files):
                 return
             files = [f for f in all_files if f.name not in self.seen]
@@ -206,7 +235,7 @@ class LiveDay:
             whole = set(files[-TAIL_FILES:]) if len(files) > 2 * TAIL_FILES else set(files)       # the newest few files (all of a short list) are read whole ...
             thin_of = {f: not (f in whole and f.stat().st_size <= TAIL_MAX_BYTES) for f in files}    # ... unless they are big: a compacted day is one 1 GB file
             for i in range(0, len(files), BATCH):
-                if rss_mb() > mem_guard_mb():                  # better a partial day and a message than a killed viewer
+                if self._over_guard():                         # better a partial day and a message than a killed viewer
                     with self.lock:
                         self.error = f"memory guard: read {len(self.seen)} of {self.files_total} files, the viewer is at {rss_mb():.0f} MB (limit {mem_guard_mb():.0f} MB)"
                         self.loaded = True
@@ -341,6 +370,13 @@ def get_day(store, day: date, wait_s: float = 20.0) -> LiveDay:
         while len(_CACHE) > MAX_DAYS:
             _CACHE.popitem(last=False)
     return ld.ensure(wait_s)
+
+
+def evict_others(keep: "LiveDay") -> None:
+    """Drop every cached day but `keep` (a day being read needs the memory more than yesterday's does)."""
+    with _CACHE_LOCK:
+        for k in [k for k, v in _CACHE.items() if v is not keep]:
+            _CACHE.pop(k, None)
 
 
 def forget() -> None:
