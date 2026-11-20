@@ -44,7 +44,7 @@ EVENT_SIGNALS = {"block_prints"}
 MAX_EVENTS = 500
 MAX_DAYS = 3                     # days kept in memory
 BUS_COLS = ("t_vendor", "t_recv", "t_emit", "provisional")
-CACHE_SCHEMA = 1                 # bump when what is kept per signal changes: older caches are then ignored
+CACHE_SCHEMA = 2                 # bump when what is kept per signal changes: older caches are then ignored
 
 
 def rss_mb() -> float:
@@ -75,6 +75,17 @@ def _by_time(path: Path) -> tuple:
     the day for every signal."""
     m = _STAMP.search(path.name)
     return (int(m.group(1)) if m else 0, path.name)
+
+
+def _give_back_memory() -> None:
+    """Hand freed memory back to the system: after a read the viewer's resident size stayed at 2.4-2.6 GB although the day it keeps is small (20 Nov 2026),
+    because glibc keeps freed pandas buffers; the guard and the service cap count resident memory."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:                                 # noqa: BLE001 -- not glibc: nothing to hand back
+        pass
 
 
 def is_future(symbols: pd.Series) -> pd.Series:
@@ -254,6 +265,7 @@ class LiveDay:
                             self._ingest(df)
                 with self.lock:
                     self.seen.update(f.name for f in batch)
+                _give_back_memory()
             with self.lock:
                 self.last_refresh = time.monotonic()
                 self.loaded = True
@@ -300,7 +312,8 @@ class LiveDay:
             g = g.dropna(axis=1, how="all").drop(columns=["signal", "bucket", "underlying"])
             if sid in EVENT_SIGNALS:
                 self._add("events", sid, bucket, und, g.tail(MAX_EVENTS))
-            elif "symbol" in g.columns and g["known_at"].duplicated().any():        # per contract: several rows at one bucket
+            elif "symbol" in g.columns:                      # per contract: it has symbols (a chunk with one contract per bucket, as a few small live files have,
+                                                             # must not become a 'single' series: the tab prefers it and shows only those chunks)
                 fut = is_future(g["symbol"])
                 self._add("fut", sid, bucket, und, g[fut])
                 opt = g[~fut]
