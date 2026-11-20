@@ -480,3 +480,19 @@ def test_above_the_guard_the_loader_drops_the_other_cached_days_before_it_gives_
     assert s["load"]["error"] is None and len(s["signals"]) == 5
     assert (str(tmp_path), pd.Timestamp("2026-11-12").date()) not in signals_store._CACHE
     signals_store.forget()
+
+
+def test_a_per_contract_signal_is_per_contract_even_when_a_chunk_has_one_contract_per_bucket(tmp_path, monkeypatch):
+    """20 Nov 2026: the futures book rows have one traded contract a second, so a read of a few small files had no two rows at one time and the rows became
+    a 'single' series, which the tab prefers: the chart showed '60 rows today' with big gaps instead of the day.  The kind follows the symbols."""
+    signals_store.forget()
+    monkeypatch.setattr(signals_store, "BATCH", 2)                  # many small reads, as a live day has
+    for k in range(12):
+        rows = [{"signal": "book_pressure", "bucket": "1s", "underlying": "NIFTY", "ts": T0 + pd.Timedelta(seconds=10 * k + i),
+                 "known_at": T0 + pd.Timedelta(seconds=10 * k + i + 1), "symbol": "NIFTY_FUT_24_NOV_26", "qi": 0.1 * i, "micro_rel": 0.0} for i in range(10)]
+        write_rows(rows, tmp_path, prefix=f"book-{k}")
+    s = signals_view.summary(tmp_path, "NIFTY", DAY.date(), NOW, wait_s=30)
+    e = [x for x in s["signals"] if x["signal"] == "book_pressure"][0]
+    assert e["kind"] == "contract" and e["n"] == 120
+    assert signals_view.series(tmp_path, "NIFTY", "book_pressure", "1s", DAY.date())["n"] == 120
+    signals_store.forget()
