@@ -230,3 +230,27 @@ def test_only_one_reducer_runs_a_day_at_a_time(tmp_path):
         fcntl.flock(fh, fcntl.LOCK_EX)                                        # another reducer holds the day
         assert "another reducer" in reduced.reduce_day(tmp_path, DAY.date(), log_fn=lambda *a: None)["note"]
     assert reduced.reduce_day(tmp_path, DAY.date(), log_fn=lambda *a: None)["error"] is None
+
+
+def test_one_big_compacted_file_is_handed_over_in_pieces_not_held_whole(tmp_path, monkeypatch):
+    """A compacted day is ONE file, so 'after each batch of files' meant after the whole day: the reducer held the day's thinned rows (1.06 GB peak on a
+    6.5-million-row synthetic day).  It now flushes every FLUSH_ROWS kept rows inside the file (640 MB), with the same rows at the end."""
+    import duckdb
+    small, wide = tmp_path / "small", tmp_path / "wide"
+    fill(small)
+    folder = wide / "live" / f"date={DAY.date()}"
+    folder.mkdir(parents=True)
+    duckdb.connect().execute(f"COPY (SELECT * FROM read_parquet('{small}/live/date={DAY.date()}/*.parquet', union_by_name=true)) TO '{folder}/live-compacted.parquet' (FORMAT PARQUET)")
+    monkeypatch.setattr(ss, "TAIL_MAX_BYTES", 1)
+    monkeypatch.setattr(ss, "FLUSH_ROWS", 300)
+    monkeypatch.setattr(ss, "BATCH_ROWS", 2048)
+    flushes = []
+    real = reduced.Writer.__call__
+    monkeypatch.setattr(reduced.Writer, "__call__", lambda self, taken: (flushes.append(sum(len(f) for fr in taken.values() for f in fr)), real(self, taken))[1])
+    res = reduced.reduce_day(wide, DAY.date(), log_fn=lambda *a: None)
+    assert res["complete"] and res["error"] is None and len(flushes) > 2
+    ld, want = _legacy_frames(small)
+    rd = reduced.ReducedDay(wide, DAY.date())
+    assert sorted(tuple(k) for k in rd.manifest()["keys"]) == sorted(want)
+    for key, df in want.items():
+        assert len(rd.frame(*key)) == len(df), key

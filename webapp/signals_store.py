@@ -37,6 +37,7 @@ log = logging.getLogger("webapp.signals")
 BATCH = 50                       # files per DuckDB read
 TAIL_FILES = 4                   # the newest files are read whole (the newest snapshot of every per-contract signal is in them) ...
 TAIL_MAX_BYTES = 50 * 2**20      # ... when they are small: a compacted day is one file of 1 GB and is always thinned
+FLUSH_ROWS = 150_000             # the reducer hands over what it kept after this many rows, also inside one big file
 BATCH_ROWS = 196_608             # rows per streamed pandas frame
 MIN_REFRESH_S = 3.0              # look for new files at most this often
 HIST_SECONDS = 60                # per-contract signals keep the snapshot at second 0 of each minute
@@ -142,6 +143,7 @@ class LiveDay:
         self.last_refresh = 0.0
         self.error: Optional[str] = None
         self.thread: Optional[threading.Thread] = None
+        self._kept = 0                                # rows kept since the last flush
         self.sink = None                              # set by the reducer: called with the kept chunks after every batch of files, which are then dropped from memory
 
     # ------------------------------------------------------------------------------------------ reading
@@ -164,8 +166,8 @@ class LiveDay:
             con = None
             try:
                 con = duckdb.connect()
-                con.execute("SET threads=2")
-                con.execute("SET memory_limit='400MB'")
+                con.execute(f"SET threads={int(os.environ.get('JARVIS_REDUCE_THREADS', 2))}")
+                con.execute(f"SET memory_limit='{int(os.environ.get('JARVIS_REDUCE_DUCKDB_MB', 400))}MB'")
                 con.execute(sql + (where if with_filter else ""))
                 while True:                                # chunks of about BATCH_ROWS rows (100 DuckDB vectors of 2048), never the whole result
                     chunk = con.fetch_df_chunk(max(BATCH_ROWS // 2048, 1))
@@ -294,6 +296,8 @@ class LiveDay:
                     for df in self._batches(chunk, thin=thin):
                         if len(df):
                             self._ingest(df)
+                            if self.sink is not None and self._kept >= FLUSH_ROWS:          # one compacted file is one batch: flush inside it too
+                                self._flush()
                 with self.lock:
                     self.seen.update(f.name for f in batch)
                 self._flush()
@@ -310,7 +314,7 @@ class LiveDay:
         if self.sink is None:
             return
         with self.lock:
-            taken, self.chunks = self.chunks, defaultdict(list)
+            taken, self.chunks, self._kept = self.chunks, defaultdict(list), 0
         self.sink(taken)
 
     def ensure(self, wait_s: float = 20.0) -> "LiveDay":
@@ -341,6 +345,7 @@ class LiveDay:
         if len(frame):
             with self.lock:
                 self.chunks[(kind, sid, bucket, und)].append(frame)
+                self._kept += len(frame)
 
     def _ingest(self, df: pd.DataFrame) -> None:
         df = df.drop(columns=[c for c in BUS_COLS if c in df.columns])
