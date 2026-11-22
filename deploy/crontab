@@ -100,13 +100,18 @@ JARVIS_SHADOW_PARITY=1
 # fills and P&L in logs/paper-<day>.jsonl, one latency record per order in logs/latency-<day>.jsonl (python -m signals latency DAY).
 45 3 * * 1-5   cd $JARVIS && python -m data_layer.jobrun run paper-nifty --shell 'nice -n 10 python -m trading paper --underlying NIFTY --until 10:00 >> logs/paper-nifty.log 2>&1'
 40 11 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run signals-health --shell 'python -m signals health >> logs/signals-health.log 2>&1'
+# Compaction of the day's live table (SCRUM-215), on its own and early: the nightly job compacts only after its replay, which takes hours and did not
+# finish on 17 and 20 Nov 2026, leaving 6,400 small files a day that the viewer then had to read.  The engines stop at 10:02; this waits for quiet files.
+20 10 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run signals-compact --shell 'nice -n 19 ionice -c3 python -m signals compact >> logs/signals-compact.log 2>&1'
 15 12 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run signals-nightly --shell 'nice -n 19 ionice -c3 python -m signals nightly >> logs/signals-nightly.log 2>&1'
 # Viewer (SCRUM-206): save the reduced copy of the day the nightly job has just compacted, so the Signals tab opens it in seconds instead of a minute
 # (reads the day once, about 3 GB for a minute; after the nightly job, far from the market hours).
-30 13 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run signals-viewer-warm --shell 'nice -n 19 ionice -c3 python -m webapp.signals_store warm >> logs/signals-viewer-warm.log 2>&1'
+# (the nightly job's replay takes about an hour per underlying: NIFTY was done at 13:11 UTC on 20 Nov, so warming at 13:30 ran before the compaction.
+# The warms start at 10:30, right after the 10:20 compaction, and the overview and chains need only the tick files, which are final at 10:05.)
+30 10 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run signals-viewer-warm --shell 'nice -n 19 ionice -c3 python -m webapp.signals_store warm >> logs/signals-viewer-warm.log 2>&1'
 # Viewer (SCRUM-206): the Market overview (67 s) and the F&O chains (20 s each) of the finished day, saved once so the tabs open at once
 # (lake/.viewer-cache; the viewer also saves them the first time a finished day is opened).
-50 13 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run viewer-day-warm --shell 'nice -n 19 ionice -c3 python -m webapp.daycache warm >> logs/viewer-day-warm.log 2>&1'
+50 10 * * 1-5  cd $JARVIS && python -m data_layer.jobrun run viewer-day-warm --shell 'nice -n 19 ionice -c3 python -m webapp.daycache warm >> logs/viewer-day-warm.log 2>&1'
 # Signal history backfill (SCRUM-214): every signal that 1-minute candles can produce, month by month from 2022-11, oldest first.  Resumable: a
 # finished month is never redone, the open month grows by the days since the last run, and once everything is covered this is a quick
 # no-op.  Gated by the IV check, stops after 6 hours or when memory is short, refuses 03:40-10:05 UTC.  Progress: python -m signals backfill status

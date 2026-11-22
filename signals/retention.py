@@ -93,7 +93,7 @@ def compact(store: Path, day: date) -> dict:
     """Merge the day's live files into one.  The parts are removed only after the merged file holds exactly their rows."""
     folder = live_folder(store, day)
     parts = sorted(f for f in folder.glob("*.parquet") if f.name != COMPACT_NAME) if folder.is_dir() else []
-    if len(parts) <= 1:
+    if len(parts) <= 1 and not (parts and (folder / COMPACT_NAME).exists()):        # nothing to merge (one late file beside an earlier merge is merged in)
         return {"day": str(day), "files": len(parts), "compacted": False}
     files = parts + ([folder / COMPACT_NAME] if (folder / COMPACT_NAME).exists() else [])
     tmp = folder / (COMPACT_NAME + ".tmp")
@@ -110,6 +110,38 @@ def compact(store: Path, day: date) -> dict:
     for p in parts:
         p.unlink()
     return {"day": str(day), "files": len(parts), "compacted": True, "rows": int(got)}
+
+
+def compact_days(store: Path, days: Optional[list] = None, quiet_s: float = 180.0, now: Optional[float] = None, log=print) -> list[dict]:
+    """Compact each of `days` (default: every live day with more than one file), on its own: the nightly job compacts only after its replay, which takes
+    hours and did not finish on 17 and 20 Nov 2026, so those days stayed in thousands of small files.  A day whose newest file is younger than `quiet_s`
+    seconds is left (an engine may still be writing it; a file written after the merge started is simply merged by the next run)."""
+    import time as _time
+    store, now = Path(store), (now if now is not None else _time.time())
+    root = store / "live"
+    if days is None:
+        days = []
+        for folder in sorted(root.glob("date=*")) if root.is_dir() else []:
+            try:
+                days.append(date.fromisoformat(folder.name.split("=", 1)[1]))
+            except ValueError:
+                continue
+    out = []
+    for d in days:
+        folder = live_folder(store, d)
+        parts = [f for f in folder.glob("*.parquet") if f.name != COMPACT_NAME] if folder.is_dir() else []
+        if not parts:
+            continue
+        if now - max(f.stat().st_mtime for f in parts) < quiet_s:
+            res = {"day": str(d), "files": len(parts), "compacted": False, "skipped": f"newest file is under {int(quiet_s)} s old"}
+        else:
+            try:
+                res = compact(store, d)
+            except Exception as exc:                                   # noqa: BLE001 -- one day failing must not stop the others
+                res = {"day": str(d), "files": len(parts), "compacted": False, "error": repr(exc)}
+        log(f"compact {d}: {res}")
+        out.append(res)
+    return out
 
 
 def remove_old(store: Path, today: date, keep_days: int = KEEP_DAYS) -> list[dict]:

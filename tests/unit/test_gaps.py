@@ -49,7 +49,7 @@ def test_a_day_that_stays_empty_is_given_up_on_after_two_attempts_and_a_filled_d
     assert gaps.yahoo_plan(lake_dir, "1m", ["US"], TODAY)["US"] == []
 
 
-def test_india_missing_uses_the_nse_calendar_and_waits_for_the_close_today(lake_dir):
+def test_india_missing_uses_the_nse_calendar_and_never_asks_for_today(lake_dir):
     market_calendar.save([{"date": "2026-11-10", "holiday_type": "TRADING_HOLIDAY", "closed_exchanges": ["NSE"], "description": "Diwali"}],
                          lake_dir, now=datetime(2026, 11, 11, 3, 0))
     put(lake_dir, "IN", date(2026, 11, 9))
@@ -59,9 +59,9 @@ def test_india_missing_uses_the_nse_calendar_and_waits_for_the_close_today(lake_
     m = gaps.india_missing(lake_dir, TODAY, before_close, span=5)
     assert date(2026, 11, 10) not in m and date(2026, 11, 9) not in m and date(2026, 11, 7) not in m       # holiday, present, weekend
     assert m == [date(2026, 11, 11)]                                                         # yesterday only; today is not expected yet
-    assert gaps.india_missing(lake_dir, TODAY, after_close, span=5) == [date(2026, 11, 11), date(2026, 11, 12)]
+    assert gaps.india_missing(lake_dir, TODAY, after_close, span=5) == [date(2026, 11, 11)]     # even after the close: the service has a day only from the next one on
     gaps.record(lake_dir, "1m", "IN", [date(2026, 11, 11)]); gaps.record(lake_dir, "1m", "IN", [date(2026, 11, 11)])
-    assert gaps.india_missing(lake_dir, TODAY, after_close, span=5) == [date(2026, 11, 12)]  # given up on
+    assert gaps.india_missing(lake_dir, TODAY, after_close, span=5) == []                      # given up on
 
 
 def test_the_bars_job_fetches_back_to_the_oldest_missing_day_and_loads_those_files(sched, lake_dir, monkeypatch):
