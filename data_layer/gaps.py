@@ -27,7 +27,8 @@ log = logging.getLogger(__name__)
 
 SPAN_DAYS = 28                      # the deepest Yahoo 1-minute history we ask for (see yf_client.deepest)
 GIVE_UP = 2                         # attempts after which a weekday with no data is taken to be a holiday
-INDIA_AFTER_CLOSE_UTC = (10, 20)    # NSE closes 10:00 UTC; the candle service has the day a little later
+# The Upstox candle service serves a day only on the day after it (20 Nov 2026: asked for at 10:30 UTC the same day it returned nothing, 503 of 506 empty on
+# 16 Nov, and each empty ask counts toward GIVE_UP).  So india_missing never asks for today.
 
 
 def _state_path(lake_dir: Path) -> Path:
@@ -95,14 +96,14 @@ def days_back_for(missing: list[date], today: date, floor: int = 0) -> int:
 
 
 def india_missing(lake_dir: Path, today: date, now: Optional[datetime] = None, span: int = 14) -> list[date]:
-    """Days NSE was open in the last `span` days (today only once the candle service has it) with no India rows, oldest first."""
+    """Days NSE was open in the last `span` days (never today: the candle service has a day only from the next one on) with no India rows, oldest first."""
     now = now or datetime.now(timezone.utc)
     cal = market_calendar.load(Path(lake_dir))
     first, last = today - timedelta(days=span), today
     have, state = days_with_rows(Path(lake_dir), "1m", first, last), _load(Path(lake_dir))
     key, out = "1m|IN", []
     for d in (first + timedelta(days=i) for i in range((last - first).days + 1)):
-        if d == today and (now.hour, now.minute) < INDIA_AFTER_CLOSE_UTC:
+        if d >= today:                           # the candle service has a day only from the next one on: asking now returns nothing and burns calls
             continue
         if not market_calendar.status(d, "NSE", cal=cal, today=today).expects_data or "IN" in have.get(d, set()) or _given_up(state, key, d):
             continue

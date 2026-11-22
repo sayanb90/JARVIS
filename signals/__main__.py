@@ -9,6 +9,7 @@ Signal runner (SCRUM-146).
   python -m signals smoke [--root STORE]           # the whole catalogue on the synthetic market (no lake needed)
   python -m signals nightly [--lake L] [--root STORE] [--date D]   # cron: every signal for the newest closed session
   python -m signals coverage [--root STORE]        # per signal: rows, days, missing days, days per era
+  python -m signals compact [--root STORE] [--date D | --all]   # cron 10:20 UTC: a day's small live files into one (independent of the nightly replay)
   python -m signals health [--lake L] [--date D]   # inputs of every signal present for the day (exit 1 on a failure)
 
 `run` works in two passes so four years of option minutes never sit in memory at once:
@@ -25,7 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -342,6 +343,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     nt.add_argument("--lake", type=Path, default=None, help="default: the latest research snapshot, else the lake")
     nt.add_argument("--root", type=Path, default=None, help="default: $JARVIS_SIGNAL_STORE or <research root>/store")
     nt.add_argument("--date", type=date.fromisoformat)
+    cp = sub.add_parser("compact", help="merge a day's small live files into one file (cron 10:20 UTC); --all: every uncompacted live day (not today's while it is written)")
+    cp.add_argument("--root", type=Path, default=None, help="default: $JARVIS_SIGNAL_STORE or <research root>/store")
+    cp.add_argument("--date", type=date.fromisoformat, default=None, help="default: today (UTC)")
+    cp.add_argument("--all", action="store_true")
     an = sub.add_parser("anchors", help="save the pre-open anchors the live engines load at their start (cron, 03:30 UTC)")
     an.add_argument("--lake", type=Path, default=None)
     an.add_argument("--root", type=Path, default=None)
@@ -399,6 +404,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         res = nightly(a.lake or default_lake(), a.root or default_store(), a.date, log=say)
         say(json.dumps(res))
         return 0
+    if a.cmd == "compact":
+        from signals import retention
+        store = a.root or default_store()
+        days = None if a.all else [a.date or datetime.now(timezone.utc).date()]
+        res = retention.compact_days(store, days, log=lambda *x: print(*x, flush=True))
+        print(json.dumps(res), flush=True)
+        return 1 if any(r.get("error") for r in res) else 0
     if a.cmd == "anchors":
         from signals.live_runner import cap_memory
         cap_memory(var="JARVIS_SIGNAL_NIGHTLY_MAX_MB", default=10240)
