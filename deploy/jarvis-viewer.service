@@ -11,10 +11,16 @@ EnvironmentFile=/home/jarvis/JARVIS/.env
 ExecStart=/home/jarvis/JARVIS/.venv/bin/python -m webapp --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
-# the viewer must never starve the collector: cap its memory.  3G (1.5G until 18 Nov 2026, when heavy queries got the viewer OOM-killed in a loop; DuckDB's
-# own limit per connection is JARVIS_VIEWER_MEMORY_GB, 0.6) with a soft limit that throttles it first; the box has 16 GB and the feeds and engines use 3-5.
-MemoryHigh=1800M
-MemoryMax=3G
+# the viewer must never starve the collector: cap its memory (SCRUM-216, 22 Nov 2026).  The viewer process itself stays small (about 0.4 GB: the Signals tab
+# reads slices of a day reduced on disk by webapp/reduced.py, and the heavy whole-day calls run in a child process that exits).  A child is killed above
+# JARVIS_VIEWER_CHILD_MB; it shares this cgroup, so 0.4 GB + 1.4 GB stays under MemoryMax.  No MemoryHigh: on 18 Nov it throttled the viewer so hard that
+# /api/perf timed out.  The in-process fallback (JARVIS_VIEWER_REDUCED=0) stops reading a day at JARVIS_VIEWER_MEM_GUARD_MB.  The box has 16 GB; the
+# feeds and engines use 3-5.
+MemoryMax=2G
+Environment=MALLOC_ARENA_MAX=2
+Environment=JARVIS_VIEWER_CHILD_MB=1400
+Environment=JARVIS_VIEWER_MEM_GUARD_MB=1200
+Environment=JARVIS_VIEWER_ANSWER_CACHE_MB=60
 # Jobs started from the Jobs tab (JARVIS_JOB_CONTROL=1, SCRUM-204) are children of the viewer: a restart of the viewer must not kill
 # them.  They still count against MemoryMax above, so a heavy job (the end-of-day compaction needs several GB) is better run from cron.
 KillMode=process

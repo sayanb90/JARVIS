@@ -95,9 +95,39 @@ def is_future(symbols: pd.Series) -> pd.Series:
 def live_days(store) -> list:
     """Days that have live rows, newest first."""
     base = Path(store) / "live"
-    if not base.is_dir():
-        return []
-    return sorted((p.name.split("=", 1)[1] for p in base.glob("date=*") if any(p.glob("*.parquet"))), reverse=True)
+    days = {p.name.split("=", 1)[1] for p in base.glob("date=*") if any(p.glob("*.parquet"))} if base.is_dir() else set()
+    from . import reduced
+    return sorted(days | set(reduced.reduced_days(store)), reverse=True)        # a day whose live files were removed is still there, reduced
+
+
+def merge_frames(kind: str, parts: list) -> Optional[pd.DataFrame]:
+    """The frames kept for one (kind, signal, bucket, underlying) as one: ordered by time, a row repeated by a restarted engine kept once, the newest
+    snapshot only for 'last', the newest few hundred for 'events'.  Used by the in-process loader and by the reduced day's reader, so both give the same rows."""
+    parts = [p for p in parts if p is not None and len(p)]
+    if not parts:
+        return None
+    df = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
+    subset = ["known_at"] + [c for c in ("symbol", "expiry", "strike", "cp") if c in df.columns]
+    df = df.sort_values("known_at", kind="stable").drop_duplicates(subset=subset, keep="last").reset_index(drop=True)
+    if kind == "last":
+        df = df[df["known_at"] == df["known_at"].max()].reset_index(drop=True)
+    elif kind == "events":
+        df = df.tail(MAX_EVENTS).reset_index(drop=True)
+    return df
+
+
+def signals_from_keys(keys, und: str) -> list:
+    """[(signal, bucket, kind)] with kind single, contract or events, for the keys (kind, signal, bucket, underlying) a day holds."""
+    out: dict = {}
+    for kind, sid, bucket, u in keys:
+        if u != und:
+            continue
+        k = (sid, bucket)
+        rank = {"single": 0, "events": 1, "fut": 2, "hist": 2, "last": 2}[kind]
+        label = {"single": "single", "events": "events", "fut": "contract", "hist": "contract", "last": "contract"}[kind]
+        if k not in out or rank < out[k][0]:
+            out[k] = (rank, label)
+    return sorted(((s, b, v[1]) for (s, b), v in out.items()), key=lambda x: (x[0], pd.Timedelta(x[1]) if x[1] else pd.Timedelta(0)))
 
 
 class LiveDay:
@@ -112,6 +142,7 @@ class LiveDay:
         self.last_refresh = 0.0
         self.error: Optional[str] = None
         self.thread: Optional[threading.Thread] = None
+        self.sink = None                              # set by the reducer: called with the kept chunks after every batch of files, which are then dropped from memory
 
     # ------------------------------------------------------------------------------------------ reading
     def _files(self) -> list:
@@ -238,7 +269,7 @@ class LiveDay:
                     self.chunks = defaultdict(list)
                     self.seen = set()
                     self.loaded = False
-            if not self.seen and self._load_cache(all_files):
+            if not self.seen and self.sink is None and self._load_cache(all_files):
                 return
             files = [f for f in all_files if f.name not in self.seen]
             with self.lock:
@@ -265,12 +296,22 @@ class LiveDay:
                             self._ingest(df)
                 with self.lock:
                     self.seen.update(f.name for f in batch)
+                self._flush()
                 _give_back_memory()
             with self.lock:
                 self.last_refresh = time.monotonic()
                 self.loaded = True
                 self.error = None
-            self._save_cache(all_files)
+            if self.sink is None:
+                self._save_cache(all_files)
+
+    def _flush(self) -> None:
+        """With a sink (the reducer): hand over what the last batch kept and forget it, so this process never holds the day."""
+        if self.sink is None:
+            return
+        with self.lock:
+            taken, self.chunks = self.chunks, defaultdict(list)
+        self.sink(taken)
 
     def ensure(self, wait_s: float = 20.0) -> "LiveDay":
         """First call: load in a background thread and wait up to `wait_s`.  Later calls: read the new files (cheap)."""
@@ -336,13 +377,9 @@ class LiveDay:
                 return None
             if len(parts) == 1 and parts[0].attrs.get("merged"):
                 return parts[0]
-            df = pd.concat(parts, ignore_index=True)
-            subset = ["known_at"] + [c for c in ("symbol", "expiry", "strike", "cp") if c in df.columns]
-            df = df.sort_values("known_at", kind="stable").drop_duplicates(subset=subset, keep="last").reset_index(drop=True)
-            if kind == "last":
-                df = df[df["known_at"] == df["known_at"].max()].reset_index(drop=True)
-            elif kind == "events":
-                df = df.tail(MAX_EVENTS).reset_index(drop=True)
+            df = merge_frames(kind, parts)
+            if df is None:
+                return None
             df.attrs["merged"] = True
             self.chunks[key] = [df]
             return df
@@ -351,16 +388,7 @@ class LiveDay:
         """[(signal, bucket, kind)] with kind single, contract or events."""
         with self.lock:
             keys = list(self.chunks.keys())
-        out: dict = {}
-        for kind, sid, bucket, u in keys:
-            if u != und:
-                continue
-            k = (sid, bucket)
-            rank = {"single": 0, "events": 1, "fut": 2, "hist": 2, "last": 2}[kind]
-            label = {"single": "single", "events": "events", "fut": "contract", "hist": "contract", "last": "contract"}[kind]
-            if k not in out or rank < out[k][0]:
-                out[k] = (rank, label)
-        return sorted(((s, b, v[1]) for (s, b), v in out.items()), key=lambda x: (x[0], pd.Timedelta(x[1]) if x[1] else pd.Timedelta(0)))
+        return signals_from_keys(keys, und)
 
     def underlyings(self) -> list:
         with self.lock:
@@ -375,7 +403,16 @@ _CACHE: "OrderedDict[tuple, LiveDay]" = OrderedDict()
 _CACHE_LOCK = threading.Lock()
 
 
-def get_day(store, day: date, wait_s: float = 20.0) -> LiveDay:
+def get_day(store, day: date, wait_s: float = 20.0):
+    """The day's signals, from its reduced copy on disk (webapp/reduced.py: a child process reduces, this process reads slices), or, when that is switched
+    off (JARVIS_VIEWER_REDUCED=0) or the reducer failed, read into this process's memory (the older path, bounded by the memory guard)."""
+    from . import reduced
+    if reduced.enabled():
+        rd = reduced.get_reduced(store, day)
+        rd.ensure(wait_s)
+        if rd.available() or rd.settled or not rd.failed_at:
+            return rd
+        log.warning("signals tab: %s; reading %s in the viewer", rd.error, day)
     key = (str(Path(store)), day)
     with _CACHE_LOCK:
         ld = _CACHE.pop(key, None) or LiveDay(store, day)
@@ -396,11 +433,13 @@ def forget() -> None:
     """Drop every cached day (tests)."""
     with _CACHE_LOCK:
         _CACHE.clear()
+    from . import reduced
+    reduced.forget()
 
 
 def main(argv=None) -> int:
-    """python -m webapp.signals_store warm [--day D] [--store S]: read a finished day once, save its reduced copy (the nightly cron, after the compaction),
-    so the viewer's first read of it takes seconds.  Run outside the viewer's service (it needs about 3 GB for a minute)."""
+    """python -m webapp.signals_store warm [--day D] [--store S]: reduce a compacted day once (cron, after the compaction) so the viewer's first read of it
+    takes seconds.  Run outside the viewer's service."""
     import argparse
     ap = argparse.ArgumentParser(prog="python -m webapp.signals_store")
     ap.add_argument("action", choices=["warm"])
@@ -416,11 +455,12 @@ def main(argv=None) -> int:
     t0 = time.perf_counter()
     ld = LiveDay(store, day)
     if not ld._cacheable(ld._files()):
-        print(f"{day}: the day's rows are not compacted yet (the nightly job has not finished): nothing to warm")
+        print(f"{day}: the day's rows are not compacted yet (the compaction has not run): nothing to warm")
         return 0
-    ld.refresh()
-    print(f"{day}: {ld.progress()} in {time.perf_counter() - t0:.0f} s; cache {ld.cache_file()} exists={ld.cache_file().exists()}")
-    return 0 if ld.loaded and not ld.error else 1
+    from . import reduced
+    res = reduced.reduce_day(store, day, log_fn=lambda *a: None)             # the same reduction the viewer's child runs, here in cron's own process
+    print(f"{day}: {res} in {time.perf_counter() - t0:.0f} s; reduced copy {reduced.reduced_dir(store, day)}")
+    return 0 if res.get("complete") and not res.get("error") else 1
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ for remote access, and/or set WEBAPP_USER and WEBAPP_PASSWORD to require HTTP Ba
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import re
@@ -57,6 +58,7 @@ STATIC = Path(__file__).parent / "static"
 WIDTHS = (0, 1, 5, 15, 30, 60, 300)              # precision offered in the UI: 0 = raw ticks (no aggregation), else a bar width in seconds
 VOL_WINDOWS = (60, 300, 900, 1800)
 CANDLE_MINUTES = (1, 3, 5, 15, 30, 60)           # candle size offered in the Candles section
+LIVE_ANSWER_S = 120.0                            # a running day's overview or chain is kept this long (computing it takes 20 to 80 s)
 PROFILE_BINS = (20, 40, 60, 100)                 # about how many price levels the volume profile is split into
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9&._-]{1,32}$")
 UNDERLYING_RE = re.compile(r"^[A-Za-z0-9&]{1,20}$")
@@ -99,6 +101,21 @@ def chain_payload(q: Lake, lake_path: Path, date: str, underlying: str, expiry, 
     from . import daycache
     return daycache.cached(lake_path, "chain", (date, underlying, expiry or "", interval), overview_fingerprint(q, lake_path, date, interval),
                            lambda: _json_safe(q.fo_chain(date, underlying, expiry, interval)))
+
+
+def _repo_root() -> str:
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def _via_child(action: str, lake_path: Path, args: list):
+    """A heavy whole-day call computed in a child process that exits (webapp/worker.py, webapp/heavy.py): the viewer stays small.  503 when the child could not
+    answer (busy, over its time or memory cap): the page shows 'try again' and nothing else is lost."""
+    from . import heavy
+    res = heavy.run_child(["-m", "webapp.worker", action, "--lake", str(lake_path), *[str(a) for a in args]], timeout_s=600, cwd=_repo_root())
+    if not res.ok:
+        raise HTTPException(503, f"the {action} could not be computed ({res.killed or 'exit ' + str(res.returncode)}); try again in a minute",
+                            headers={"Retry-After": "30"})
+    return json.loads(res.stdout)
 
 
 def _check_date(d: str) -> str:
@@ -177,7 +194,8 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
     if admin is not None:                            # only when a login exists: WEBAPP_USER/PASSWORD (also covers the viewer) or ADMIN_USER/PASSWORD
         app.include_router(admin)
     app.state.admin_enabled = admin is not None
-    overview_cache: dict[tuple, list] = {}
+    overview_cache: dict[tuple, tuple] = {}
+    chain_cache: dict[tuple, tuple] = {}
 
     def lake() -> Lake:
         return Lake(lake_path)            # cheap: registers views over parquet files, reads nothing
@@ -283,11 +301,23 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
         key_fp = overview_fingerprint(lake(), lake_path, date, interval)
         if not key_fp:
             raise HTTPException(404, f"no bars for {date}")
-        key = (date, key_fp)
-        if key not in overview_cache:
-            overview_cache.clear()          # keep only the latest day in memory
-            overview_cache[key] = overview_payload(lake(), lake_path, date, interval)
-        return overview_cache[key]
+        from . import daycache, heavy
+        if not heavy.children_enabled():
+            key = (date, key_fp)
+            if key not in overview_cache:
+                overview_cache.clear()          # keep only the latest day in memory
+                overview_cache[key] = overview_payload(lake(), lake_path, date, interval)
+            return overview_cache[key]
+        done = daycache.settled(key_fp)
+        hit = overview_cache.get((date, interval))
+        if hit and ((done and hit[1] == key_fp) or time.time() - hit[0] < LIVE_ANSWER_S):
+            return hit[2]
+        payload = daycache.get(lake_path, "overview", (date, interval), key_fp) if done else None      # a finished day's answer is on disk: no child
+        if payload is None:
+            payload = _via_child("overview", lake_path, ["--date", date, "--interval", interval])
+        overview_cache.clear()              # keep only the latest day in memory
+        overview_cache[(date, interval)] = (time.time(), key_fp, payload)
+        return payload
 
     @app.get("/api/fo/meta")
     def fo_meta(date: str):
@@ -302,7 +332,23 @@ def create_app(lake_dir: Path | str | None = None, interval: str = "1s") -> Fast
             raise HTTPException(422, "invalid underlying")
         if expiry is not None and not DATE_RE.match(expiry):
             raise HTTPException(422, "expiry must be YYYY-MM-DD")
-        data = chain_payload(lake(), lake_path, date, underlying, expiry, interval)
+        from . import daycache, heavy
+        if heavy.children_enabled():
+            q = lake()
+            fp = overview_fingerprint(q, lake_path, date, interval)
+            done, ckey = daycache.settled(fp), (date, underlying, expiry or "", interval)
+            hit = chain_cache.get(ckey)
+            if hit and ((done and hit[1] == fp) or time.time() - hit[0] < LIVE_ANSWER_S):
+                data = hit[2]
+            else:
+                data = daycache.get(lake_path, "chain", ckey, fp) if done else None
+                if data is None:
+                    data = _via_child("chain", lake_path, ["--date", date, "--underlying", underlying, *(["--expiry", expiry] if expiry else []), "--interval", interval])
+                if len(chain_cache) >= 24:
+                    chain_cache.pop(next(iter(chain_cache)))
+                chain_cache[ckey] = (time.time(), fp, data)
+        else:
+            data = chain_payload(lake(), lake_path, date, underlying, expiry, interval)
         if not data:
             raise HTTPException(404, f"no derivatives for {underlying} on {date}")
         return JSONResponse(_json_safe(data))
