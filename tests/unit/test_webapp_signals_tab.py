@@ -496,3 +496,16 @@ def test_a_per_contract_signal_is_per_contract_even_when_a_chunk_has_one_contrac
     assert e["kind"] == "contract" and e["n"] == 120
     assert signals_view.series(tmp_path, "NIFTY", "book_pressure", "1s", DAY.date())["n"] == 120
     signals_store.forget()
+
+
+def test_a_live_day_is_not_stale_a_few_seconds_after_its_newest_row(store):
+    """20 Nov 2026: 'Stale' showed on a live 1 s day whose newest row was seconds old (the threshold was two buckets, the tab refreshes every 3 s)."""
+    ss = signals_store
+    ss.forget()
+    s = signals_view.summary(store, "NIFTY", DAY.date(), NOW, wait_s=30)
+    newest = pd.Timestamp(s["newest"])
+    fresh = signals_view.summary(store, "NIFTY", DAY.date(), (newest + pd.Timedelta(seconds=6)).to_pydatetime(), wait_s=30)
+    late = signals_view.summary(store, "NIFTY", DAY.date(), (newest + pd.Timedelta(minutes=5)).to_pydatetime(), wait_s=30)
+    assert fresh["stale"] is False or min(pd.Timedelta(w) for w in fresh["cadence"]) >= pd.Timedelta(seconds=5)
+    assert late["stale"] is True
+    ss.forget()
