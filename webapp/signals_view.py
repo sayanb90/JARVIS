@@ -151,7 +151,7 @@ def summary(store: Path, underlying: str, day: Optional[date] = None, now: Optio
     if widths:
         out["cadence"] = sorted(widths, key=pd.Timedelta)
         out["newest"] = newest.isoformat()
-        out["stale"] = bool(now - newest > 2 * pd.Timedelta(out["cadence"][0]))
+        out["stale"] = bool(now - newest > max(2 * pd.Timedelta(out["cadence"][0]), pd.Timedelta(seconds=10)))        # the tab refreshes every 3 s: 2 s was always 'stale' on a live 1 s day
     fam = {f: i for i, f in enumerate(FAMILY_ORDER)}
     out["signals"].sort(key=lambda s: (fam.get(s["family"], 99), s["signal"], pd.Timedelta(s["bucket"])))
     out["daily"] = _daily(store, underlying, day)

@@ -25,6 +25,8 @@ def _hermetic_settings(tmp_path, monkeypatch):
     needs a setting sets it itself, after this runs."""
     for name in HOST_SETTINGS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("JARVIS_VIEWER_REDUCED", "0")                    # the Signals tab reads a day into the process unless a test turns the reduced copy on (SCRUM-216)
+    monkeypatch.setenv("JARVIS_VIEWER_CHILD", "0")                      # ... and heavy requests run in the process, not in a child, unless a test says otherwise
     monkeypatch.setenv("JARVIS_YF_CHUNK_PAUSE_S", "0")                  # no waiting between Yahoo downloads in tests
     import data_layer.lake as lake
     from data_layer.upstox import auth
