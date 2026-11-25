@@ -1,0 +1,33 @@
+# A plumbing example, not a tuned strategy: buy the nearest-expiry at-the-money call on the same breakout; a bought option risks at most its premium,
+# here also stopped at 30 % of it.
+name = "opt_noise_breakout_call"
+underlying = "NIFTY"
+broker = "upstox"
+
+[instrument]
+kind = "option"
+side = "buy"
+right = "CE"
+strike = "atm"
+expiry = "nearest"
+min_days_to_expiry = 1
+
+[entry]
+all = [{ signal = "noise_band", column = "signal", op = ">", value = 0.5, scale = 0.5 }]
+window = ["09:45", "14:30"]
+max_trades_per_day = 2
+
+[exit]
+any = [{ signal = "noise_band", column = "signal", op = "<", value = 0.5 }]
+stop_loss_pct = 0.3
+take_profit_pct = 0.6
+max_hold_minutes = 60
+flat_at = "15:15"
+
+[risk]
+daily_loss_budget = 100000
+max_trade_fraction = 0.6
+max_lots = 20
+
+[fills]
+half_spread_opt_pct = 0.5
