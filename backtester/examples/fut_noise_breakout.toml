@@ -1,0 +1,31 @@
+# A plumbing example, not a tuned strategy: buy the front NIFTY future when the index closes above its noise band (C10 noise_band, signal = +1),
+# leave when it is back inside, on a 0.4 % stop, after an hour, or at 15:15.
+name = "fut_noise_breakout"
+underlying = "NIFTY"
+broker = "zerodha"
+
+[instrument]
+kind = "future"
+side = "buy"
+expiry = "nearest"
+min_days_to_expiry = 1
+
+[entry]
+all = [{ signal = "noise_band", column = "signal", op = ">", value = 0.5, scale = 0.5 }]
+window = ["09:45", "14:30"]
+max_trades_per_day = 2
+
+[exit]
+any = [{ signal = "noise_band", column = "signal", op = "<", value = 0.5 }]
+stop_loss_pct = 0.004
+take_profit_pct = 0.008
+max_hold_minutes = 60
+flat_at = "15:15"
+
+[risk]
+daily_loss_budget = 100000
+max_trade_fraction = 0.6
+max_lots = 20
+
+[fills]
+half_spread_fut_bps = 0.5

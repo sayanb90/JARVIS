@@ -25,7 +25,7 @@ def test_costs_follow_the_side_and_the_date():
     buy = fill_cost("opt", +1, 100.0, 650, date(2025, 1, 2))
     assert sell.stt == pytest.approx(65_000 * 0.001) and buy.stt == 0.0
     assert buy.stamp > 0 and sell.stamp == 0.0
-    assert sell.gst == pytest.approx(0.18 * (20 + sell.exchange + sell.sebi))
+    assert sell.gst == pytest.approx(0.18 * (20 + sell.exchange + sell.sebi + sell.ipft))          # IPFT is in the GST base (Upstox, 25 Nov 2026)
     assert fill_cost("opt", -1, 100.0, 650, date(2024, 6, 3)).stt == pytest.approx(65_000 * 0.000625)
 
 
