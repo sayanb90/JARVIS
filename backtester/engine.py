@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -57,6 +58,12 @@ class Trade:
     exit_price: float = math.nan
     exit_reason: str = ""
     costs: float = 0.0
+    entry_type: str = "market"
+    entry_half_spread: float = 0.0                 # fraction of the price paid to cross the spread on entry (0 for a limit fill)
+    exit_half_spread: float = 0.0
+    strike: Optional[float] = None
+    right: Optional[str] = None
+    expiry: Optional[date] = None
 
     @property
     def qty(self) -> int:
@@ -71,12 +78,21 @@ class Trade:
         return self.gross - self.costs
 
 
+class _Contract:
+    """What the spread lookup needs of a contract before a Trade exists."""
+
+    def __init__(self, c: dict, ins):
+        self.strike, self.expiry = c.get("strike"), c.get("expiry")
+        self.right = ins.right if ins.kind == "option" else None
+
+
 @dataclass
 class Result:
     strategy: Strategy
     trades: list = field(default_factory=list)
     skipped: list = field(default_factory=list)          # entries the rules wanted but could not size or fill, with the reason
     days: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
 
 
 class Backtest:
@@ -85,6 +101,17 @@ class Backtest:
         self.prices = prices or Prices(lake, strategy.underlying, d0, d1)
         grid = self.prices.index["ts"] + pd.Timedelta(minutes=1)                                  # decision times: each bar's close
         self.panel = signal_panel(store, strategy.underlying, d0, d1, strategy.needs(), grid).set_index("t")
+        self.spot = self.prices.index.set_index("ts")["close"]
+        self.notes: list = []
+        self.spreads = None
+        if strategy.fills.spread == "measured":
+            from backtester.spreads import SpreadTable, table_path
+            path = Path(strategy.fills.spread_table) if strategy.fills.spread_table else table_path(store, strategy.underlying)
+            if path.exists():
+                self.spreads = SpreadTable.load(path, strategy.fills.spread_quantile)
+                self.notes.append(f"half-spreads measured: {path} (quantile {strategy.fills.spread_quantile})")
+            else:
+                self.notes.append(f"half-spreads FIXED: no measured table at {path} (python -m backtester spreads)")
 
     # ------------------------------------------------------------------------------------------ rules
     def _row(self, t: pd.Timestamp) -> dict:
@@ -110,13 +137,20 @@ class Backtest:
         return any(c.holds(row.get(c.key, math.nan)) for c in self.s.exit.any)
 
     # ------------------------------------------------------------------------------------------ prices
-    def _hs(self, kind: str) -> float:
+    def _hs(self, kind: str, price: float, t: pd.Timestamp, strike=None, right=None, expiry=None) -> float:
+        """The half-spread of a market fill, as a fraction of the price: measured for its bucket when there is a table, else the fixed one."""
+        if self.spreads is not None:
+            spot = self.spot.asof(t) if len(self.spot) else None
+            v = self.spreads.lookup(kind, price, t, strike, right, spot, expiry)
+            if v is not None:
+                return v
         f = self.s.fills
         return f.half_spread_fut_bps / 1e4 if kind == "future" else f.half_spread_opt_pct / 100
 
-    def _fill(self, raw: float, side: int, kind: str) -> float:
-        """A market fill at `raw`, worse by the half-spread: a buy pays more, a sell gets less."""
-        return raw * (1 + side * self._hs(kind))
+    def _fill(self, raw: float, side: int, kind: str, t: pd.Timestamp, pos=None) -> tuple:
+        """A market fill at `raw`, worse by the half-spread: a buy pays more, a sell gets less.  Returns (price, half-spread)."""
+        hs = self._hs(kind, raw, t, *( (pos.strike, pos.right, pos.expiry) if pos is not None else (None, None, None)))
+        return raw * (1 + side * hs), hs
 
     def _cost(self, kind: str, side: int, price: float, qty: int, day: date) -> float:
         return fill_cost("fut" if kind == "future" else "opt", side, price, qty, day, broker=self.s.broker).total
@@ -150,7 +184,8 @@ class Backtest:
             k += 1
         if pos is not None:                                            # the index ended before the contract: close at its last bar
             last = bars.iloc[-1]
-            self._close(pos, last["ts"] + pd.Timedelta(minutes=1), float(last["close"]), "day end", day)
+            px, hs = self._fill(float(last["close"]), -pos.direction, pos.kind, last["ts"], pos)
+            self._close(pos, last["ts"] + pd.Timedelta(minutes=1), px, "day end", day, hs)
             realised += pos.net
             res.trades.append(pos)
         res.days.append(day)
@@ -164,26 +199,54 @@ class Backtest:
             why = "no contract"
         else:
             bars = self.prices.bars(c["symbol"], day)
-            nxt = bars[(bars["ts"] >= t_dec) & (bars["ts"] < t_dec + pd.Timedelta(minutes=FILL_WINDOW))] if len(bars) else bars
+            horizon = max(FILL_WINDOW, self.s.fills.limit_ttl_minutes if self.s.fills.entry == "limit" else 0)
+            nxt = bars[(bars["ts"] >= t_dec) & (bars["ts"] < t_dec + pd.Timedelta(minutes=horizon))] if len(bars) else bars
             if not len(nxt):
                 why = "no bar to fill"
             elif scale <= 0:
                 why = "conviction below the lowest tier"
             else:
-                b = nxt.iloc[0]
-                px = self._fill(float(b["open"]), ins.direction, ins.kind)
-                per_unit = px * s.exit.stop_loss_pct if s.exit.stop_loss_pct else px             # a bought option without a stop: all of it
-                allowed = min(s.risk.daily_loss_budget * s.risk.max_trade_fraction * scale, budget_left)
-                lots = min(int(allowed // (per_unit * c["lot_size"])) if per_unit > 0 else 0, s.risk.max_lots)
-                if lots < 1:
-                    why = f"one lot risks {per_unit * c['lot_size']:,.0f}, more than the {allowed:,.0f} allowed"
+                fill = self._entry_fill(bars, t_dec, ins, c)
+                if fill is None:
+                    why = "limit not filled"
                 else:
-                    t = Trade(day, c["symbol"], ins.kind, ins.direction, lots, c["lot_size"], t_dec, b["ts"], px, score, scale,
-                              per_unit * c["lot_size"] * lots)
-                    t.costs = self._cost(ins.kind, ins.direction, px, t.qty, day)
-                    return t, bars.set_index("ts", drop=False)
+                    fill_ts, px, hs, kind_of_fill = fill
+                    per_unit = px * s.exit.stop_loss_pct if s.exit.stop_loss_pct else px             # a bought option without a stop: all of it
+                    allowed = min(s.risk.daily_loss_budget * s.risk.max_trade_fraction * scale, budget_left)
+                    lots = min(int(allowed // (per_unit * c["lot_size"])) if per_unit > 0 else 0, s.risk.max_lots)
+                    if lots < 1:
+                        why = f"one lot risks {per_unit * c['lot_size']:,.0f}, more than the {allowed:,.0f} allowed"
+                    else:
+                        t = Trade(day, c["symbol"], ins.kind, ins.direction, lots, c["lot_size"], t_dec, fill_ts, px, score, scale,
+                                  per_unit * c["lot_size"] * lots, entry_type=kind_of_fill, entry_half_spread=hs, strike=c.get("strike"),
+                                  right=ins.right if ins.kind == "option" else None, expiry=c.get("expiry"))
+                        t.costs = self._cost(ins.kind, ins.direction, px, t.qty, day)
+                        return t, bars.set_index("ts", drop=False)
         res.skipped.append({"day": day, "decided_at": t_dec, "score": score, "reason": why})
         return None, None
+
+    def _entry_fill(self, bars: pd.DataFrame, t_dec: pd.Timestamp, ins, c: dict):
+        """(bar ts, price, half-spread paid, "market" | "limit") or None.  Market: the next bar's open, worse by the half-spread.  Limit:
+        `limit_offset_pct` better than the contract's last close at the decision; filled at the limit only by a bar within `limit_ttl_minutes` that
+        trades through it (a buy: low below the limit; a bar opening beyond it fills at its open), never on a touch, and no spread is paid."""
+        f, d = self.s.fills, ins.direction
+        if f.entry == "market":
+            nxt = bars[(bars["ts"] >= t_dec) & (bars["ts"] < t_dec + pd.Timedelta(minutes=FILL_WINDOW))]
+            b = nxt.iloc[0]
+            px, hs = self._fill(float(b["open"]), d, ins.kind, b["ts"], _Contract(c, ins))
+            return b["ts"], px, hs, "market"
+        before = bars[bars["ts"] < t_dec]
+        ref = float(before["close"].iloc[-1]) if len(before) else float(bars[bars["ts"] >= t_dec]["open"].iloc[0])
+        limit = ref * (1 - d * f.limit_offset_pct / 100)
+        window = bars[(bars["ts"] >= t_dec) & (bars["ts"] < t_dec + pd.Timedelta(minutes=f.limit_ttl_minutes))]
+        for b in window.itertuples(index=False):
+            if d > 0 and b.open < limit:
+                return b.ts, float(b.open), 0.0, "limit"
+            if d < 0 and b.open > limit:
+                return b.ts, float(b.open), 0.0, "limit"
+            if (d > 0 and b.low < limit) or (d < 0 and b.high > limit):
+                return b.ts, limit, 0.0, "limit"
+        return None
 
     def _levels(self, pos: Trade) -> tuple:
         sl, tp = self.s.exit.stop_loss_pct, self.s.exit.take_profit_pct
@@ -202,14 +265,17 @@ class Backtest:
         d = pos.direction
         o, h, l = float(b["open"]), float(b["high"]), float(b["low"])
         hit = None
+        as_limit = s.fills.target_as_limit
         if stop is not None and ((d > 0 and l <= stop) or (d < 0 and h >= stop)):
             gap = (d > 0 and o <= stop) or (d < 0 and o >= stop)
-            hit = ("stop", o if gap else stop)
-        elif target is not None and ((d > 0 and h >= target) or (d < 0 and l <= target)):
+            hit = ("stop", o if gap else stop, False)
+        elif target is not None and (((d > 0 and h > target) or (d < 0 and l < target)) if as_limit
+                                     else ((d > 0 and h >= target) or (d < 0 and l <= target))):
             gap = (d > 0 and o >= target) or (d < 0 and o <= target)
-            hit = ("target", o if gap else target)
+            hit = ("target", o if gap else target, as_limit)           # a resting limit fills at its price (or a better open): no spread
         if hit:
-            self._close(pos, ts, self._fill(hit[1], -d, pos.kind), hit[0], day)
+            px, hs = (hit[1], 0.0) if hit[2] else self._fill(hit[1], -d, pos.kind, ts, pos)
+            self._close(pos, ts, px, hit[0], day, hs)
             res.trades.append(pos)
             return None, realised + pos.net
         reason = None
@@ -223,20 +289,22 @@ class Backtest:
             later = bars[bars["ts"] >= t_dec]
             if len(later):
                 nb = later.iloc[0]
-                self._close(pos, nb["ts"], self._fill(float(nb["open"]), -d, pos.kind), reason, day)
+                px, hs = self._fill(float(nb["open"]), -d, pos.kind, nb["ts"], pos)
+                self._close(pos, nb["ts"], px, reason, day, hs)
             else:
-                self._close(pos, ts + pd.Timedelta(minutes=1), self._fill(float(b["close"]), -d, pos.kind), reason + " (last bar)", day)
+                px, hs = self._fill(float(b["close"]), -d, pos.kind, ts, pos)
+                self._close(pos, ts + pd.Timedelta(minutes=1), px, reason + " (last bar)", day, hs)
             res.trades.append(pos)
             return None, realised + pos.net
         return pos, realised
 
-    def _close(self, pos: Trade, at: pd.Timestamp, price: float, reason: str, day: date) -> None:
-        pos.exit_at, pos.exit_price, pos.exit_reason = at, price, reason
+    def _close(self, pos: Trade, at: pd.Timestamp, price: float, reason: str, day: date, hs: float = 0.0) -> None:
+        pos.exit_at, pos.exit_price, pos.exit_reason, pos.exit_half_spread = at, price, reason, hs
         pos.costs += self._cost(pos.kind, -pos.direction, price, pos.qty, day)
 
     # ------------------------------------------------------------------------------------------ the range
     def run(self, log=None) -> Result:
-        res = Result(self.s)
+        res = Result(self.s, notes=list(self.notes))
         for day in self.prices.days():
             if self.d0 <= day <= self.d1:
                 self.run_day(day, res)

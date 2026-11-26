@@ -220,3 +220,95 @@ tiers = [{ min_score = 0.0, scale = 0.5 }, { min_score = 0.9, scale = 1.0 }]
     daily = pd.read_csv(out / "daily.csv")
     assert list(daily["trades"]) == [2, 2] and daily["cum_net"].iloc[-1] == pytest.approx(s["net"])
     assert len(pd.read_csv(out / "trades.csv")) == 4
+
+
+# ------------------------------------------------------------------------------------------------ fills (SCRUM-218)
+def write_ticks(lake, day, rows):
+    folder = lake / "ticks" / "segment=fo" / f"date={day}"
+    folder.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_parquet(folder / "ticks.parquet", index=False)
+
+
+def test_spreads_are_measured_by_bucket_from_the_quotes_and_looked_up_with_fallback(tmp_path):
+    from backtester import spreads
+    lake = tmp_path / "lake"
+    t0 = pd.Timestamp(DAYS[0]) + pd.Timedelta(hours=5)                               # 10:30 IST: "morning"
+    rows = []
+    for i in range(300):
+        ts = t0 + pd.Timedelta(seconds=i)
+        rows.append({"ts": ts, "symbol": FUT, "ltp": 24000.0, "bid": 23999.0, "ask": 24001.0})          # half-spread 1/24000
+        rows.append({"ts": ts, "symbol": CE, "ltp": 100.0, "bid": 99.0, "ask": 101.0})                  # 1 % of the mid
+    write_ticks(lake, DAYS[0], rows)
+    df = spreads.measure(lake, "NIFTY", DAYS[0], DAYS[0])
+    fut_all = df[(df["kind"] == "future") & df[["premium", "moneyness", "dte", "tod"]].isna().all(axis=1)]
+    assert fut_all["p50"].iloc[0] == pytest.approx(1 / 24000) and fut_all["n"].iloc[0] == 300
+    full = df[(df["kind"] == "option") & df["tod"].notna() & df["dte"].notna()]
+    r = full.iloc[0]
+    assert (r["premium"], r["moneyness"], r["dte"], r["tod"]) == ("50-150", "atm", "2-3", "morning") and r["p50"] == pytest.approx(0.01)
+    tab = spreads.SpreadTable(df)
+    hit = tab.lookup("option", 100.0, t0, 24000.0, "CE", 24000.0, date(2026, 11, 26))
+    assert hit == pytest.approx(0.01)
+    later = t0 + pd.Timedelta(hours=4)                                                # afternoon: no quotes then, falls back to a coarser bucket
+    assert tab.lookup("option", 100.0, later, 24000.0, "CE", 24000.0, date(2026, 11, 26)) == pytest.approx(0.01)
+    assert tab.lookup("future", 24000.0, t0) == pytest.approx(1 / 24000)
+    assert spreads.SpreadTable(df.assign(n=10)).lookup("future", 24000.0, t0) is None              # too few quotes anywhere
+
+
+def test_a_measured_spread_is_charged_per_fill_and_the_fixed_one_is_the_fallback(tmp_path):
+    from backtester import spreads
+    make_lake(tmp_path / "lake")
+    make_signal(tmp_path / "store", {30: 2.0, 90: -2.0})
+    tab = pd.DataFrame([{"kind": "future", "premium": None, "moneyness": None, "dte": None, "tod": None, "n": 1000, "p50": 0.0005, "p75": 0.001}])
+    out = spreads.table_path(tmp_path / "store", "NIFTY")
+    out.parent.mkdir(parents=True)
+    tab.to_parquet(out, index=False)
+    t = run(tmp_path, strat(fills={"spread": "measured", "half_spread_fut_bps": 0.0}), d1=DAYS[0]).trades[0]
+    assert t.entry_half_spread == pytest.approx(0.0005) and t.entry_price == pytest.approx((24100 + 0.5 * 31) * 1.0005)
+    assert t.exit_price == pytest.approx((24100 + 0.5 * 91) * (1 - 0.0005))
+    q75 = run(tmp_path, strat(fills={"spread": "measured", "spread_quantile": 0.75}), d1=DAYS[0]).trades[0]
+    assert q75.entry_half_spread == pytest.approx(0.001)
+    out.unlink()
+    res = run(tmp_path, strat(fills={"spread": "measured", "half_spread_fut_bps": 2.0}), d1=DAYS[0])
+    assert res.trades[0].entry_half_spread == pytest.approx(2e-4) and "FIXED" in res.notes[0]
+
+
+def test_a_limit_entry_fills_only_when_a_bar_trades_through_it_at_the_limit_and_is_cancelled_after_its_time(tmp_path):
+    ref = 24100 + 0.5 * 30                                                            # the future's close at the decision (bar 30)
+    limit = ref * (1 - 0.1 / 100)
+    touch = {31: {"low": limit}, 32: {"low": limit}, 33: {"low": limit - 0.5}}      # two touches, then a trade-through
+    make_lake(tmp_path / "lake", fut_over=touch)
+    make_signal(tmp_path / "store", {30: 2.0, 90: -2.0})
+    s = strat(fills={"entry": "limit", "limit_offset_pct": 0.1, "limit_ttl_minutes": 5, "half_spread_fut_bps": 3.0})
+    t = run(tmp_path, s, d1=DAYS[0]).trades[0]
+    assert t.entry_type == "limit" and t.entry_at == minutes(DAYS[0])[33] and t.entry_price == pytest.approx(limit) and t.entry_half_spread == 0
+    make_lake(tmp_path / "lake2", fut_over={31: {"low": limit}})                    # only a touch, and the market runs away
+    res = Backtest(strat(fills={"entry": "limit", "limit_offset_pct": 0.1, "limit_ttl_minutes": 5}), tmp_path / "lake2", tmp_path / "store",
+                   DAYS[0], DAYS[0]).run()
+    assert res.trades == [] and res.skipped[0]["reason"] == "limit not filled"
+
+
+def test_a_target_resting_as_a_limit_needs_a_trade_through_and_pays_no_spread(tmp_path):
+    entry_open = 24100 + 0.5 * 31
+    target = entry_open * (1 + 0.002)
+    make_lake(tmp_path / "lake", fut_over={40: {"high": target}, 41: {"high": target + 1.0}})
+    make_signal(tmp_path / "store", {30: 2.0})
+    s = strat(exit={"any": [], "stop_loss_pct": 0.01, "take_profit_pct": 0.002}, fills={"target_as_limit": True, "half_spread_fut_bps": 0.0})
+    t = run(tmp_path, s, d1=DAYS[0]).trades[0]
+    assert t.exit_reason == "target" and t.exit_at == minutes(DAYS[0])[41] and t.exit_price == pytest.approx(target) and t.exit_half_spread == 0
+    target2 = entry_open * (1 + 1e-4) * (1 + 0.002)                                  # a market entry pays the spread, so its target is higher
+    make_lake(tmp_path / "lake2", fut_over={40: {"high": target2}})
+    s2 = strat(exit={"any": [], "stop_loss_pct": 0.01, "take_profit_pct": 0.002}, fills={"half_spread_fut_bps": 1.0})
+    t2 = Backtest(s2, tmp_path / "lake2", tmp_path / "store", DAYS[0], DAYS[0]).run().trades[0]
+    assert t2.exit_at == minutes(DAYS[0])[40] and t2.exit_price == pytest.approx(target2 * (1 - 1e-4))    # a market target: a touch fills, the spread paid
+
+
+def test_the_spreads_command_writes_the_table_a_backtest_reads(tmp_path):
+    from backtester import spreads
+    from backtester.__main__ import main
+    t0 = pd.Timestamp(DAYS[0]) + pd.Timedelta(hours=5)
+    write_ticks(tmp_path / "lake", DAYS[0], [{"ts": t0 + pd.Timedelta(seconds=i), "symbol": FUT, "ltp": 24000.0, "bid": 23998.0, "ask": 24002.0}
+                                             for i in range(300)])
+    assert main(["spreads", "--from", str(DAYS[0]), "--to", str(DAYS[0]), "--lake", str(tmp_path / "lake"), "--store", str(tmp_path / "store"),
+                 "--force"]) == 0
+    tab = spreads.SpreadTable.load(spreads.table_path(tmp_path / "store", "NIFTY"))
+    assert tab.lookup("future", 24000.0, t0) == pytest.approx(2 / 24000)

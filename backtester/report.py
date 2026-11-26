@@ -21,7 +21,7 @@ import pandas as pd
 from backtester.engine import Result
 
 COLS = ["day", "symbol", "kind", "direction", "lots", "lot_size", "qty", "decided_at", "entry_at", "entry_price", "exit_at", "exit_price",
-        "exit_reason", "gross", "costs", "net", "score", "size_scale", "planned_risk"]
+        "exit_reason", "gross", "costs", "net", "score", "size_scale", "planned_risk", "entry_type", "entry_half_spread", "exit_half_spread"]
 
 
 def trades_frame(res: Result) -> pd.DataFrame:
@@ -69,6 +69,12 @@ def summary(res: Result) -> dict:
         out["exits"] = {k: int(v) for k, v in tr["exit_reason"].value_counts().items()}
         out["costs_share_of_gross"] = round(float(tr["costs"].sum() / abs(tr["gross"].sum())), 4) if tr["gross"].sum() else None
         out["by_tier"] = {f"{scale:g}": _stats(g) for scale, g in tr.groupby("size_scale")}
+    if len(tr):
+        spread_cost = float((tr["entry_price"] * tr["entry_half_spread"] / (1 + tr["direction"] * tr["entry_half_spread"]) * tr["qty"]).sum()
+                            + (tr["exit_price"] * tr["exit_half_spread"] / (1 - tr["direction"] * tr["exit_half_spread"]) * tr["qty"]).sum())
+        out["spread_paid"] = round(spread_cost, 2)                     # already inside gross (fill prices): shown so it can be compared with costs
+        out["entry_types"] = {k: int(v) for k, v in tr["entry_type"].value_counts().items()}
+    out["notes"] = list(getattr(res, "notes", []))
     out["skipped"] = len(res.skipped)
     if res.skipped:
         out["skipped_reasons"] = pd.Series([x["reason"].split(",")[0] for x in res.skipped]).value_counts().to_dict()
