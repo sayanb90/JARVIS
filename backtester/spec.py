@@ -35,8 +35,14 @@ A backtest strategy, written as a TOML file (SCRUM-217).  One file says what to 
   tiers = [{ min_score = 0.0, scale = 0.5 }, { min_score = 1.0, scale = 0.75 }, { min_score = 2.0, scale = 1.0 }]
 
   [fills]
-  half_spread_fut_bps = 1.0                  # paid on every fill, against us: futures in basis points of price
+  half_spread_fut_bps = 1.0                  # paid on every market fill, against us: futures in basis points of price
   half_spread_opt_pct = 0.5                  # options in percent of the premium
+  spread = "fixed"                           # or "measured": per fill from the tick era's quotes (python -m backtester spreads), these as fallback
+  spread_quantile = 0.5
+  entry = "market"                           # or "limit": limit_offset_pct better than the decision price, filled only when a bar trades through it
+  limit_offset_pct = 0.1
+  limit_ttl_minutes = 5
+  target_as_limit = false
 
 A condition reads one column of one signal, as known at the decision time (the signal's known_at), never later.
 """
@@ -128,8 +134,21 @@ class Risk:
 
 @dataclass
 class Fills:
-    half_spread_fut_bps: float = 1.0
+    half_spread_fut_bps: float = 1.0              # fixed half-spreads (and the fallback of a measured lookup with no bucket)
     half_spread_opt_pct: float = 0.5
+    spread: str = "fixed"                         # fixed | measured (backtester/spreads.py table, built from the tick era's quotes)
+    spread_quantile: float = 0.5                  # measured: 0.5 (median) or 0.75 (a cautious spread)
+    spread_table: Optional[str] = None            # measured: default <store>/reports/spreads-<underlying>.parquet
+    entry: str = "market"                         # market | limit
+    limit_offset_pct: float = 0.0                 # limit: this much better than the price at the decision (0.1 = 0.1 %)
+    limit_ttl_minutes: int = 5                    # limit: cancelled when no bar trades through it in this time
+    target_as_limit: bool = False                 # the take-profit rests as a limit order: filled at the target only when a bar trades through it
+
+    def __post_init__(self):
+        if self.spread not in ("fixed", "measured"):
+            raise ValueError("fills.spread must be fixed or measured")
+        if self.entry not in ("market", "limit"):
+            raise ValueError("fills.entry must be market or limit")
 
 
 @dataclass
