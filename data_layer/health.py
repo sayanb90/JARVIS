@@ -255,6 +255,17 @@ def check(now: datetime | None = None, after_close: bool = False, probe: bool = 
     else:
         r.line("WARN", "no logs/scheduler.log yet (cron not run)")
 
+    # the installed crontab: every job wrapped (or the Jobs tab cannot see it) and in step with deploy/crontab (SCRUM-219)
+    try:
+        from data_layer import cronwrap, jobrun
+        text = jobrun.installed_crontab()
+        if text is not None:
+            rep = cronwrap.check(text, cronwrap.template_text(root))
+            r.line("WARN" if rep.drift else "PASS", "crontab: " + ("; ".join(rep.lines()) if rep.drift else "every job wrapped, same jobs and schedules as "
+                   "deploy/crontab") + (" (fix: python -m data_layer.jobrun wrap --add-missing, review, install)" if rep.drift else ""))
+    except Exception as exc:                                          # noqa: BLE001 -- a check of the crontab must not break the report
+        r.line("WARN", f"crontab check failed: {exc!r}")
+
     # token
     tok = os.getenv("UPSTOX_FEED_TOKEN") or os.getenv("UPSTOX_ACCESS_TOKEN")
     r.line("PASS" if tok else "WARN", "Upstox token present in the environment" if tok else
