@@ -30,6 +30,11 @@ The long-form architecture, the signal reference and the go-live plan live in No
 - The signal store defaults to `/srv/jarvis-research/store`, which exists only after the root-run `deploy/research/setup.sh`. Where that has not been run, set `JARVIS_SIGNAL_STORE` (crontab and service env) to a folder the service user owns. The viewer and `data_layer.storage` read the same variable.
 - The release's test stage needs a temp dir on the real disk and a SHORT one: `/tmp` is a 7.9 GB tmpfs (the snapshot test wants 20 GB free), and ZeroMQ ipc socket paths are limited to 107 characters. Use `TMPDIR=/var/tmp/pt` (not `~/pytest-tmp`).
 - `git pull` first, then `deploy/release.sh` (the script only exists after the pull). Run it in tmux; the tests take about 25 minutes. The `RELEASE_EXIT_CODE` printed after `| tee` is tee's, not the script's: read the script's own final line.
+- A cron job is added in two places, or it is not tracked (27 Nov 2026: the VPS's installed crontab had no wrapped line, so all 33 jobs showed
+  "untracked" and "need attention" could never rise above 0). (1) In `deploy/crontab`, wrapped: `cd $JARVIS && python -m data_layer.jobrun run
+  <name> --shell '...'` (a test fails on an unwrapped template line). (2) On the VPS, never by hand-editing the line: `crontab -l > backup`,
+  `python -m data_layer.jobrun wrap --add-missing > new` (add `--template-schedules` when the template's times changed), read
+  `diff backup new`, `crontab new`, then `python -m data_layer.jobrun check` must exit 0. The daily health report warns on any drift.
 - Never run `deploy/data-backfill.sh --apply` without `--only`: its signals step loads a month of ticks into memory.
 - Heavy jobs (backfills, replays, `check-day` on big days, `signals run` over history) never run between 03:40 and 10:05 UTC. The box has 4 cores and 16 GB; the feeds and engines need 1-2 cores and 3-5 GB.
 - Before a market session, after any deploy: processes running (feed, viewer, F&O shards, both engines, paper trader), `python -m signals watch --once` shows fresh heartbeats, today's `lake/ticks/segment=fo/date=...` exists, `<store>/live/date=...` has rows. A health check that reports zero errors because nothing ran is not a pass.

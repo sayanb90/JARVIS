@@ -5,6 +5,7 @@ Job heartbeat (SCRUM-142): record when every cron job started, ended and how it 
   python -m data_layer.jobrun run NAME --shell 'a && b'      # the same for a shell line (chains with && or |)
   python -m data_layer.jobrun status [--json]                # every job of deploy/crontab and its state now
   python -m data_layer.jobrun start NAME | stop NAME [--force]   # run a crontab job now / stop its running process (SCRUM-204)
+  python -m data_layer.jobrun wrap [--add-missing] [--template-schedules] | check   # the installed crontab wrapped / its drift (SCRUM-219)
 
 Why: cron says nothing when a job fails or never starts.  Wrapping the command in `jobrun run` leaves one line at the start and one at
 the end in logs/jobs/runs.jsonl (append-only, one small write each, so concurrent jobs cannot garble it).  The child's output and exit
@@ -519,7 +520,29 @@ def main(argv: list[str] | None = None) -> int:
         if c == "stop":
             x.add_argument("--force", action="store_true", help="SIGKILL instead of SIGTERM")
     sub.add_parser("compact", help=f"drop records older than {KEEP_DAYS} days")
+    w = sub.add_parser("wrap", help="print the installed crontab with every job line wrapped (never writes a crontab; data_layer/cronwrap.py)")
+    w.add_argument("--file", default=None, help="a crontab file instead of the installed one (crontab -l)")
+    w.add_argument("--add-missing", action="store_true", help="append deploy/crontab's jobs that are not installed")
+    w.add_argument("--template-schedules", action="store_true", help="take deploy/crontab's schedule for a matched job")
+    k = sub.add_parser("check", help="drift between the installed crontab and deploy/crontab; exit 1 on drift")
+    k.add_argument("--file", default=None)
     a = ap.parse_args(argv)
+    if a.cmd in ("wrap", "check"):
+        from data_layer import cronwrap
+        text = Path(a.file).read_text() if a.file else installed_crontab()
+        if text is None:
+            print("no installed crontab (crontab -l printed nothing)", file=sys.stderr)
+            return 2
+        if a.cmd == "wrap":
+            out, rep = cronwrap.wrap(text, cronwrap.template_text(), a.add_missing, a.template_schedules)
+            sys.stdout.write(out)
+            for line in rep.lines():
+                print(line, file=sys.stderr)
+            return 0
+        rep = cronwrap.check(text, cronwrap.template_text())
+        for line in rep.lines() or ["no drift: every job wrapped, same jobs and schedules as deploy/crontab"]:
+            print(line)
+        return 1 if rep.drift else 0
     if a.cmd == "run":
         cmd = a.command[1:] if a.command[:1] == ["--"] else a.command            # argparse keeps or drops the "--"
         if not (cmd or a.shell):

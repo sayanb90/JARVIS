@@ -1,6 +1,9 @@
 # JARVIS cron jobs for the `jarvis` user.  Install:  crontab deploy/crontab      (server clock must be UTC)
 # Times are UTC.  NSE session is 03:45-10:00; the equity live feed runs as the jarvis-feed service, not from
 # cron.  The futures/options feed (below) runs once a day from cron instead, by design -- see section 17.
+# Every job line is wrapped (python -m data_layer.jobrun run NAME --shell '...') so the Jobs tab can track it.  To bring the VPS's installed crontab
+# in step after adding or changing a job here: python -m data_layer.jobrun wrap --add-missing [--template-schedules] > new; diff; crontab new;
+# python -m data_layer.jobrun check (SCRUM-219, AGENTS.md).
 # Every job line below runs through `python -m data_layer.jobrun run NAME --shell '...'` (SCRUM-142): it records start, end and exit code in
 # logs/jobs/runs.jsonl and passes the exit code through, so the Jobs tab of /admin can show running, failed, late or never-started jobs.
 # Keep new lines in this form (the log redirect stays inside the quotes).
